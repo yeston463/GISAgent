@@ -10,7 +10,7 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-
+import dev.langchain4j.data.document.parser.apache.pdfbox.ApachePdfBoxDocumentParser;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
@@ -37,21 +37,23 @@ public class KnowledgeService {
                 return Metadata.from("file_name", file.getOriginalFilename());
             }
         };
-        DocumentParser parser = new TextDocumentParser();
-        if (file.getOriginalFilename().endsWith(".pdf")) {
-            // parser = new ApachePdfDocumentParser(); // 需要引入 langchain4j-document-parser-apache-pdf
-        }
+        DocumentParser parser = file.getOriginalFilename().endsWith(".pdf")
+                ? new ApachePdfBoxDocumentParser()
+                : new TextDocumentParser();
 
         // 3. 加载文档
         Document document = DocumentLoader.load(source, parser);
         // 2. 切分文档 (每块 500 字，重叠 50 字保持上下文)
         DocumentSplitter splitter = DocumentSplitters.recursive(500, 50);
         List<TextSegment> segments = splitter.split(document);
-
+        String fileName = file.getOriginalFilename();
+        for (TextSegment segment : segments) {
+            segment.metadata().put("file_name", fileName);
+        }
         // 3. 向量化并存储
         List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
         embeddingStore.addAll(embeddings, segments);
-        String fileName = file.getOriginalFilename();
+
         System.out.println("已向量化并保存 " + fileName + " 的 " + segments.size() + " 段内容。");
     }
 }

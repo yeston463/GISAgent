@@ -37,52 +37,79 @@ public class pyGisTools {
             String geoJson = restTemplate.postForObject("http://127.0.0.1:8000/analysis/buffer", payload, String.class);
 
             // 关键：这里返回的 JSON 必须是前端 renderAnalysisResult 能识别的
-            return "{\"action\": \"renderAnalysisResult\", \"params\": {\"geoJson\": " + geoJson + "}}";
+            return """
+{
+  "status": "success",
+  "geoJson": %s
+}
+""".formatted(geoJson);
         } catch (Exception e) {
             return "计算失败: " + e.getMessage();
         }
     }
+    @Tool("getScreenBuildings")
+    public Map<String, Object> getScreenBuildings() {
+        Map<String, Object> res = new HashMap<>();
+        res.put("status", "need_frontend");
+        res.put("action", "getScreenBuildings");
+        res.put("message", "请等待前端完成几何抓取和上传");
+        return res;
+    }
+    @Tool("analyzeCurrentView")
+    public Map<String, Object> analyzeCurrentView() {
+        // 1. 从 ContextService 拿到刚才前端上传的 GeoJSON
+        String geoJson = contextService.getGeoJson();
 
+        if (geoJson == null || geoJson.isEmpty()) {
+            return Map.of("status", "Fail", "message", "内存中无建筑，请先同步数据", "far", 0);
+        }
+
+        // 2. 将数据发给 Python 算子（确保是 POST 且带了 body）
+        try {
+            String result = restTemplate.postForObject(
+                    "http://127.0.0.1:8000/analysis/urban_metrics",
+                    JSON.parseObject(geoJson), // 发送完整的上下文
+                    String.class
+            );
+            return JSON.parseObject(result);
+        } catch (Exception e) {
+            return Map.of("status", "Error", "message", "Python引擎响应异常");
+        }
+    }
     @Tool("calculateUrbanMetrics")
-    public String calculateUrbanMetrics(@P("AOI数据的GeoJSON") String aoiGeoJson) {
-        System.out.println("\n🔥 [核心动作] 启动 Python 空间引擎...");
+    public Map<String, Object> calculateUrbanMetrics(@P("AOI数据的GeoJSON") String aoiGeoJson) {
+
         try {
             String rawContext = contextService.getGeoJson();
-            if (rawContext == null || rawContext.isEmpty()) {
-                return "{\"status\":\"error\", \"message\":\"请先执行 getScreenBuildings 抓取数据\"}";
+            if (rawContext == null) {
+                return Map.of("status", "error", "message", "无数据");
             }
 
             JSONObject contextObj = JSON.parseObject(rawContext);
-            if (!contextObj.containsKey("buildings") || contextObj.getJSONObject("buildings").getJSONArray("features").isEmpty()) {
-                System.err.println("⚠️ 警告：AI 试图跳过数据抓取直接计算");
-                return "{\"status\":\"error\", \"message\":\"当前内存中没有建筑要素。请先执行 getScreenBuildings 工具。\"}";
-            }
+
             Map<String, Object> payload = new HashMap<>();
             payload.put("buildings", contextObj.getJSONObject("buildings"));
-            // 自动补全红线
-            Object aoi = (contextObj.get("aoi") != null) ? contextObj.get("aoi") : JSON.parse(aoiGeoJson);
-            payload.put("aoi", aoi);
+            payload.put("aoi", contextObj.get("aoi"));
 
-            String result = restTemplate.postForObject(PYTHON_SERVICE_URL + "/urban_metrics", payload, String.class);
-            System.out.println("✅ 计算结果已回传: " + result);
+            String result = restTemplate.postForObject(
+                    "http://127.0.0.1:8000/analysis/urban_metrics",
+                    payload,
+                    String.class
+            );
 
-            // 👈 核心改进：直接返回 JSON。不要在这里指挥 AI 调下一个工具。
-            // AI 会在 SystemMessage 的约束下自动去调用 openAnalysisDashboard。
-            return result + "\n[请据此数据立即调用 openAnalysisDashboard 展示可视化面板]";
+            JSONObject json = JSON.parseObject(result);
+
+            // 👇 关键：转成 Map 返回
+            return json.getInnerMap();
 
         } catch (Exception e) {
-            return "{\"status\":\"error\", \"message\":\"连接引擎失败\"}";
+            return Map.of("status", "error");
         }
     }
-    @Tool("getScreenBuildings")
-    public String getScreenBuildings() {
-        // 告知 AI 发起前端动作
-        // 注意：这里我们返回一个结构化字符串，引导 AI 使用 commands
-        return "{\"action\": \"getScreenBuildings\", \"status\": \"ready\", \"message\": \"请下达 getScreenBuildings 指令给前端以同步数据。\"}";
-    }
-    @Tool("openAnalysisDashboard")
-    public String openAnalysisDashboard(@P("结果数据") String resultData) {
-        System.out.println("📊 [指令] 触发图表弹出");
-        return "{\"action\": \"openAnalysisDashboard\", \"params\": " + resultData + "}";
+
+
+    @Tool("formatAnalysisResult")
+    public String formatAnalysisResult(String resultData) {
+        return resultData;
     }
 }
