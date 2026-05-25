@@ -1,0 +1,1 @@
+import{b as l}from"./index-BfvqvWBu.js";import{c as r}from"./index-CvNg61sS.js";const c=l((o,e)=>(e.onLoaded(()=>{const t=o.el;o.listenOn(t.childElem,"calciteFlowItemClose",()=>{o.arcgisClose.emit(),o.autoDestroyDisabled||o.destroy()})}),r()));export{c as a};

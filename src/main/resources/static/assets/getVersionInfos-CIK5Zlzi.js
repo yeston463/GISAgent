@@ -1,0 +1,1 @@
+import{cl as p,cm as d,cn as v,c5 as $}from"./index-CvNg61sS.js";async function I(o,s,e){const n=p(o),r=s.toJSON(),a=d(n.query,{query:v({...r,f:"json"}),...e,authMode:"no-prompt"}),t=`${n.path}/versionInfos`,{data:i}=await $(t,a);return i.versions.map(u=>{const{versionName:f,versionGuid:c,...m}=u;return{...m,versionIdentifier:{name:f,guid:c}}})}export{I as getVersionInfos};

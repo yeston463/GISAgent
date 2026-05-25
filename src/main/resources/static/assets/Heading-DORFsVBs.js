@@ -1,0 +1,1 @@
+import{ah as l,aP as s,ai as o,aQ as c}from"./index-CvNg61sS.js";function h({level:a,class:n,...i},t){const e=r(a);return l(`h${e}`,{...i,"aria-level":String(e),class:s(o.heading,n),role:"heading"},t)}function r(a){return c(Math.ceil(a),1,6)}function f(a,n=1){return r(a+n)}export{h as i,f as l};

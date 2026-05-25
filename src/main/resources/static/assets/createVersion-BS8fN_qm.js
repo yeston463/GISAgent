@@ -1,0 +1,1 @@
+import{cl as d,cm as f,cn as p,c5 as v}from"./index-CvNg61sS.js";async function h(a,o,t){const e=d(a),i=o.toJSON(),n=f(e.query,{query:p({...i,f:"json"}),...t,authMode:"immediate",method:"post"}),r=`${e.path}/create`,{data:s}=await v(r,n),{versionName:c,versionGuid:m,...u}=s.versionInfo;return{...u,versionIdentifier:{name:c,guid:m}}}export{h as createVersion};

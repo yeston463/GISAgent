@@ -1,0 +1,1 @@
+import{i}from"./keyed-D6UDuBxB.js";import{s as l,i as m,u as t}from"./static-BECvnm7A.js";import{s as o}from"./index-CvNg61sS.js";const n=({children:e,...a})=>{const s=a.level?l(`h${a.level}`):m`div`;return i(a.key,t`<${s} class=${o(a.class)}>${e}</${s}>`)};export{n as H};

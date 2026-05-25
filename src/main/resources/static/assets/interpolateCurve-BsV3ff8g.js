@@ -1,0 +1,1 @@
+import{d9 as i,da as o,db as f,dc as c,dd as n,de as t,df as h,dg as m,dh as b,di as g}from"./index-CvNg61sS.js";function l(s,r,d){if(i(r))return[s[0]+d*(r[0]-s[0]),s[1]+d*(r[1]-s[1])];if(o(r))return f(s,r,d);if(c(r)){const a=n(s,r);return t(a,d)}if(h(r)){const a=m(s,r);return t(a,d)}const e=b(s,r);return g(e,d)}export{l as n};

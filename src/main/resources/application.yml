@@ -5,18 +5,21 @@ spring:
     redis:
       host: localhost
       port: 6379
+  servlet:
+    multipart:
+      max-file-size: 100MB
 
 langchain4j:
   open-ai:
     chat-model:
       api-key: ${QWEN-APIKEY}
-      model-name: qwen-max
+      model-name: qwen-turbo
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
       log-requests: true
       log-responses: true
     streaming-chat-model:
       api-key: ${QWEN-APIKEY}
-      model-name: qwen-max
+      model-name: qwen-turbo
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
       log-requests: true
       log-responses: true
@@ -30,3 +33,4 @@ logging:
   level:
     dev.langchain4j: debug
     dev.ai4j.openai4j: debug
+

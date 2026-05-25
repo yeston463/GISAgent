@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "height": 50, "floors": 15, "name": "天安门周边建筑A" },
+      "geometry": { "type": "Polygon", "coordinates": [[[116.388, 39.918], [116.389, 39.918], [116.389, 39.919], [116.388, 39.919], [116.388, 39.918]]] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "height": 80, "floors": 24, "name": "商业大厦B" },
+      "geometry": { "type": "Polygon", "coordinates": [[[116.390, 39.918], [116.391, 39.918], [116.391, 39.919], [116.390, 39.919], [116.390, 39.918]]] }
+    }
+  ]
+}

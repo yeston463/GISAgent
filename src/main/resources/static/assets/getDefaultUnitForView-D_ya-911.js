@@ -1,0 +1,1 @@
+import{aa as n,ab as i}from"./index-CvNg61sS.js";function o(e){const t="metric";if(!e)return t;const{map:r}=e,a=(r&&"portalItem"in r?r.portalItem?.portal:null)??n.getDefault();switch(a.user?.units??a.units){case t:return t;case"english":return"imperial"}return i(e.spatialReference)??t}export{o as e};

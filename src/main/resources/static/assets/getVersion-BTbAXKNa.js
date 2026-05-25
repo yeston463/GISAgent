@@ -1,0 +1,1 @@
+import{cl as f,cm as m,cn as d,bi as p,c5 as v}from"./index-CvNg61sS.js";async function y(e,s,i){const a=f(e),r=m(a.query,{query:d({f:"json"}),...i});s.startsWith("{")&&(s=s.slice(1,-1));const t=p(a.path,"versions",s),{data:o}=await v(t,r),{versionName:n,versionGuid:c,...u}=o;return{...u,versionIdentifier:{name:n,guid:c}}}export{y as getVersion};
