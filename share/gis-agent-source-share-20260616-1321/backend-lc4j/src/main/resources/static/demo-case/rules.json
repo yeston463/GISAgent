@@ -1,0 +1,14 @@
+﻿{
+  "ruleSetId": "demo-r2-01",
+  "city": "上海市",
+  "landUse": "R2",
+  "landUseName": "二类居住用地",
+  "effective": false,
+  "source": "比赛演示规则，正式使用前必须替换为项目所在地现行法定规划文件",
+  "rules": {
+    "far": {"max": 2.0, "unit": ""},
+    "buildingDensity": {"max": 30.0, "unit": "%"},
+    "buildingHeight": {"max": 54.0, "unit": "m"},
+    "greenRate": {"min": 30.0, "unit": "%"}
+  }
+}

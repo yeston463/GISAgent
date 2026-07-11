@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地理空间系统架构 - 全栈增强版</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
+    <style>
+        :root {
+            --border: 3px solid #000;
+            --padding-base: 25px;
+        }
+
+        body {
+            background-color: #fff;
+            color: #000;
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .table-container {
+            width: 100%;
+            max-width: 1550px;
+            border-collapse: collapse;
+            display: table;
+        }
+
+        /* 表头 */
+        .table-header {
+            display: table-row;
+            background: #000;
+            color: #fff;
+            text-align: center;
+            font-weight: 900;
+            font-size: 1.6rem;
+        }
+
+        .header-cell {
+            display: table-cell;
+            padding: 25px;
+            border: var(--border);
+        }
+
+        /* 每一行布局 */
+        .row {
+            display: table-row;
+        }
+
+        .cell {
+            display: table-cell;
+            border: var(--border);
+            vertical-align: middle;
+            padding: var(--padding-base);
+        }
+
+        /* 第一列：层级别 */
+        .layer-name {
+            width: 150px;
+            text-align: center;
+            font-size: 1.6rem;
+            font-weight: 900;
+            background-color: #f4f4f4;
+        }
+
+        /* 第二列：组件/技术内容 */
+        .tech-content {
+            width: 60%;
+            text-align: center;
+        }
+
+        .tech-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        /* 技术卡片盒子 */
+        .tech-box {
+            border: 2px solid #000;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            min-width: 150px;
+        }
+
+        .tech-box span.iconify, .tech-box i {
+            font-size: 60px;
+        }
+
+        .tech-text {
+            font-weight: bold;
+            font-size: 1rem;
+        }
+
+        /* 第三列：功能描述 */
+        .desc-content {
+            width: 25%;
+            font-size: 1.15rem;
+            line-height: 1.7;
+            padding-left: 35px;
+            color: #000;
+        }
+
+        /* 特体盒子：双引擎 */
+        .engine-container {
+            display: flex;
+            justify-content: space-around;
+            width: 100%;
+            gap: 20px;
+        }
+
+        .engine-item {
+            flex: 1;
+            border: 3px solid #000;
+            padding: 25px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        .engine-label {
+            text-align: left;
+        }
+
+        .engine-title {
+            font-size: 1.5rem;
+            font-weight: 900;
+        }
+
+        .engine-subtitle {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+    </style>
+</head>
+<body>
+
+<div class="table-container">
+    <!-- 表头 -->
+    <div class="table-header">
+        <div class="header-cell">层级别</div>
+        <div class="header-cell">组件 / 技术</div>
+        <div class="header-cell">功能</div>
+    </div>
+
+    <!-- 1. 表现层 -->
+    <div class="row">
+        <div class="cell layer-name">表现层</div>
+        <div class="cell tech-content">
+            <div class="tech-grid">
+                <div class="tech-box">
+                    <span class="iconify" data-icon="logos:vue"></span>
+                    <div class="tech-text">Vue 3 + Vite</div>
+                </div>
+                <div class="tech-box">
+                    <span class="iconify" data-icon="logos:element-ui"></span>
+                    <div class="tech-text">Element Plus</div>
+                </div>
+                <div class="tech-box">
+                    <i class="fa-solid fa-map-location-dot"></i>
+                    <div class="tech-text">ArcGIS JS API</div>
+                </div>
+                <div class="tech-box">
+                    <span class="iconify" data-icon="logos:echarts"></span>
+                    <div class="tech-text">ECharts / Three.js</div>
+                </div>
+            </div>
+        </div>
+        <div class="cell desc-content">
+            多端自适应交互前端、地图服务渲染、3D地理场景展示
+        </div>
+    </div>
+
+    <!-- 2. 传输层 -->
+    <div class="row">
+        <div class="cell layer-name">传输层</div>
+        <div class="cell tech-content">
+            <div class="tech-grid">
+                <div class="engine-item" style="border-width: 2px;">
+                    <span class="iconify" data-icon="logos:axios" style="font-size: 40px;"></span>
+                    <div class="engine-label">
+                        <div style="font-weight:bold;">Axios 请求管理</div>
+                    </div>
+                </div>
+                <div class="engine-item" style="border-width: 2px; background: #000; color: #fff;">
+                    <span class="iconify" data-icon="logos:nginx" style="filter: brightness(0) invert(1); font-size: 40px;"></span>
+                    <div class="engine-label">
+                        <div style="font-weight:bold;">Nginx 负载均衡</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="cell desc-content">
+            RESTful API 路由转发、接口权限校验、反向代理与流量分发
+        </div>
+    </div>
+
+    <!-- 3. 业务层 (双引擎) -->
+    <div class="row">
+        <div class="cell layer-name">业务层</div>
+        <div class="cell tech-content">
+            <div class="engine-container">
+                <!-- SpringBoot Engine -->
+                <div class="engine-item">
+                    <span class="iconify" data-icon="logos:spring-icon" style="font-size: 60px;"></span>
+                    <div class="engine-label">
+                        <div class="engine-title">SpringBoot</div>
+                        <div class="engine-subtitle">主业务逻辑 / 事务管理 / Java</div>
+                    </div>
+                </div>
+                <!-- FastAPI Engine -->
+                <div class="engine-item">
+                    <span class="iconify" data-icon="logos:fastapi-icon" style="font-size: 60px;"></span>
+                    <div class="engine-label">
+                        <div class="engine-title">FastAPI</div>
+                        <div class="engine-subtitle">空间计算 / ArcPy 调度 / Python</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="cell desc-content">
+            核心逻辑处理：Spring 管理微服务调度，FastAPI 执行高性能空间算法与脚本调度
+        </div>
+    </div>
+
+    <!-- 4. 服务层 -->
+    <div class="row">
+        <div class="cell layer-name">服务层</div>
+        <div class="cell tech-content">
+            <div class="tech-grid">
+                <div class="engine-item" style="width: 45%;">
+                    <i class="fa-solid fa-server" style="font-size: 40px;"></i>
+                    <div class="engine-label"><b>ArcGIS Server</b></div>
+                </div>
+                <div class="engine-item" style="width: 45%;">
+                    <i class="fa-solid fa-microchip" style="font-size: 40px;"></i>
+                    <div class="engine-label"><b>GeoScene 分析引擎</b></div>
+                </div>
+            </div>
+        </div>
+        <div class="cell desc-content">
+            提供地图切片、GP 空间分析工具、地理编码及实时流处理
+        </div>
+    </div>
+
+    <!-- 5. 数据层 -->
+    <div class="row">
+        <div class="cell layer-name">数据层</div>
+        <div class="cell tech-content">
+            <div class="tech-grid">
+                <div class="tech-box">
+                    <span class="iconify" data-icon="logos:postgresql"></span>
+                    <div class="tech-text">PostGIS</div>
+                </div>
+                <div class="tech-box">
+                    <span class="iconify" data-icon="logos:redis"></span>
+                    <div class="tech-text">Redis 缓存</div>
+                </div>
+                <div class="tech-box">
+                    <i class="fa-solid fa-file-shield"></i>
+                    <div class="tech-text">SDE 数据源</div>
+                </div>
+            </div>
+        </div>
+        <div class="cell desc-content">
+            地理空间数据库持久化、分布式缓存、多源文件数据管理
+        </div>
+    </div>
+
+</div>
+
+</body>
+</html>
