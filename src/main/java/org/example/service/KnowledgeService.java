@@ -18,13 +18,12 @@ import java.util.List;
 @Service
 public class KnowledgeService {
     @Autowired
-    private EmbeddingModel embeddingModel; // 阿里云 DashScope 或 OpenAI 的嵌入模型
+    private EmbeddingModel embeddingModel;
 
     @Autowired
-    private EmbeddingStore<TextSegment> embeddingStore; // 指向 pgvector
+    private EmbeddingStore<TextSegment> embeddingStore;
 
     public void ingestDocument(MultipartFile file) throws IOException {
-        // 1. 加载文档 (支持 PDF/Text/Markdown)
         DocumentSource source = new DocumentSource() {
             @Override
             public InputStream inputStream() throws IOException {
@@ -33,7 +32,6 @@ public class KnowledgeService {
 
             @Override
             public Metadata metadata() {
-                // 将文件名存入元数据，方便 AI 溯源
                 return Metadata.from("file_name", file.getOriginalFilename());
             }
         };
@@ -41,19 +39,52 @@ public class KnowledgeService {
                 ? new ApachePdfBoxDocumentParser()
                 : new TextDocumentParser();
 
-        // 3. 加载文档
         Document document = DocumentLoader.load(source, parser);
-        // 2. 切分文档 (每块 500 字，重叠 50 字保持上下文)
         DocumentSplitter splitter = DocumentSplitters.recursive(500, 50);
         List<TextSegment> segments = splitter.split(document);
         String fileName = file.getOriginalFilename();
         for (TextSegment segment : segments) {
             segment.metadata().put("file_name", fileName);
         }
-        // 3. 向量化并存储
         List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
         embeddingStore.addAll(embeddings, segments);
 
         System.out.println("已向量化并保存 " + fileName + " 的 " + segments.size() + " 段内容。");
+    }
+
+    /**
+     * 检索知识库
+     */
+    public String search(String query, int maxResults) {
+        try {
+            Embedding queryEmbedding = embeddingModel.embed(query).content();
+            List<dev.langchain4j.store.embedding.EmbeddingMatch<TextSegment>> matches = 
+                embeddingStore.findRelevant(queryEmbedding, maxResults, 0.5);
+            
+            if (matches.isEmpty()) {
+                return "未找到相关知识库内容";
+            }
+            
+            StringBuilder result = new StringBuilder();
+            result.append("检索到 ").append(matches.size()).append(" 条相关内容：\n");
+            
+            for (int i = 0; i < matches.size(); i++) {
+                var match = matches.get(i);
+                TextSegment segment = match.embedded();
+                double score = match.score();
+                String fileName = segment.metadata().getString("file_name");
+                
+                result.append("\n").append(i + 1).append(". ");
+                if (fileName != null) {
+                    result.append("【").append(fileName).append("】");
+                }
+                result.append(" (相关度: ").append(String.format("%.2f", score)).append(")\n");
+                result.append(segment.text());
+            }
+            
+            return result.toString();
+        } catch (Exception e) {
+            return "知识库检索失败: " + e.getMessage();
+        }
     }
 }

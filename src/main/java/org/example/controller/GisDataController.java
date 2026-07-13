@@ -29,12 +29,22 @@ public class GisDataController {
         contextService.saveGeoJson(JSON.toJSONString(body));
 
         // 🔥 直接调用 Python
+        if (!body.containsKey("buildings")) {
+            return Map.of(
+                    "status", "ContextSaved",
+                    "contextSaved", true,
+                    "hasAoi", body.containsKey("aoi"),
+                    "message", "AOI context saved. Building acquisition will run through analyzeCurrentView."
+            );
+        }
+
         String result = restTemplate.postForObject(
                 "http://127.0.0.1:8000/analysis/urban_metrics",
                 body,
                 String.class
         );
-
-        return JSON.parseObject(result);
+        Map<String, Object> response = JSON.parseObject(result);
+        response.put("contextSaved", true);
+        return response;
     }
 }
