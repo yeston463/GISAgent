@@ -3,6 +3,7 @@ import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
 
 export default defineConfig({
   plugins: [
@@ -13,16 +14,34 @@ export default defineConfig({
     Components({
       resolvers: [ElementPlusResolver()],
     }),
+    viteStaticCopy({
+      targets: [
+        {
+          src: 'node_modules/@arcgis/core/assets/*',
+          dest: 'assets',
+        },
+      ],
+    }),
   ],
-  // 【添加以下 server 配置】
   server: {
+    host: '127.0.0.1',
+    port: 7173,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080', // 确保你的 Spring Boot 运行在 8080 端口
+        target: 'http://127.0.0.1:8080',
         changeOrigin: true,
-        // 如果后端接口里包含了 /api，则不需要 rewrite
-        // 你的 Controller 路径是 /api/knowledge/upload，所以这里保持原样即可
-      }
-    }
-  }
+      },
+      '/analysis': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+    },
+  },
+  optimizeDeps: {
+    exclude: ['@arcgis/core', '@arcgis/map-components', '@esri/calcite-components'],
+  },
+  build: {
+    chunkSizeWarningLimit: 1500,
+  },
 })

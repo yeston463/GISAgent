@@ -110,6 +110,29 @@
             <artifactId>fastjson</artifactId>
             <version>2.0.32</version>
         </dependency>
+
+        <!-- 9. PostgreSQL + pgvector -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- 10. GraalJS 动态代码执行支持 -->
+        <dependency>
+            <groupId>org.graalvm.js</groupId>
+            <artifactId>js</artifactId>
+            <version>23.0.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.graalvm.js</groupId>
+            <artifactId>js-scriptengine</artifactId>
+            <version>23.0.1</version>
+        </dependency>
     </dependencies>
 
     <!-- 保留中央仓库，作为阿里云镜像的补充 -->
@@ -126,6 +149,7 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
+                    <mainClass>org.example.Lc4j1Application</mainClass>
                     <excludes>
                         <exclude>
                             <groupId>org.projectlombok</groupId>

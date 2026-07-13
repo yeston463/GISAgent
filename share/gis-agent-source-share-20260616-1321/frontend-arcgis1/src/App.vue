@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="app-container">
     <!-- 1. 地理底座 -->
     <MapViewer @map-ready="handleMapReady" />
@@ -10,6 +10,7 @@
     <ChatAgent :mapView="mainView" />
 
     <AnalysisDashboard :data="chartData"/>
+    <CityEngineResultViewer />
   </div>
 </template>
 
@@ -19,6 +20,7 @@ import MapViewer from './components/MapViewer.vue';
 import ChatAgent from './components/ChatAgent.vue';
 import KnowledgeManager from './components/KnowledgeManager.vue';
 import AnalysisDashboard from "./components/AnalysisDashboard.vue";
+import CityEngineResultViewer from "./components/CityEngineResultViewer.vue";
 
 const mainView = ref(null);
 const chartData = ref({});

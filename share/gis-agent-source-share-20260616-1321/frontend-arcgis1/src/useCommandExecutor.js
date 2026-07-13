@@ -1,4 +1,4 @@
-import Graphic from "@arcgis/core/Graphic";
+﻿import Graphic from "@arcgis/core/Graphic";
 import Point from "@arcgis/core/geometry/Point";
 import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import axios from "axios";
@@ -168,8 +168,11 @@ export function useCommandExecutor(viewRef) {
           // 优先使用实际几何 rings（精准 footprint）
           let coords;
           if (g.rings) {
-            // 已经是 Polygon，直接用 rings
-            coords = g.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]));
+            const geographicGeometry = g.spatialReference?.isWGS84
+              ? g
+              : webMercatorUtils.webMercatorToGeographic(g);
+            if (!geographicGeometry?.rings) return null;
+            coords = geographicGeometry.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]));
           } else if (g.extent) {
             // 降级：用 extent 构建包围盒
             const geoExt = g.extent;
@@ -208,10 +211,13 @@ export function useCommandExecutor(viewRef) {
         const bufferGeom = window.lastBufferGeometry;
         let aoiGeometry;
         if (bufferGeom && bufferGeom.rings) {
-          // 圆形缓冲区 → 直接用 rings（已在 WGS84）
+          const geographicAoi = bufferGeom.spatialReference?.isWGS84
+            ? bufferGeom
+            : webMercatorUtils.webMercatorToGeographic(bufferGeom);
+          if (!geographicAoi?.rings) throw new Error("无法将 AOI 转换为 WGS84");
           aoiGeometry = {
             type: "Polygon",
-            coordinates: bufferGeom.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]))
+            coordinates: geographicAoi.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]))
           };
         } else {
           // 降级：用 extent 矩形
@@ -594,15 +600,18 @@ export function useCommandExecutor(viewRef) {
 
   // 执行器主循环
   const execute = async (commandArray) => {
-    if (!commandArray || !Array.isArray(commandArray)) return;
+    if (!commandArray || !Array.isArray(commandArray)) return undefined;
+    let lastResult;
     for (const cmd of commandArray) {
       const actionName = cmd.action;
       if (actions[actionName]) {
         console.log(`[智能体指令] 执行动作: ${actionName}`, cmd.params);
-        await actions[actionName](cmd.params || cmd);
+        lastResult = await actions[actionName](cmd.params || cmd);
       }
     }
+    return lastResult;
   };
 
   return { execute };
 }
+

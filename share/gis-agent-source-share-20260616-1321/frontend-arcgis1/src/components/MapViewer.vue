@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="gis-container">
     <!-- 地图容器 -->
     <div id="viewDiv" ref="mapElement"></div>
@@ -22,6 +22,7 @@ import esriConfig from "@arcgis/core/config";
 import GraphicsLayer from "@arcgis/core/layers/GraphicsLayer";
 import Sketch from "@arcgis/core/widgets/Sketch";
 import axios from "axios";
+import * as webMercatorUtils from "@arcgis/core/geometry/support/webMercatorUtils.js";
 // 修改这一行
 import * as intl from "@arcgis/core/intl";
 
@@ -152,14 +153,18 @@ onMounted(async () => {
       window.lastBufferGeometry = geometry;
       console.log("💾 红线几何已保存到全局变量");
 
-      // 2. 转换并同步 (保持你原有的逻辑)
+      // GeoJSON 必须使用 WGS84 经纬度，不能直接上传 Web Mercator 米制坐标
+      const wgs84Geometry = geometry.spatialReference?.isWGS84
+        ? geometry
+        : webMercatorUtils.webMercatorToGeographic(geometry);
+      if (!wgs84Geometry?.rings) throw new Error("无法将绘制 AOI 转换为 WGS84 GeoJSON");
       const aoiGeoJson = {
         type: "Feature",
         geometry: {
           type: "Polygon",
-          coordinates: geometry.rings
+          coordinates: wgs84Geometry.rings
         },
-        properties: { source: "manual_draw", timestamp: Date.now() } // 加入时间戳
+        properties: { source: "manual_draw", timestamp: Date.now(), spatialReference: "EPSG:4326" }
       };
 
       console.log("📍 手动红线已就绪，正在同步至智能体上下文...");
@@ -305,3 +310,4 @@ onUnmounted(() => {
   outline: none !important;
 }
 </style>
+

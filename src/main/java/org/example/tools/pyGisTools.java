@@ -5,10 +5,14 @@ import com.alibaba.fastjson.JSONObject;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import org.example.service.GisContextService;
+import org.example.service.KnowledgeService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @Component
@@ -16,100 +20,262 @@ public class pyGisTools {
 
     @Autowired
     private RestTemplate restTemplate;
+
     @Autowired
     private GisContextService contextService;
 
-    // 请确保你的 FastAPI 运行在此端口
-    private final String PYTHON_SERVICE_URL = "http://localhost:8000/analysis";
+    @Autowired
+    private KnowledgeService knowledgeService;
 
-    @Tool("executeBufferAnalysis")
-    public String executeBufferAnalysis(
-            @P("中心点经纬度数组 [longitude, latitude]") double[] center, // 👈 改为数组接收
-            @P("半径(米)") double radius) {
+    @Value("${gis.python-service-url:http://127.0.0.1:8000/analysis}")
+    private String pythonServiceUrl;
 
-        System.out.println("🛰️ [Java] 算子激活！收到坐标: " + center[0] + ", " + center[1]);
-        try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("lon", center[0]); // 传给 Python 的还是拆开的
-            payload.put("lat", center[1]);
-            payload.put("radius", radius);
+    @Tool("bufferAnalysis")
+    public Map<String, Object> bufferAnalysis(
+            @P("lon") double lon,
+            @P("lat") double lat,
+            @P("radius") double radius) {
 
-            String geoJson = restTemplate.postForObject("http://127.0.0.1:8000/analysis/buffer", payload, String.class);
-
-            // 关键：这里返回的 JSON 必须是前端 renderAnalysisResult 能识别的
-            return """
-{
-  "status": "success",
-  "geoJson": %s
-}
-""".formatted(geoJson);
-        } catch (Exception e) {
-            return "计算失败: " + e.getMessage();
+        if (Math.abs(lon) < 0.1 && Math.abs(lat) < 0.1) {
+            return Map.of("status", "Error", "message", "Invalid coordinate (0,0).");
         }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("status", "Success");
+        result.put("action", "addBuffer");
+        result.put("params", Map.of(
+                "longitude", lon,
+                "latitude", lat,
+                "radius", radius
+        ));
+        return result;
     }
+
+    @Tool("analyzeArea")
+    public Map<String, Object> analyzeArea(
+            @P("lon") double lon,
+            @P("lat") double lat,
+            @P("radius") double radius) {
+
+        if (Math.abs(lon) < 0.1 && Math.abs(lat) < 0.1) {
+            return Map.of("status", "Error", "message", "Invalid coordinate (0,0).");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("lon", lon);
+        payload.put("lat", lat);
+        payload.put("radius", radius > 0 ? radius : 500);
+
+        Map<String, Object> result = postForMap("/analyze_area", payload);
+        saveContextFromResult(result);
+        return result;
+    }
+
+    @Tool("fetchBuildingsFromOSM")
+    public Map<String, Object> fetchBuildingsFromOSM(
+            @P("lon") double lon,
+            @P("lat") double lat,
+            @P("radius") double radius) {
+
+        if (Math.abs(lon) < 0.1 && Math.abs(lat) < 0.1) {
+            return Map.of("status", "Error", "message", "Invalid coordinate (0,0).");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("lon", lon);
+        payload.put("lat", lat);
+        payload.put("radius", radius > 0 ? radius : 500);
+
+        Map<String, Object> result = postForMap("/fetch_buildings", payload);
+        saveContextFromResult(result);
+        return result;
+    }
+
     @Tool("getScreenBuildings")
     public Map<String, Object> getScreenBuildings() {
-        Map<String, Object> res = new HashMap<>();
-        res.put("status", "need_frontend");
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("status", "Success");
         res.put("action", "getScreenBuildings");
-        res.put("message", "请等待前端完成几何抓取和上传");
+        res.put("message", "Fallback only: ask the ArcGIS frontend to query loaded building tiles and upload them.");
         return res;
     }
+
+    @Tool("submitCityEnginePlanningJob")
+    public Map<String, Object> submitCityEnginePlanningJob(
+            @P("requirementsJson") String requirementsJson,
+            @P("ragContext") String ragContext,
+            @P("userRequest") String userRequest,
+            @P("useDemoCase") boolean useDemoCase) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        try {
+            payload.put("requirements", JSON.parseObject(requirementsJson));
+        } catch (Exception ignored) {
+            payload.put("requirements", Map.of());
+        }
+        payload.put("ragContext", ragContext != null ? ragContext : "");
+        payload.put("userRequest", userRequest != null ? userRequest : "");
+
+        if (useDemoCase) {
+            Map<String, Object> result = postForMap("/demo_case/evaluate", payload);
+            saveContextFromResult(result);
+            return result;
+        }
+
+        String geoJson = contextService.getGeoJson();
+        if (geoJson == null || geoJson.isBlank() || "{}".equals(geoJson)) {
+            return Map.of("status", "NoData", "message", "请先绘制 AOI 或选择地点周边范围，再生成 CityEngine 优化方案。");
+        }
+        JSONObject context = JSON.parseObject(geoJson);
+        if (!context.containsKey("aoi")) {
+            return Map.of("status", "NoData", "message", "当前地图上下文缺少 AOI，请先绘制地块或创建地点缓冲区。");
+        }
+        if (!context.containsKey("buildings")) {
+            Map<String, Object> fetchPayload = new LinkedHashMap<>();
+            fetchPayload.put("aoi", context.get("aoi"));
+            Map<String, Object> fetched = postForMap("/analyze_area", fetchPayload);
+            if (isErrorResult(fetched)) {
+                return fetched;
+            }
+            saveContextFromResult(fetched);
+            context = JSON.parseObject(contextService.getGeoJson());
+        }
+        payload.put("aoi", context.get("aoi"));
+        payload.put("buildings", context.get("buildings"));
+        Map<String, Object> result = postForMap("/cityengine/plan-context", payload);
+        saveContextFromResult(result);
+        return result;
+    }
+
+    private boolean isErrorResult(Map<String, Object> result) {
+        if (result == null) return true;
+        String status = String.valueOf(result.getOrDefault("status", ""));
+        return "Error".equalsIgnoreCase(status) || "NoData".equalsIgnoreCase(status);
+    }
+    @Tool("waitCityEngineJob")
+    public Map<String, Object> waitCityEngineJob(@P("jobId") String jobId, @P("timeoutSeconds") int timeoutSeconds) {
+        int timeout = Math.max(1, Math.min(timeoutSeconds, 600));
+        return getForMap("/cityengine/jobs/" + jobId + "/wait?timeout=" + timeout);
+    }
+    @Tool("gisRuntimeStatus")
+    public Map<String, Object> gisRuntimeStatus() {
+        return getForMap("/runtime");
+    }
+
     @Tool("analyzeCurrentView")
     public Map<String, Object> analyzeCurrentView() {
-        // 1. 从 ContextService 拿到刚才前端上传的 GeoJSON
         String geoJson = contextService.getGeoJson();
 
-        if (geoJson == null || geoJson.isEmpty()) {
-            return Map.of("status", "Fail", "message", "内存中无建筑，请先同步数据", "far", 0);
-        }
-
-        // 2. 将数据发给 Python 算子（确保是 POST 且带了 body）
-        try {
-            String result = restTemplate.postForObject(
-                    "http://127.0.0.1:8000/analysis/urban_metrics",
-                    JSON.parseObject(geoJson), // 发送完整的上下文
-                    String.class
+        if (geoJson == null || geoJson.isEmpty() || "{}".equals(geoJson)) {
+            return Map.of(
+                    "status", "NoData",
+                    "message", "No server-side GIS context is available. Use analyzeArea or fetchBuildingsFromOSM first."
             );
-            return JSON.parseObject(result);
-        } catch (Exception e) {
-            return Map.of("status", "Error", "message", "Python引擎响应异常");
         }
-    }
-    @Tool("calculateUrbanMetrics")
-    public Map<String, Object> calculateUrbanMetrics(@P("AOI数据的GeoJSON") String aoiGeoJson) {
 
         try {
-            String rawContext = contextService.getGeoJson();
-            if (rawContext == null) {
-                return Map.of("status", "error", "message", "无数据");
+            JSONObject contextObj = JSON.parseObject(geoJson);
+            if (!contextObj.containsKey("buildings") && contextObj.containsKey("aoi")) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("aoi", contextObj.get("aoi"));
+                Map<String, Object> fetched = postForMap("/analyze_area", payload);
+                saveContextFromResult(fetched);
+                return fetched;
             }
 
-            JSONObject contextObj = JSON.parseObject(rawContext);
-
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("buildings", contextObj.getJSONObject("buildings"));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("buildings", contextObj.get("buildings"));
             payload.put("aoi", contextObj.get("aoi"));
-
-            String result = restTemplate.postForObject(
-                    "http://127.0.0.1:8000/analysis/urban_metrics",
-                    payload,
-                    String.class
-            );
-
-            JSONObject json = JSON.parseObject(result);
-
-            // 👇 关键：转成 Map 返回
-            return json.getInnerMap();
-
+            Map<String, Object> result = postForMap("/urban_metrics", payload);
+            saveContextFromResult(result);
+            return result;
         } catch (Exception e) {
-            return Map.of("status", "error");
+            return Map.of("status", "Error", "message", "Python GIS engine failed: " + e.getMessage());
         }
     }
 
+    @Tool("urbanMetrics")
+    public Map<String, Object> urbanMetrics(@P("aoiGeoJson") String aoiGeoJson) {
+        return analyzeCurrentView();
+    }
+
+    @Tool("calculateUrbanMetrics")
+    public Map<String, Object> calculateUrbanMetrics(@P("aoiGeoJson") String aoiGeoJson) {
+        return analyzeCurrentView();
+    }
+
+    @Tool("executeBufferAnalysis")
+    public Map<String, Object> executeBufferAnalysis(
+            @P("center") double[] center,
+            @P("radius") double radius) {
+        if (center == null || center.length < 2) {
+            return Map.of("status", "Error", "message", "center must be [lon, lat].");
+        }
+        return bufferAnalysis(center[0], center[1], radius);
+    }
 
     @Tool("formatAnalysisResult")
     public String formatAnalysisResult(String resultData) {
         return resultData;
     }
+
+    @Tool("knowledgeSearch")
+    public String knowledgeSearch(@P("query") String query) {
+        return knowledgeService.search(query, 3);
+    }
+
+    private Map<String, Object> postForMap(String path, Map<String, Object> payload) {
+        try {
+            String raw = restTemplate.postForObject(pythonUrl(path), payload, String.class);
+            if (raw == null || raw.isBlank()) {
+                return Map.of("status", "Error", "message", "Python GIS engine returned an empty response.");
+            }
+            JSONObject json = JSON.parseObject(raw);
+            return new LinkedHashMap<>(json.getInnerMap());
+        } catch (Exception e) {
+            return Map.of("status", "Error", "message", "Python GIS engine is unavailable: " + e.getMessage());
+        }
+    }
+
+    private Map<String, Object> getForMap(String path) {
+        try {
+            String raw = restTemplate.getForObject(pythonUrl(path), String.class);
+            if (raw == null || raw.isBlank()) {
+                return Map.of("status", "Error", "message", "Python GIS engine returned an empty response.");
+            }
+            JSONObject json = JSON.parseObject(raw);
+            return new LinkedHashMap<>(json.getInnerMap());
+        } catch (Exception e) {
+            return Map.of("status", "Error", "message", "Python GIS engine is unavailable: " + e.getMessage());
+        }
+    }
+
+    private String pythonUrl(String path) {
+        String base = pythonServiceUrl == null || pythonServiceUrl.isBlank()
+                ? "http://127.0.0.1:8000/analysis"
+                : pythonServiceUrl.trim();
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        return base + path;
+    }
+
+    private void saveContextFromResult(Map<String, Object> result) {
+        if (result == null || result.isEmpty()) {
+            return;
+        }
+        if (!result.containsKey("buildings") && !result.containsKey("aoi")) {
+            return;
+        }
+
+        Map<String, Object> context = new HashMap<>();
+        if (result.containsKey("buildings")) {
+            context.put("buildings", result.get("buildings"));
+        }
+        if (result.containsKey("aoi")) {
+            context.put("aoi", result.get("aoi"));
+        }
+        contextService.saveGeoJson(JSON.toJSONString(context));
+    }
 }
+
+

@@ -9,7 +9,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/knowledge")
-@CrossOrigin(origins = "http://localhost:5173") // 允许前端跨域
+@CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"}) // 允许前端跨域
 public class KnowledgeController {
 
     @Autowired

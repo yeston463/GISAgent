@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="chat-wrapper">
     <div class="chat-window" ref="scrollContainer">
       <div
@@ -134,8 +134,27 @@ const handleDataReady = () => {
   }, 10000);
 };
 
-const handleSketchReady = () => {
-  processAiChat('分析当前红线区域的建筑指标。', true);
+const handleSketchReady = async () => {
+  if (isLoopLocked || isAnalyzing.value) return;
+  isLoopLocked = true;
+  isAnalyzing.value = true;
+  loadingStatusText.value = '正在提取红线内可见建筑...';
+  try {
+    const synced = await execute([{ action: 'getScreenBuildings', params: {} }]);
+    if (synced === false || window.lastGisResult?.status !== 'Success') {
+      throw new Error('未能从当前三维建筑图层提取有效建筑');
+    }
+  } catch (error) {
+    console.error('红线建筑同步失败:', error);
+    messages.value.push(createAssistantMessage(`红线建筑同步失败：${error?.message || '请稍后重试'}`));
+    isAnalyzing.value = false;
+    isLoopLocked = false;
+    scrollToBottom();
+    return;
+  }
+  isAnalyzing.value = false;
+  isLoopLocked = false;
+  await processAiChat('根据当前已上传的真实红线和建筑生成 CityEngine 优化方案，只修改明确的问题建筑。');
 };
 
 const handleUserSend = () => {
@@ -166,7 +185,23 @@ const processAiChat = async (userInput, isHidden = false) => {
     });
 
     const data = response.data || {};
-    const commands = Array.isArray(data.commands) ? data.commands : [];
+    const cityEngineJobId = data.reply?.match(/CityEngine 作业[：:]\s*([\w-]+)/)?.[1];
+    if (cityEngineJobId && data.reply?.includes('SLPK 下载')) {
+      let sceneServiceUrl = data.reply?.match(/Scene Service[：:]\s*(https?:\/\/\S+)/)?.[1] || '';
+      try {
+        const jobResponse = await axios.get(`http://localhost:8000/analysis/cityengine/jobs/${cityEngineJobId}`);
+        sceneServiceUrl = jobResponse.data?.sceneServiceUrl || jobResponse.data?.publication?.sceneServiceUrl || sceneServiceUrl;
+      } catch (error) {
+        console.warn('无法获取 CityEngine 发布详情，将使用回复中的地址:', error);
+      }
+      window.dispatchEvent(new CustomEvent('show-cityengine-result', {
+        detail: {
+          jobId: cityEngineJobId,
+          slpkUrl: `http://localhost:8000/analysis/cityengine/jobs/${cityEngineJobId}/download/slpk`,
+          sceneServiceUrl
+        }
+      }));
+    }    const commands = Array.isArray(data.commands) ? data.commands : [];
     const hasScreenFallback = commands.some(command => command.action === 'getScreenBuildings');
     const comparisonCommand = commands.find(command => command.action === 'comparePlanningScenarios');
     if (comparisonCommand?.params?.comparison) {
@@ -412,3 +447,5 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   .far-badge { width: 100%; }
 }
 </style>
+
+
