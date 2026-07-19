@@ -5,10 +5,15 @@ import com.alibaba.fastjson.JSONObject;
 import org.example.agent.AgentLoopService;
 import org.example.agent.DynamicCodeGenerator;
 import org.example.memory.PgVectorMemoryStore;
+import org.example.tools.DynamicToolRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.MediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -19,6 +24,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/agent")
@@ -33,36 +40,42 @@ public class AgentController {
     @Autowired
     private PgVectorMemoryStore memoryStore;
 
+    @Autowired
+    private DynamicToolRegistry toolRegistry;
+
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/chat/agentic")
     public ResponseEntity<Map<String, Object>> agenticChat(@RequestBody ChatRequest request) {
-        String message = request.message();
-        String userId = request.memoryId() != null ? request.memoryId() : "default";
-        String memoryId = request.memoryId() != null ? request.memoryId() : UUID.randomUUID().toString();
+        String memoryId = resolveMemoryId(request.memoryId());
+        AgentLoopService.AgentResult result = agentLoopService.execute(
+                request.message(), userId(memoryId), memoryId);
+        return ResponseEntity.ok(buildResponse(result, memoryId));
+    }
 
-        AgentLoopService.AgentResult result = agentLoopService.execute(message, userId, memoryId);
-
-        Map<String, Object> response = new LinkedHashMap<>();
-        if (result.needsClarification()) {
-            response.put("reply", result.clarification());
-            response.put("needClarification", true);
-            response.put("commands", new JSONArray());
-        } else {
-            JSONArray commands = new JSONArray();
-            appendAgentCommands(commands, result.commands());
-
-            if (result.metrics() != null && !hasCommand(commands, "comparePlanningScenarios")) {
-                appendMetricCommands(commands, extractCommandsFromMetrics(new JSONObject(result.metrics())));
+    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter agenticChatStream(@RequestBody ChatRequest request) {
+        String memoryId = resolveMemoryId(request.memoryId());
+        SseEmitter emitter = new SseEmitter(300_000L);
+        emitter.onTimeout(emitter::complete);
+        CompletableFuture.runAsync(() -> {
+            try {
+                AgentLoopService.AgentResult result = agentLoopService.execute(
+                        request.message(), userId(memoryId), memoryId,
+                        trace -> sendTrace(emitter, trace));
+                emitter.send(SseEmitter.event().name("result").data(buildResponse(result, memoryId)));
+                emitter.complete();
+            } catch (Exception e) {
+                try {
+                    emitter.send(SseEmitter.event().name("error")
+                            .data(Map.of("message", "Agent 流式任务失败: " + e.getMessage())));
+                } catch (IOException ignored) {
+                    // The browser may have closed the connection.
+                }
+                emitter.completeWithError(e);
             }
-
-            response.put("reply", result.reply());
-            response.put("commands", commands);
-            response.put("suggestions", result.suggestions());
-            response.put("needClarification", false);
-        }
-
-        response.put("memoryId", memoryId);
-        return ResponseEntity.ok(response);
+        });
+        return emitter;
     }
 
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
@@ -84,20 +97,78 @@ public class AgentController {
     @PostMapping("/execute")
     public Map<String, Object> executeDynamic(@RequestBody ExecuteRequest request) {
         DynamicCodeGenerator.CodeExecutionResult result =
-                codeGenerator.generateAndExecute(request.requirement(), request.context());
+                request.name() == null || request.name().isBlank()
+                        ? codeGenerator.generateAndExecute(request.requirement(), request.context())
+                        : codeGenerator.generateAndRegister(
+                                request.name(), request.description(), request.requirement(), request.context());
 
-        return Map.of(
-                "status", result.status(),
-                "code", result.generatedCode(),
-                "result", result.result() != null ? result.result() : "no result"
-        );
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", result.status());
+        response.put("message", result.message());
+        response.put("code", result.generatedCode());
+        response.put("result", result.result() != null ? result.result() : "no result");
+        if (result.registeredTool() != null) {
+            response.put("registeredTool", result.registeredTool());
+        }
+        return response;
+    }
+
+    @GetMapping("/tools")
+    public Map<String, Object> tools() {
+        return Map.of("tools", toolRegistry.getToolDescriptions());
+    }
+
+    @DeleteMapping("/tools/{name}")
+    public Map<String, Object> removeDynamicTool(@PathVariable String name) {
+        boolean removed = toolRegistry.removeDynamicTool(name);
+        return Map.of("status", removed ? "Success" : "NotFound", "tool", name);
     }
 
     public record ChatRequest(String message, String memoryId) {}
 
-    public record ExecuteRequest(String requirement, JSONObject context) {}
+    public record ExecuteRequest(String requirement, JSONObject context, String name, String description) {}
 
     public record PreferenceRequest(String userId, String key, String value) {}
+
+    private Map<String, Object> buildResponse(AgentLoopService.AgentResult result, String memoryId) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        if (result.needsClarification()) {
+            response.put("reply", result.clarification());
+            response.put("needClarification", true);
+            response.put("commands", new JSONArray());
+        } else {
+            JSONArray commands = new JSONArray();
+            appendAgentCommands(commands, result.commands());
+
+            if (result.metrics() != null && !hasCommand(commands, "comparePlanningScenarios")) {
+                appendMetricCommands(commands, extractCommandsFromMetrics(new JSONObject(result.metrics())));
+            }
+
+            response.put("reply", result.reply());
+            response.put("commands", commands);
+            response.put("suggestions", result.suggestions());
+            response.put("needClarification", false);
+        }
+        response.put("trace", result.trace() == null ? List.of() : result.trace());
+        response.put("memoryId", memoryId);
+        return response;
+    }
+
+    private String resolveMemoryId(String requested) {
+        return requested == null || requested.isBlank() ? UUID.randomUUID().toString() : requested;
+    }
+
+    private String userId(String memoryId) {
+        return memoryId == null || memoryId.isBlank() ? "default" : memoryId;
+    }
+
+    private void sendTrace(SseEmitter emitter, AgentLoopService.ExecutionTrace trace) {
+        try {
+            emitter.send(SseEmitter.event().name("trace").data(trace));
+        } catch (IOException ignored) {
+            // A disconnected client should not abort the backend analysis.
+        }
+    }
 
     private void appendAgentCommands(JSONArray commands, List<Map<String, Object>> agentCommands) {
         if (agentCommands == null) {

@@ -8,6 +8,7 @@ import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.example.service.PromptResourceService;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
@@ -25,9 +26,14 @@ public class DynamicToolRegistry {
     
     // 动态工具：运行时注册的脚本/逻辑
     private final Map<String, ToolInvoker> dynamicTools = new ConcurrentHashMap<>();
+    private final Map<String, String> toolDescriptions = new ConcurrentHashMap<>();
 
     @Autowired
-    public DynamicToolRegistry(GisMapTools gisMapTools, pyGisTools pyGisTools, ChatLanguageModel chatLanguageModel) {
+    public DynamicToolRegistry(
+            GisMapTools gisMapTools,
+            pyGisTools pyGisTools,
+            ChatLanguageModel chatLanguageModel,
+            PromptResourceService promptResources) {
         // 注册静态工具
         registerStaticTools(gisMapTools);
         registerStaticTools(pyGisTools);
@@ -37,20 +43,11 @@ public class DynamicToolRegistry {
 
         // 注册 synthesis 工具（LLM 综合分析）
         dynamicTools.put("synthesis", params -> {
-            String prompt = String.format("""
-                你是一个专业的 GIS 分析师。根据以下数据生成简洁的分析报告：
-
-                分析数据：
-                %s
-
-                要求：
-                1. 如果有坐标信息，说明位置
-                2. 如果有容积率等指标，给出具体数值
-                3. 结合知识库规范做对比
-                4. 输出自然语言，简洁明了
-            """, params.toJSONString());
+            String prompt = promptResources.render("prompts/tool-synthesis.txt",
+                    Map.of("PARAMS_JSON", params.toJSONString()));
             return chatLanguageModel.generate(prompt);
         });
+        toolDescriptions.put("synthesis", "根据工具数据生成受控 GIS 摘要");
         System.out.println("注册动态工具: synthesis - LLM 综合分析");
     }
 
@@ -59,6 +56,7 @@ public class DynamicToolRegistry {
             Tool annotation = method.getAnnotation(Tool.class);
             if (annotation != null) {
                 String name = annotation.value().length == 0 ? method.getName() : annotation.value()[0];
+                toolDescriptions.putIfAbsent(name, "后端 GIS 工具");
                 staticTools.put(name, params -> {
                     try {
                         Object[] args = extractParams(method, params);
@@ -76,14 +74,44 @@ public class DynamicToolRegistry {
      * 注册动态工具（来自脚本或用户定义）
      */
     public void registerDynamicTool(String name, String description, ToolInvoker invoker) {
+        if (name == null || !name.matches("[a-z][a-zA-Z0-9_]{2,63}")) {
+            throw new IllegalArgumentException("动态工具名必须是 3-64 位字母、数字或下划线，并以小写字母开头");
+        }
+        if ("synthesis".equals(name) || "generateDynamicTool".equals(name)) {
+            throw new IllegalArgumentException("保留工具名不能被动态工具覆盖: " + name);
+        }
+        if (staticTools.containsKey(name)) {
+            throw new IllegalArgumentException("不能覆盖静态工具: " + name);
+        }
+        if (invoker == null) {
+            throw new IllegalArgumentException("动态工具执行器不能为空");
+        }
         dynamicTools.put(name, invoker);
+        toolDescriptions.put(name, description == null || description.isBlank() ? "运行时动态工具" : description);
         System.out.println("注册动态工具: " + name + " - " + description);
+    }
+
+    public boolean removeDynamicTool(String name) {
+        if (name == null || "synthesis".equals(name)) {
+            return false;
+        }
+        boolean removed = dynamicTools.remove(name) != null;
+        if (removed) {
+            toolDescriptions.remove(name);
+        }
+        return removed;
     }
 
     /**
      * 调用工具
      */
     public Object invoke(String toolName, JSONObject params) throws Exception {
+        if (toolName == null || toolName.isBlank()) {
+            throw new IllegalArgumentException("工具名不能为空");
+        }
+        if (params == null) {
+            params = new JSONObject();
+        }
         ToolInvoker invoker = dynamicTools.getOrDefault(toolName, staticTools.get(toolName));
         if (invoker == null) {
             throw new IllegalArgumentException("未知工具: " + toolName);
@@ -97,10 +125,12 @@ public class DynamicToolRegistry {
     public List<Map<String, String>> getToolDescriptions() {
         List<Map<String, String>> descriptions = new ArrayList<>();
         staticTools.forEach((name, invoker) -> {
-            descriptions.add(Map.of("name", name, "type", "static"));
+            descriptions.add(Map.of("name", name, "type", "static",
+                    "description", toolDescriptions.getOrDefault(name, "后端 GIS 工具")));
         });
         dynamicTools.forEach((name, invoker) -> {
-            descriptions.add(Map.of("name", name, "type", "dynamic"));
+            descriptions.add(Map.of("name", name, "type", "dynamic",
+                    "description", toolDescriptions.getOrDefault(name, "运行时动态工具")));
         });
         return descriptions;
     }
@@ -109,6 +139,9 @@ public class DynamicToolRegistry {
      * 从 JSONObject 中提取方法参数
      */
     private Object[] extractParams(Method method, JSONObject params) {
+        if (params == null) {
+            params = new JSONObject();
+        }
         Parameter[] parameters = method.getParameters();
         Object[] args = new Object[parameters.length];
         

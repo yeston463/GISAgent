@@ -3,6 +3,7 @@ package org.example.tools;
 import com.alibaba.fastjson.JSONObject;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 
 import jakarta.annotation.PostConstruct;
 import java.util.Map;
@@ -11,6 +12,7 @@ import java.util.Map;
  * 动态工具示例：展示如何在运行时注册新工具
  */
 @Component
+@Profile("dynamic-tool-examples")
 public class DynamicToolExample {
 
     @Autowired

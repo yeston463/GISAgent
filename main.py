@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from datetime import date as calendar_date
 from fastapi.responses import FileResponse
 from pathlib import Path
 
@@ -1158,6 +1159,237 @@ def calculate_metrics(payload):
     }
 
 
+def _feature_centroid(feature):
+    coords = list(_iter_coordinates((feature or {}).get("geometry")))
+    if not coords:
+        return None
+    return (
+        sum(coord[0] for coord in coords) / len(coords),
+        sum(coord[1] for coord in coords) / len(coords),
+    )
+
+
+def _feature_height(feature):
+    props = (feature or {}).get("properties") or {}
+    for field in ("height", "render_height", "HEIGHT", "H_AVG"):
+        value = _parse_number(props.get(field))
+        if value is not None and value > 0:
+            return min(float(value), 400.0), field
+    for field in ("building:levels", "levels", "floors"):
+        value = _parse_number(props.get(field))
+        if value is not None and value > 0:
+            return min(float(value) * 3.2, 400.0), field
+    return 10.0, "default_estimate"
+
+
+def _advanced_analysis_features(payload):
+    buildings = payload.get("buildings")
+    features = _features_from_source(buildings)
+    source = "current_context"
+    if not features and payload.get("aoi"):
+        fetched = fetch_buildings_for_aoi(payload["aoi"])
+        if fetched.get("status") == "Success":
+            buildings = fetched.get("buildings")
+            features = _features_from_source(buildings)
+            source = fetched.get("source", "osm_overpass")
+    return features, buildings, source
+
+
+def _analysis_center(payload, features):
+    aoi_features = _features_from_source(payload.get("aoi")) if payload.get("aoi") else []
+    centers = [center for center in (_feature_centroid(f) for f in aoi_features) if center]
+    if not centers:
+        centers = [center for center in (_feature_centroid(f) for f in features) if center]
+    if not centers:
+        raise ValueError("No valid building or AOI geometry was provided")
+    return (
+        sum(center[0] for center in centers) / len(centers),
+        sum(center[1] for center in centers) / len(centers),
+    )
+
+
+def _distance_and_bearing(origin, target):
+    lon1, lat1 = origin
+    lon2, lat2 = target
+    mean_lat = math.radians((lat1 + lat2) / 2.0)
+    dx = (lon2 - lon1) * 111320.0 * max(math.cos(mean_lat), 0.01)
+    dy = (lat2 - lat1) * 111320.0
+    return math.hypot(dx, dy), (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
+
+
+def calculate_skyline(payload):
+    features, buildings, source = _advanced_analysis_features(payload)
+    if not features:
+        return {"status": "NoData", "analysis_type": "skyline", "message": "No buildings are available for skyline analysis"}
+    center = _analysis_center(payload, features)
+    bin_count = max(12, min(int(payload.get("bin_count", 24) or 24), 72))
+    profile = [{
+        "angle": round((index + 0.5) * 360.0 / bin_count, 1),
+        "height": 0.0,
+        "distance": None,
+        "building": None,
+    } for index in range(bin_count)]
+    heights = []
+    measured = 0
+    for index, feature in enumerate(features):
+        feature_center = _feature_centroid(feature)
+        if not feature_center:
+            continue
+        height, height_source = _feature_height(feature)
+        heights.append(height)
+        if height_source != "default_estimate":
+            measured += 1
+        distance, bearing = _distance_and_bearing(center, feature_center)
+        bin_index = min(int(bearing / 360.0 * bin_count), bin_count - 1)
+        if height > profile[bin_index]["height"]:
+            props = feature.get("properties") or {}
+            profile[bin_index].update({
+                "height": round(height, 1),
+                "distance": round(distance, 1),
+                "building": str(props.get("name") or props.get("id") or f"building-{index + 1}"),
+            })
+    result = {
+        "status": "Success",
+        "stage": "skyline_analysis",
+        "analysis_type": "skyline",
+        "building_count": len(features),
+        "max_height": round(max(heights), 1),
+        "mean_height": round(sum(heights) / len(heights), 1),
+        "height_attribute_ratio": round(measured / len(heights), 3),
+        "center": {"longitude": round(center[0], 6), "latitude": round(center[1], 6)},
+        "skyline_profile": profile,
+        "data_source": source,
+        "method": "directional_max_height_profile",
+        "limitations": "Screening profile based on building centroids and attribute heights; terrain and true line-of-sight occlusion are not included.",
+        "buildings": buildings,
+    }
+    result["commands"] = [{"action": "showAdvancedAnalysis", "params": {
+        "analysisType": "skyline", "title": "天际线方向剖面", "profile": profile,
+        "maxHeight": result["max_height"], "meanHeight": result["mean_height"],
+        "buildingCount": result["building_count"], "dataSource": source,
+        "limitations": result["limitations"],
+    }}]
+    return result
+
+
+def _solar_position(latitude, day_of_year, hour):
+    lat = math.radians(latitude)
+    declination = math.radians(23.44 * math.sin(math.radians((360.0 / 365.0) * (284 + day_of_year))))
+    hour_angle = math.radians(15.0 * (hour - 12.0))
+    sin_altitude = math.sin(lat) * math.sin(declination) + math.cos(lat) * math.cos(declination) * math.cos(hour_angle)
+    altitude = math.asin(max(-1.0, min(1.0, sin_altitude)))
+    cos_altitude = max(math.cos(altitude), 1e-6)
+    sin_azimuth = -math.sin(hour_angle) * math.cos(declination) / cos_altitude
+    cos_azimuth = (math.sin(declination) - math.sin(lat) * math.sin(altitude)) / max(math.cos(lat) * cos_altitude, 1e-6)
+    azimuth = (math.degrees(math.atan2(sin_azimuth, cos_azimuth)) + 360.0) % 360.0
+    return math.degrees(altitude), azimuth
+
+
+def _convex_hull(points):
+    unique = sorted(set((float(x), float(y)) for x, y in points))
+    if len(unique) <= 2:
+        return unique
+
+    def cross(origin, a, b):
+        return (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+
+    lower = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _shadow_feature(feature, shadow_length, shadow_bearing, latitude, hour):
+    original = list(_iter_coordinates(feature.get("geometry")))
+    if len(original) < 3:
+        return None
+    radians = math.radians(shadow_bearing)
+    dx = shadow_length * math.sin(radians)
+    dy = shadow_length * math.cos(radians)
+    lon_scale = 111320.0 * max(math.cos(math.radians(latitude)), 0.01)
+    shifted = [(lon + dx / lon_scale, lat + dy / 111320.0) for lon, lat in original]
+    hull = _convex_hull(original + shifted)
+    if len(hull) < 3:
+        return None
+    hull.append(hull[0])
+    props = dict(feature.get("properties") or {})
+    props.update({"analysis": "sunlight_shadow_screening", "hour": hour, "shadowLengthM": round(shadow_length, 1)})
+    return {"type": "Feature", "properties": props,
+            "geometry": {"type": "Polygon", "coordinates": [[list(point) for point in hull]]}}
+
+
+def calculate_sunlight(payload):
+    features, buildings, source = _advanced_analysis_features(payload)
+    if not features:
+        return {"status": "NoData", "analysis_type": "sunlight", "message": "No buildings are available for sunlight analysis"}
+    center = _analysis_center(payload, features)
+    try:
+        analysis_date = calendar_date.fromisoformat(str(payload.get("date"))) if payload.get("date") else calendar_date.today()
+    except ValueError:
+        return {"status": "Error", "analysis_type": "sunlight", "message": "date must use YYYY-MM-DD"}
+    raw_hours = payload.get("hours") if isinstance(payload.get("hours"), list) else [8, 10, 12, 14, 16]
+    hours = sorted(set(max(0, min(int(hour), 23)) for hour in raw_hours))
+    heights = [_feature_height(feature)[0] for feature in features]
+    samples = []
+    max_shadow_length = 0.0
+    for hour in hours:
+        altitude, azimuth = _solar_position(center[1], analysis_date.timetuple().tm_yday, hour)
+        if altitude <= 0:
+            avg_shadow = None
+            sample_max = None
+        else:
+            tangent = max(math.tan(math.radians(altitude)), 0.01)
+            lengths = [height / tangent for height in heights]
+            avg_shadow = round(sum(lengths) / len(lengths), 1)
+            sample_max = round(max(lengths), 1)
+            max_shadow_length = max(max_shadow_length, max(lengths))
+        samples.append({"hour": hour, "sun_altitude": round(altitude, 1), "sun_azimuth": round(azimuth, 1),
+                        "average_shadow_length_m": avg_shadow, "max_shadow_length_m": sample_max})
+    qualified = sum(1 for sample in samples if sample["sun_altitude"] >= 15.0)
+    shadow_hour = max(0, min(int(payload.get("shadow_hour", 15) or 15), 23))
+    selected = min(samples, key=lambda sample: abs(sample["hour"] - shadow_hour))
+    shadows = []
+    if selected["sun_altitude"] > 0:
+        shadow_bearing = (selected["sun_azimuth"] + 180.0) % 360.0
+        tangent = max(math.tan(math.radians(selected["sun_altitude"])), 0.01)
+        for feature, height in zip(features, heights):
+            shadow = _shadow_feature(feature, min(height / tangent, 500.0), shadow_bearing, center[1], selected["hour"])
+            if shadow:
+                shadows.append(shadow)
+    shadow_collection = _feature_collection(shadows)
+    result = {
+        "status": "Success", "stage": "sunlight_analysis", "analysis_type": "sunlight",
+        "date": analysis_date.isoformat(), "building_count": len(features), "sample_count": len(samples),
+        "samples": samples, "sunlight_window_percent": round(qualified / len(samples) * 100.0, 1) if samples else 0.0,
+        "max_shadow_length_m": round(max_shadow_length, 1), "shadow_hour": selected["hour"],
+        "shadows": shadow_collection, "data_source": source,
+        "method": "solar_position_and_height_based_shadow_screening",
+        "limitations": "Uses local solar time and building attribute heights. Terrain, facade windows and regulatory duration rules are not included.",
+        "buildings": buildings,
+    }
+    commands = []
+    if shadows:
+        commands.append({"action": "addGeoJsonLayer", "params": {
+            "layerId": "sunlight-screening-shadows", "title": f"{selected['hour']}:00 阴影筛查",
+            "style": "shadow", "visible": True, "data": shadow_collection,
+        }})
+    commands.append({"action": "showAdvancedAnalysis", "params": {
+        "analysisType": "sunlight", "title": "日照与阴影筛查", "date": result["date"],
+        "samples": samples, "sunlightWindowPercent": result["sunlight_window_percent"],
+        "maxShadowLengthM": result["max_shadow_length_m"], "buildingCount": result["building_count"],
+        "dataSource": source, "limitations": result["limitations"],
+    }})
+    result["commands"] = commands
+    return result
+
+
 def _load_demo_json(file_name):
     import os
     from pathlib import Path
@@ -1477,6 +1709,24 @@ async def calculate_urban_metrics(payload: dict = Body(...)):
     except Exception as exc:
         print(f"urban_metrics failed: {traceback.format_exc()}")
         return {"status": "Error", "stage": "urban_metrics", "far": 0, "message": str(exc)}
+
+
+@app.post("/analysis/skyline")
+async def execute_skyline_analysis(payload: dict = Body(...)):
+    try:
+        return calculate_skyline(payload)
+    except Exception as exc:
+        print(f"skyline analysis failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "skyline_analysis", "analysis_type": "skyline", "message": str(exc)}
+
+
+@app.post("/analysis/sunlight")
+async def execute_sunlight_analysis(payload: dict = Body(...)):
+    try:
+        return calculate_sunlight(payload)
+    except Exception as exc:
+        print(f"sunlight analysis failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "sunlight_analysis", "analysis_type": "sunlight", "message": str(exc)}
 
 
 @app.post("/analysis/buffer")

@@ -193,6 +193,39 @@ public class pyGisTools {
         }
     }
 
+    @Tool("skylineAnalysis")
+    public Map<String, Object> skylineAnalysis() {
+        return postAdvancedAnalysis("/skyline", Map.of());
+    }
+
+    @Tool("sunlightAnalysis")
+    public Map<String, Object> sunlightAnalysis(@P("date") String date) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (date != null && !date.isBlank()) {
+            payload.put("date", date);
+        }
+        return postAdvancedAnalysis("/sunlight", payload);
+    }
+
+    private Map<String, Object> postAdvancedAnalysis(String path, Map<String, Object> options) {
+        String geoJson = contextService.getGeoJson();
+        if (geoJson == null || geoJson.isBlank() || "{}".equals(geoJson)) {
+            return Map.of("status", "NoData", "analysis_type", path.substring(1),
+                    "message", "请先完成地点分析或上传 AOI 与建筑数据");
+        }
+        try {
+            JSONObject context = JSON.parseObject(geoJson);
+            Map<String, Object> payload = new LinkedHashMap<>(context.getInnerMap());
+            payload.putAll(options);
+            Map<String, Object> result = postForMap(path, payload);
+            saveContextFromResult(result);
+            return result;
+        } catch (Exception e) {
+            return Map.of("status", "Error", "analysis_type", path.substring(1),
+                    "message", "高级分析请求失败: " + e.getMessage());
+        }
+    }
+
     @Tool("urbanMetrics")
     public Map<String, Object> urbanMetrics(@P("aoiGeoJson") String aoiGeoJson) {
         return analyzeCurrentView();

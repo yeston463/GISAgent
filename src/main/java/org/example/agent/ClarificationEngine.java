@@ -35,7 +35,8 @@ public class ClarificationEngine {
         String text = msg.toLowerCase();
         String[] indicators = {"大学", "学院", "医院", "公园", "路", "街", "区",
             "清华", "北大", "北京", "上海", "广州", "深圳", "杭州",
-            "附近", "周边", "位置", "地方", "区域", "地块", "地段"};
+            "附近", "周边", "位置", "地方", "区域", "地块", "地段",
+            "当前", "这里", "红线", "视图", "aoi"};
         for (String ind : indicators) {
             if (text.contains(ind)) return true;
         }
@@ -52,7 +53,8 @@ public class ClarificationEngine {
         if (msg == null) return false;
         String text = msg.toLowerCase();
         String[] indicators = {"容积率", "建筑", "分析", "指标", "面积", "高度",
-            "密度", "类型", "far", "统计", "评估", "规划", "查看", "展示"};
+            "密度", "类型", "far", "统计", "评估", "规划", "查看", "展示",
+            "天际线", "日照", "阴影", "sunlight", "skyline", "shadow", "高级"};
         for (String ind : indicators) {
             if (text.contains(ind)) return true;
         }

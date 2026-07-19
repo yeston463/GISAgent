@@ -32,4 +32,14 @@ public class KnowledgeController {
             return ResponseEntity.status(500).body("入库失败: " + e.getMessage());
         }
     }
+
+    @GetMapping("/status")
+    public Map<String, Object> status() {
+        return knowledgeService.getLoadStatus();
+    }
+
+    @PostMapping("/reload")
+    public Map<String, Object> reload() {
+        return knowledgeService.loadBundledContent();
+    }
 }

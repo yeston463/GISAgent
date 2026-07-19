@@ -7,7 +7,9 @@ import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
 import org.example.service.KnowledgeService;
+import org.example.service.PromptResourceService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -16,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 @Service
 public class AgentLoopService {
@@ -41,101 +44,99 @@ public class AgentLoopService {
     @Autowired
     private KnowledgeService knowledgeService;
 
-    private static final int MAX_ROUNDS = 8;
+    @Autowired
+    private PromptResourceService promptResources;
 
-    private static final String SYSTEM_PROMPT = """
-        You are a professional GIS analysis agent.
-        Work in an observe-think-act loop. Output exactly one JSON object each turn.
+    @Autowired
+    private DynamicCodeGenerator dynamicCodeGenerator;
 
-        Available tools:
-        - geocodeWithCity: params {"locationName":"place","city":"city or empty"}
-        - aiGeocode: params {"locationName":"place"}
-        - analyzeArea: preferred server-side pipeline. Params {"lon":number,"lat":number,"radius":meters}. It creates an AOI, fetches real OSM buildings, clips them, calculates metrics, and returns verified data.
-        - analyzeCurrentView: analyze already uploaded AOI/buildings. If only AOI exists, it fetches buildings server-side first.
-        - evaluatePlanningDemo: deterministic local competition case. It evaluates FAR, building density, maximum height and green rate, identifies problem buildings, creates an optimization scenario, and recalculates before/after metrics. No params.
-        - fetchBuildingsFromOSM: params {"lon":number,"lat":number,"radius":meters}. Fetches real OSM building footprints.
-        - bufferAnalysis: visual command only, params {"lon":number,"lat":number,"radius":meters}
-        - getScreenBuildings: frontend fallback only when server-side fetching fails.
-        - knowledgeSearch: params {"query":"text"}
-        - synthesis: final report helper.
-
-        Rules:
-        1. For competition demo, planning evaluation, optimization scenario, before/after comparison, or 比赛案例/规划评价/优化方案 requests, call evaluatePlanningDemo first.
-        2. For building/FAR/urban metrics around a named place, first get coordinates, then call analyzeArea.
-        3. For "data uploaded", "redline", "AOI", or "current view" requests, call analyzeCurrentView first.
-        4. Do not use getScreenBuildings unless analyzeArea/analyzeCurrentView failed or returned NoData.
-        5. Never invent GIS metrics. Use only tool observations.
-        6. If a tool returns Error/Fail/NoData, try another valid strategy or ask a concise question.
-        7. When planning evaluation is returned, explain rule source, failed metrics, problem buildings and before/after comparison.
-        8. When metrics are valid, respond with a short professional GIS report.
-
-        JSON formats:
-        Tool call:
-        {"thought":"why this action is next","action":"tool_name","params":{"key":"value"}}
-
-        Ask:
-        {"thought":"what is missing","action":"ask","content":"question"}
-
-        Final response:
-        {"thought":"analysis complete","action":"respond","content":"answer","suggestions":["next step"]}
-        """;
+    @Value("${agent.max-rounds:8}")
+    private int maxRounds;
 
     public AgentResult execute(String userMessage, String userId, String memoryId) {
+        return execute(userMessage, userId, memoryId, trace -> { });
+    }
+
+    public AgentResult execute(
+            String userMessage,
+            String userId,
+            String memoryId,
+            Consumer<ExecutionTrace> traceListener) {
+        List<ExecutionTrace> trace = new ArrayList<>();
         if (isPlanningDemoRequest(userMessage)) {
-            return executePlanningDemo(userMessage, userId);
+            return executePlanningDemo(userMessage, userId, trace, traceListener);
         }
 
         if (shouldAskClarification(userMessage)) {
             String question = clarificationEngine.ask(userMessage);
             if (question != null) {
-                return new AgentResult(null, null, question, true, null, null);
+                addTrace(trace, traceListener, 0, "ask", "需要补充信息", question, "waiting");
+                return new AgentResult(null, null, question, true, null, List.of(), trace);
             }
         }
 
         List<Map<String, Object>> messages = new ArrayList<>();
-        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        String systemPrompt = promptResources.load("system.txt")
+                + "\n\n当前运行时工具清单：\n"
+                + JSON.toJSONString(toolRegistry.getToolDescriptions());
+        messages.add(Map.of("role", "system", "content", systemPrompt));
 
         String memoryContext = buildMemoryContext(userId, userMessage);
         if (memoryContext != null) {
             messages.add(Map.of("role", "system", "content", "User memory:\n" + memoryContext));
         }
-        messages.add(Map.of("role", "user", "content", userMessage));
+        messages.add(Map.of("role", "user", "content", userMessage == null ? "" : userMessage));
 
         Map<String, Object> finalMetrics = null;
         String finalReply = null;
         List<String> finalSuggestions = null;
         List<Map<String, Object>> pendingCommands = new ArrayList<>();
 
-        for (int round = 0; round < MAX_ROUNDS; round++) {
+        int rounds = Math.max(1, maxRounds);
+        int lastRound = 0;
+        for (int round = 1; round <= rounds; round++) {
+            lastRound = round;
             JSONObject decision = askModelForDecision(messages);
             if (decision == null) {
+                addTrace(trace, traceListener, round, "error", "无法解析模型决策", "本轮没有得到有效 JSON", "error");
                 break;
             }
 
             String action = decision.getString("action");
-            String thought = decision.getString("thought");
+            String summary = decision.getString("summary");
             if (action == null || action.isBlank()) {
+                addTrace(trace, traceListener, round, "error", "决策缺少动作", "模型返回了空 action", "error");
                 break;
             }
+
+            addTrace(trace, traceListener, round, "decision", "第 " + round + " 轮决策",
+                    summarizeDecision(action, summary), "running");
 
             if ("respond".equals(action)) {
                 finalReply = decision.getString("content");
                 finalSuggestions = parseSuggestions(decision.getJSONArray("suggestions"));
+                addTrace(trace, traceListener, round, "complete", "生成最终答复", "已完成工具结果汇总", "success");
                 break;
             }
 
             if ("ask".equals(action)) {
-                return new AgentResult(null, null, decision.getString("content"), true, null, null);
+                String clarification = decision.getString("content");
+                addTrace(trace, traceListener, round, "ask", "等待用户补充", clarification, "waiting");
+                return new AgentResult(null, null, clarification, true, null, List.of(), trace);
             }
 
             JSONObject params = decision.getJSONObject("params");
             if (params == null) {
                 params = new JSONObject();
             }
+            addTrace(trace, traceListener, round, "action", "调用 " + action,
+                    summarizeParams(action, params), "running");
 
             Object rawResult = invokeTool(action, params);
             Map<String, Object> resultMap = asMap(rawResult);
+            Map<String, Object> observedMap = resultMap;
             String observation = formatObservation(action, rawResult);
+            boolean observationFailed = resultMap != null && isFailed(resultMap);
 
             if (resultMap != null) {
                 collectCommands(resultMap, pendingCommands);
@@ -146,43 +147,59 @@ public class AgentLoopService {
                     if (synthesis != null && !synthesis.isBlank()) {
                         observation = synthesis;
                     }
+                } else if (isAdvancedAnalysis(resultMap)) {
+                    finalMetrics = resultMap;
                 } else if (isFailed(resultMap)) {
-                    Map<String, Object> fallback = tryFallback(action, params, resultMap, round);
+                    Map<String, Object> fallback = tryFallback(action, params, resultMap, round - 1);
                     if (fallback != null) {
+                        observationFailed = isFailed(fallback);
+                        observedMap = fallback;
                         collectCommands(fallback, pendingCommands);
-                        observation = "Primary tool failed. Fallback result:\n" + formatObservation("fallback", fallback);
+                        observation = "主工具失败，已尝试降级：" + formatObservation("fallback", fallback);
                         if (isValidMetrics(fallback)) {
                             finalMetrics = validationLayer.validateMetrics(fallback);
                             String synthesis = synthesize(finalMetrics, userMessage);
                             if (synthesis != null && !synthesis.isBlank()) {
                                 observation = synthesis;
                             }
+                        } else if (isAdvancedAnalysis(fallback)) {
+                            finalMetrics = fallback;
                         }
+                        addTrace(trace, traceListener, round, "fallback", "执行降级策略",
+                                formatTraceDetail(fallback), isFailed(fallback) ? "error" : "success");
                     }
                 }
             }
 
+            addTrace(trace, traceListener, round, "observation", "获得工具结果",
+                    formatTraceDetail(observedMap == null ? rawResult : observedMap),
+                    observationFailed ? "error" : "success");
             messages.add(Map.of("role", "assistant", "content",
-                    safe(thought, "I selected " + action)));
+                    safe(summary, "选择 " + action)));
             messages.add(Map.of("role", "user", "content",
                     "Tool " + action + " returned:\n" + observation));
         }
 
         if (finalReply == null) {
-            finalReply = finalMetrics != null
-                    ? buildMetricReply(finalMetrics)
-                    : "I could not obtain enough valid GIS data for this request. Please provide a more specific location or draw/upload an AOI.";
+            if (finalMetrics != null && isAdvancedAnalysis(finalMetrics)) {
+                finalReply = buildAdvancedReply(finalMetrics);
+            } else {
+                finalReply = finalMetrics != null
+                        ? buildMetricReply(finalMetrics)
+                        : "暂未获取足够的有效 GIS 数据。请提供更具体的地点，或绘制/上传 AOI。";
+            }
         }
 
-        if ((finalSuggestions == null || finalSuggestions.isEmpty())) {
+        if (finalSuggestions == null || finalSuggestions.isEmpty()) {
             finalSuggestions = suggestionEngine.generateSuggestions(finalMetrics);
         }
 
         saveAnalysis(userId, userMessage, finalMetrics);
         memoryStore.cleanupExpired();
+        addTrace(trace, traceListener, Math.max(1, lastRound), "complete", "任务结束", "已返回结果和可执行地图命令", "success");
 
         return new AgentResult(finalReply, finalSuggestions, null, false,
-                finalMetrics, dedupeCommands(pendingCommands));
+                finalMetrics, dedupeCommands(pendingCommands), trace);
     }
 
     private boolean isPlanningDemoRequest(String userMessage) {
@@ -199,7 +216,13 @@ public class AgentLoopService {
                 || userMessage.contains("方案对比");
     }
 
-    private AgentResult executePlanningDemo(String userMessage, String userId) {
+    private AgentResult executePlanningDemo(
+            String userMessage,
+            String userId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        addTrace(trace, traceListener, 1, "action", "检索规划知识库",
+                "提取 CityEngine、CGA 与规划控制资料", "running");
         String ragContext = knowledgeService.search(
                 "CityEngine 建筑生成 CGA 规划控制 建筑高度 退界 楼层 立面 导出 SLPK OBJ " + userMessage,
                 5
@@ -211,12 +234,16 @@ public class AgentLoopService {
         params.put("userRequest", userMessage);
         params.put("useDemoCase", userMessage.contains("比赛案例") || userMessage.toLowerCase().contains("competition demo"));
 
+        addTrace(trace, traceListener, 2, "action", "提交 CityEngine 规划任务",
+                "使用当前 AOI、建筑和受约束规划参数", "running");
         Map<String, Object> result = asMap(invokeTool("submitCityEnginePlanningJob", params));
         if (result == null || isFailed(result)) {
             String message = result == null
                     ? "CityEngine 任务没有返回有效结果。"
                     : String.valueOf(result.getOrDefault("message", "CityEngine 任务提交失败。"));
-            return new AgentResult(message, List.of("检查 Python GIS 服务与 CityEngine 2025.1"), null, false, null, List.of());
+            addTrace(trace, traceListener, 2, "error", "规划任务提交失败", message, "error");
+            return new AgentResult(message, List.of("检查 Python GIS 服务与 CityEngine 2025.1"),
+                    null, false, null, List.of(), trace);
         }
 
         Map<String, Object> metrics = validationLayer.validateMetrics(result);
@@ -227,6 +254,8 @@ public class AgentLoopService {
         JSONObject waitParams = new JSONObject();
         waitParams.put("jobId", jobId);
         waitParams.put("timeoutSeconds", 180);
+        addTrace(trace, traceListener, 3, "action", "等待 CityEngine 作业",
+                "作业编号 " + jobId, "running");
         Map<String, Object> completed = asMap(invokeTool("waitCityEngineJob", waitParams));
         String status = completed == null ? "queued" : String.valueOf(completed.getOrDefault("status", "queued"));
         String reply;
@@ -264,26 +293,18 @@ public class AgentLoopService {
                     + "\n- Python 脚本：" + script
                     + "\n- CGA 规则：" + rule;
             suggestions = List.of("稍后查询 CityEngine 作业状态", "检查 CityEngine 运行窗口", "完成后下载 SLPK 或 OBJ");
-        }        saveAnalysis(userId, userMessage, metrics);
-        return new AgentResult(reply, suggestions, null, false, metrics, List.of());
+        }
+        addTrace(trace, traceListener, 3, "complete", "CityEngine 作业状态",
+                "当前状态：" + status, "failed".equalsIgnoreCase(status) ? "error" : "success");
+        saveAnalysis(userId, userMessage, metrics);
+        return new AgentResult(reply, suggestions, null, false, metrics, List.of(), trace);
     }
 
     private String generateCityEngineRequirements(String userMessage, String ragContext) {
-        String prompt = """
-                你是 ArcGIS CityEngine 规划参数设计器。根据用户要求和 RAG 资料输出严格 JSON，禁止输出代码或 Markdown。
-                只允许以下字段：
-                maxBuildingHeight: 3-300 数字；floorHeight: 2.4-6 数字；setback: 0-50 数字；
-                lotCoverage: 0.1-1 数字；facadeStyle: modern/residential/commercial/industrial/institutional/mixed_use；
-                roofType: 简短字符串；primaryColor: 十六进制颜色；
-                exportFormats: slpk/obj/fbx/gltf 数组；designSummary: 中文说明。
-                不考虑绿地。不得生成 Python、CGA、Shell 或任意可执行代码。
-
-                用户要求：
-                %s
-
-                RAG 资料：
-                %s
-                """.formatted(userMessage, ragContext == null ? "" : ragContext);
+        String prompt = promptResources.render("prompts/cityengine-requirements.txt", Map.of(
+                "USER_REQUEST", userMessage == null ? "" : userMessage,
+                "RAG_CONTEXT", ragContext == null ? "" : ragContext
+        ));
         try {
             String raw = chatLanguageModel.generate(prompt);
             return extractJson(raw);
@@ -293,17 +314,10 @@ public class AgentLoopService {
     }
     private String synthesizePlanningDemo(Map<String, Object> result, String userMessage) {
         try {
-            String prompt = """
-                    你是城市规划 GIS 分析师。根据给定的确定性比赛案例结果，生成简洁中文报告。
-                    必须说明：四项指标的现状和优化后变化、未达标项、问题建筑、采用的优化动作，
-                    并明确演示规则不是法定审批依据。只能使用 JSON 中已有信息，禁止编造数值。
-
-                    用户请求：
-                    %s
-
-                    规划评价 JSON：
-                    %s
-                    """.formatted(userMessage, JSON.toJSONString(result));
+            String prompt = promptResources.render("prompts/planning-synthesis.txt", Map.of(
+                    "USER_REQUEST", userMessage == null ? "" : userMessage,
+                    "RESULT_JSON", JSON.toJSONString(result)
+            ));
             return chatLanguageModel.generate(prompt);
         } catch (Exception e) {
             return null;
@@ -339,6 +353,22 @@ public class AgentLoopService {
 
     private Object invokeTool(String action, JSONObject params) {
         try {
+            if ("generateDynamicTool".equals(action)) {
+                String name = params.getString("name");
+                String description = params.getString("description");
+                String requirement = params.getString("requirement");
+                JSONObject context = params.getJSONObject("context");
+                DynamicCodeGenerator.CodeExecutionResult generated =
+                        dynamicCodeGenerator.generateAndRegister(name, description, requirement, context);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("status", generated.status());
+                response.put("message", generated.message());
+                response.put("result", generated.result());
+                if (generated.registeredTool() != null) {
+                    response.put("registered_tool", generated.registeredTool());
+                }
+                return response;
+            }
             return toolRegistry.invoke(action, params);
         } catch (Exception e) {
             return Map.of("status", "Error", "message", e.getMessage(), "tool", action);
@@ -422,6 +452,13 @@ public class AgentLoopService {
                 && getDouble(result, "site_area", getDouble(result, "site_area_sqm", 0)) > 0;
     }
 
+    private boolean isAdvancedAnalysis(Map<String, Object> result) {
+        String type = String.valueOf(result.getOrDefault("analysis_type", ""));
+        return "skyline".equalsIgnoreCase(type)
+                || "sunlight".equalsIgnoreCase(type)
+                || "advanced_analysis".equalsIgnoreCase(type);
+    }
+
     private void collectCommands(Map<String, Object> result, List<Map<String, Object>> pendingCommands) {
         if (!isSuccess(result)) {
             return;
@@ -481,17 +518,10 @@ public class AgentLoopService {
 
     private String synthesize(Map<String, Object> metrics, String userMessage) {
         try {
-            String prompt = """
-                    You are a professional GIS analyst. Write a concise user-facing answer in Chinese.
-                    Use only the metrics below. Do not invent any numbers.
-                    Mention when FAR is estimated from predicted floors or when confidence is low.
-
-                    User request:
-                    %s
-
-                    Metrics JSON:
-                    %s
-                    """.formatted(userMessage, JSON.toJSONString(metrics));
+            String prompt = promptResources.render("prompts/metric-synthesis.txt", Map.of(
+                    "USER_REQUEST", userMessage == null ? "" : userMessage,
+                    "METRICS_JSON", JSON.toJSONString(metrics)
+            ));
             return chatLanguageModel.generate(prompt);
         } catch (Exception e) {
             return null;
@@ -547,6 +577,88 @@ public class AgentLoopService {
         );
     }
 
+    private String buildAdvancedReply(Map<String, Object> result) {
+        String type = String.valueOf(result.getOrDefault("analysis_type", "advanced"));
+        if ("skyline".equalsIgnoreCase(type)) {
+            return String.format(
+                    "已完成天际线形态筛查：分析了 %d 栋建筑，最高建筑约 %.1f 米，平均高度约 %.1f 米。结果为基于建筑中心点和属性高度的方向剖面，不包含地形遮挡。",
+                    getInt(result, "building_count", 0),
+                    getDouble(result, "max_height", 0),
+                    getDouble(result, "mean_height", 0));
+        }
+        return String.format(
+                "已完成日照/阴影筛查：采样 %d 个时段，日照高度合格时段约 %.0f%%，最大估算阴影长度约 %.1f 米。结果用于方案比选，不替代法定日照审查。",
+                getInt(result, "sample_count", 0),
+                getDouble(result, "sunlight_window_percent", 0),
+                getDouble(result, "max_shadow_length_m", 0));
+    }
+
+    private void addTrace(
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> listener,
+            int round,
+            String phase,
+            String title,
+            String detail,
+            String status) {
+        ExecutionTrace event = new ExecutionTrace(
+                round,
+                phase,
+                title == null ? "" : title,
+                detail == null ? "" : detail,
+                status == null ? "running" : status
+        );
+        trace.add(event);
+        if (listener != null) {
+            try {
+                listener.accept(event);
+            } catch (Exception ignored) {
+                // A disconnected SSE client must not abort the GIS task.
+            }
+        }
+    }
+
+    private String summarizeDecision(String action, String summary) {
+        if (summary != null && !summary.isBlank() && !summary.equalsIgnoreCase("null")) {
+            return summary.length() > 180 ? summary.substring(0, 180) + "…" : summary;
+        }
+        return "选择受控工具：" + action;
+    }
+
+    private String summarizeParams(String action, JSONObject params) {
+        if (params == null || params.isEmpty()) {
+            return "无额外参数";
+        }
+        List<String> keys = new ArrayList<>();
+        for (String key : params.keySet()) {
+            if ("context".equalsIgnoreCase(key) || "geoJson".equalsIgnoreCase(key)
+                    || "buildings".equalsIgnoreCase(key) || "aoi".equalsIgnoreCase(key)) {
+                continue;
+            }
+            keys.add(key + "=" + String.valueOf(params.get(key)));
+        }
+        return keys.isEmpty() ? "已提供空间上下文" : String.join("，", keys);
+    }
+
+    private String formatTraceDetail(Object result) {
+        if (result == null) return "无返回值";
+        Map<String, Object> map = asMap(result);
+        String detail;
+        if (map == null) {
+            detail = String.valueOf(result);
+        } else {
+            List<String> fields = new ArrayList<>();
+            for (String key : List.of("status", "stage", "analysis_type", "building_count", "far",
+                    "max_height", "mean_height", "sample_count", "sunlight_window_percent",
+                    "max_shadow_length_m", "registered_tool", "message")) {
+                if (map.containsKey(key)) fields.add(key + "=" + map.get(key));
+            }
+            detail = fields.isEmpty() ? "工具已返回结构化结果" : String.join("，", fields);
+        }
+        detail = detail.replaceAll("\\s+", " ").trim();
+        return detail.length() > 240 ? detail.substring(0, 240) + "…" : detail;
+    }
+
     private void saveAnalysis(String userId, String userMessage, Map<String, Object> finalMetrics) {
         if (finalMetrics == null) {
             return;
@@ -577,7 +689,6 @@ public class AgentLoopService {
                     .append(msg.get("content")).append("\n")
                     .append("</").append(msg.get("role")).append(">\n\n");
         }
-        sb.append("Decide the next action. Return JSON only.");
         return sb.toString();
     }
 
@@ -686,7 +797,16 @@ public class AgentLoopService {
             String clarification,
             boolean needsClarification,
             Map<String, Object> metrics,
-            List<Map<String, Object>> commands
+            List<Map<String, Object>> commands,
+            List<ExecutionTrace> trace
+    ) {}
+
+    public record ExecutionTrace(
+            int round,
+            String phase,
+            String title,
+            String detail,
+            String status
     ) {}
 }
 

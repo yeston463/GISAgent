@@ -6,15 +6,25 @@ import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
+import org.example.service.PromptResourceService;
+
+import java.util.Map;
 
 @Component
 public class GisMapTools {
 
     @Autowired
     private ChatLanguageModel chatLanguageModel;
+
+    @Autowired
+    private PromptResourceService promptResources;
+
+    @Value("${gis.amap-key:}")
+    private String amapKey;
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -56,8 +66,7 @@ public class GisMapTools {
         // 降级：走 LLM 知识
         System.out.println("🧠 [AI地名查找] 使用 LLM 知识获取坐标: " + locationName);
         try {
-            String prompt = "你是一个地理坐标专家。请直接给出「" + locationName + "」的WGS84经纬度坐标（GCJ-02纠偏前的原始坐标）。"
-                    + "只返回纯JSON，不要任何其他文字：{\"longitude\": 116.xx, \"latitude\": 39.xx, \"address\": \"...\"}";
+            String prompt = promptResources.render("prompts/geocode.txt", Map.of("LOCATION", locationName));
             String response = chatLanguageModel.generate(prompt);
             response = response.trim();
             if (response.startsWith("```")) {
@@ -95,9 +104,11 @@ public class GisMapTools {
     private String geocodeInternal(String locationName, String city) {
         System.out.println("🔍 [高德地名查找] 正在检索: " + locationName + (city.isEmpty() ? "" : " (限定城市: " + city + ")"));
         try {
-            String myKey = "e7380cee15eb2fc2fd75440e2f1bfe4d";
+            if (amapKey == null || amapKey.isBlank()) {
+                return "{\"status\": \"error\", \"message\": \"AMAP_KEY environment variable is not configured\"}";
+            }
             UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl("https://restapi.amap.com/v3/geocode/geo")
-                    .queryParam("key", myKey)
+                    .queryParam("key", amapKey)
                     .queryParam("address", locationName);
             if (!city.isEmpty()) {
                 builder.queryParam("city", city);
@@ -131,8 +142,11 @@ public class GisMapTools {
 
     private String verifyWithAi(String locationName, double lng, double lat) {
         try {
-            String prompt = "判断WGS84坐标(" + lng + ", " + lat + ")是否与「" + locationName + "」的实际地理位置一致。"
-                    + "只返回一个词：consistent 或 inconsistent";
+            String prompt = promptResources.render("prompts/geocode-verify.txt", Map.of(
+                    "LOCATION", locationName,
+                    "LONGITUDE", String.valueOf(lng),
+                    "LATITUDE", String.valueOf(lat)
+            ));
             String answer = chatLanguageModel.generate(prompt).trim().toLowerCase();
             return answer.contains("inconsistent") ? "inconsistent" : "consistent";
         } catch (Exception e) {

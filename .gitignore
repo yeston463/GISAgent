@@ -31,3 +31,13 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local secrets and generated workspace files ###
+.env
+**/.env
+__pycache__/
+*.py[cod]
+.codex/
+.codex-temp-*/
+.agents/
+/share/*.zip

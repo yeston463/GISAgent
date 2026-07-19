@@ -1,0 +1,2 @@
+判断 WGS84 坐标 ({{LONGITUDE}}, {{LATITUDE}}) 是否与“{{LOCATION}}”的实际位置大致一致。
+只返回 consistent 或 inconsistent。

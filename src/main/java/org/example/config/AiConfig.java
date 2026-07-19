@@ -8,15 +8,21 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 @Configuration
 public class AiConfig {
 
     @Value("${QWEN-APIKEY}")
     private String apiKey;
+
+    @Value("${ai.qwen.model-name:qwen-plus}")
+    private String chatModelName;
 
     @Value("${rag.min-score:0.6}")
     private double minScore;
@@ -25,11 +31,23 @@ public class AiConfig {
     private int maxResults;
 
     @Bean
+    @Primary
     public ChatLanguageModel chatLanguageModel() {
         return QwenChatModel.builder()
                 .apiKey(apiKey)
-                .modelName("glm-5")
+                .modelName(chatModelName)
                 .build();
+    }
+
+    /**
+     * Keep RAG usable without requiring PostgreSQL/pgvector at startup. The
+     * store is intentionally process-local; a deployment can provide a
+     * persistent EmbeddingStore bean and this fallback will back off.
+     */
+    @Bean
+    @ConditionalOnMissingBean(EmbeddingStore.class)
+    public EmbeddingStore<TextSegment> embeddingStore() {
+        return new InMemoryEmbeddingStore<>();
     }
 
     @Bean
