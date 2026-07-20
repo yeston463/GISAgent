@@ -56,7 +56,7 @@ public class AgentController {
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter agenticChatStream(@RequestBody ChatRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
-        SseEmitter emitter = new SseEmitter(300_000L);
+        SseEmitter emitter = new SseEmitter(900_000L);
         emitter.onTimeout(emitter::complete);
         CompletableFuture.runAsync(() -> {
             try {
@@ -148,6 +148,9 @@ public class AgentController {
             response.put("commands", commands);
             response.put("suggestions", result.suggestions());
             response.put("needClarification", false);
+        }
+        if (result.metrics() != null) {
+            response.put("metrics", result.metrics());
         }
         response.put("trace", result.trace() == null ? List.of() : result.trace());
         response.put("memoryId", memoryId);

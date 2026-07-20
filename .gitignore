@@ -46,3 +46,4 @@ python-gis-service*.log
 /cityengine-home/
 /cityengine-project/
 /cityengine-workspace/
+/src/main/resources/static/assets/

@@ -156,6 +156,9 @@ public class pyGisTools {
         int timeout = Math.max(1, Math.min(timeoutSeconds, 600));
         return getForMap("/cityengine/jobs/" + jobId + "/wait?timeout=" + timeout);
     }
+    public Map<String, Object> getCityEngineJob(String jobId) {
+        return getForMap("/cityengine/jobs/" + jobId);
+    }
     @Tool("gisRuntimeStatus")
     public Map<String, Object> gisRuntimeStatus() {
         return getForMap("/runtime");
@@ -310,5 +313,3 @@ public class pyGisTools {
         contextService.saveGeoJson(JSON.toJSONString(context));
     }
 }
-
-

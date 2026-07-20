@@ -8,6 +8,7 @@ import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
 import org.example.service.KnowledgeService;
 import org.example.service.PromptResourceService;
+import org.example.tools.pyGisTools;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -49,6 +50,9 @@ public class AgentLoopService {
 
     @Autowired
     private DynamicCodeGenerator dynamicCodeGenerator;
+
+    @Autowired
+    private pyGisTools gisTools;
 
     @Value("${agent.max-rounds:8}")
     private int maxRounds;
@@ -246,17 +250,20 @@ public class AgentLoopService {
                     null, false, null, List.of(), trace);
         }
 
-        Map<String, Object> metrics = validationLayer.validateMetrics(result);
+        // The planning endpoints wrap the deterministic building metrics in
+        // `current.metrics`.  Keep that object as the source for the result
+        // commands; validating the outer planning envelope means the
+        // controller cannot emit `showAnalysisResult`, so the metrics panel
+        // silently disappears even though the CityEngine job succeeds.
+        Map<String, Object> metrics = validationLayer.validateMetrics(
+                extractPlanningMetrics(result));
         Map<String, Object> cityEngineJob = asMap(result.get("cityEngineJob"));
         String jobId = cityEngineJob == null ? "未知" : String.valueOf(cityEngineJob.getOrDefault("jobId", "未知"));
         String script = cityEngineJob == null ? "" : String.valueOf(cityEngineJob.getOrDefault("generatedScript", ""));
         String rule = cityEngineJob == null ? "" : String.valueOf(cityEngineJob.getOrDefault("generatedRule", ""));
-        JSONObject waitParams = new JSONObject();
-        waitParams.put("jobId", jobId);
-        waitParams.put("timeoutSeconds", 180);
-        addTrace(trace, traceListener, 3, "action", "等待 CityEngine 作业",
-                "作业编号 " + jobId, "running");
-        Map<String, Object> completed = asMap(invokeTool("waitCityEngineJob", waitParams));
+        addTrace(trace, traceListener, 3, "action", "CityEngine 正在生成模型",
+                "作业编号 " + jobId + "，正在执行 CGA 规则并生成三维建筑", "running");
+        Map<String, Object> completed = waitForPlanningPipeline(jobId, trace, traceListener, 600);
         String status = completed == null ? "queued" : String.valueOf(completed.getOrDefault("status", "queued"));
         String reply;
         List<String> suggestions;
@@ -294,10 +301,159 @@ public class AgentLoopService {
                     + "\n- CGA 规则：" + rule;
             suggestions = List.of("稍后查询 CityEngine 作业状态", "检查 CityEngine 运行窗口", "完成后下载 SLPK 或 OBJ");
         }
-        addTrace(trace, traceListener, 3, "complete", "CityEngine 作业状态",
-                "当前状态：" + status, "failed".equalsIgnoreCase(status) ? "error" : "success");
+        boolean pipelineComplete = completed != null && completed.get("sceneServiceUrl") != null;
+        boolean pipelineFailed = completed != null
+                && asMap(completed.get("publicationProgress")) != null
+                && "error".equalsIgnoreCase(String.valueOf(
+                        asMap(completed.get("publicationProgress")).get("status")));
+        addTrace(trace, traceListener, 8, pipelineFailed ? "error" : "complete", "规划成果流水线状态",
+                pipelineComplete ? "CityEngine、GeoScene 发布与前端加载准备已完成" : "当前状态：" + status,
+                pipelineComplete ? "success" : pipelineFailed ? "error" : "waiting");
         saveAnalysis(userId, userMessage, metrics);
         return new AgentResult(reply, suggestions, null, false, metrics, List.of(), trace);
+    }
+
+    private Map<String, Object> waitForPlanningPipeline(
+            String jobId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener,
+            int timeoutSeconds) {
+        long deadline = System.currentTimeMillis() + Math.max(1, timeoutSeconds) * 1000L;
+        Set<String> emittedStages = new HashSet<>();
+        Map<String, Object> latest = Map.of("status", "queued", "jobId", jobId);
+
+        while (System.currentTimeMillis() < deadline) {
+            latest = gisTools.getCityEngineJob(jobId);
+            String jobStatus = String.valueOf(latest.getOrDefault("status", "queued"));
+            if ("failed".equalsIgnoreCase(jobStatus) || "not_found".equalsIgnoreCase(jobStatus)
+                    || "Error".equalsIgnoreCase(jobStatus)) {
+                addTrace(trace, traceListener, 3, "error", "CityEngine 模型生成失败",
+                        String.valueOf(latest.getOrDefault("message", "作业未完成")), "error");
+                return latest;
+            }
+
+            if ("completed".equalsIgnoreCase(jobStatus) && emittedStages.add("slpk_exported")) {
+                Map<String, Object> outputs = asMap(latest.get("outputs"));
+                if (outputs != null && outputs.get("slpk") != null) {
+                    updateTrace(trace, traceListener, 3, "CityEngine 正在生成模型",
+                            "CGA 规则执行完成，三维建筑模型已生成", "success");
+                    addTrace(trace, traceListener, 4, "artifact", "SLPK 导出完成",
+                            String.valueOf(outputs.get("slpk")), "success");
+                }
+            }
+
+            emitPublicationTimeline(latest, emittedStages, trace, traceListener);
+            if (latest.get("sceneServiceUrl") != null) {
+                return latest;
+            }
+            Map<String, Object> progress = asMap(latest.get("publicationProgress"));
+            if (progress != null && "error".equalsIgnoreCase(String.valueOf(progress.get("status")))) {
+                return latest;
+            }
+
+            try {
+                Thread.sleep(2000L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return latest;
+            }
+        }
+        latest = new LinkedHashMap<>(latest);
+        latest.put("waitTimedOut", true);
+        return latest;
+    }
+
+    private void emitPublicationTimeline(
+            Map<String, Object> result,
+            Set<String> emittedStages,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        Object timelineValue = result.get("publicationTimeline");
+        if (!(timelineValue instanceof List<?> timeline)) {
+            Map<String, Object> progress = asMap(result.get("publicationProgress"));
+            if (progress != null) {
+                emitPublicationStage(progress, emittedStages, trace, traceListener);
+            }
+            return;
+        }
+        for (Object item : timeline) {
+            Map<String, Object> event = asMap(item);
+            if (event != null) {
+                emitPublicationStage(event, emittedStages, trace, traceListener);
+            }
+        }
+    }
+
+    private void emitPublicationStage(
+            Map<String, Object> event,
+            Set<String> emittedStages,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        String stage = String.valueOf(event.getOrDefault("stage", ""));
+        Set<String> visibleStages = Set.of(
+                "portal_uploading", "portal_uploaded",
+                "scene_publishing", "scene_published",
+                "geoscene_hosted", "publication_failed");
+        if (stage.isBlank() || !visibleStages.contains(stage) || !emittedStages.add(stage)) {
+            return;
+        }
+        String detail = String.valueOf(event.getOrDefault("message", stage));
+        String status = String.valueOf(event.getOrDefault("status", "running"));
+        int round = switch (stage) {
+            case "portal_uploading", "portal_uploaded" -> 5;
+            case "scene_publishing", "scene_published" -> 6;
+            case "geoscene_hosting", "geoscene_hosted" -> 7;
+            default -> 7;
+        };
+        String title = switch (stage) {
+            case "portal_uploading" -> "正在上传 GeoScene Portal";
+            case "portal_uploaded" -> "正在上传 GeoScene Portal";
+            case "scene_publishing" -> "正在发布 Scene Service";
+            case "scene_published" -> "正在发布 Scene Service";
+            case "geoscene_hosting" -> "正在验证 GeoScene 托管";
+            case "geoscene_hosted" -> "GeoScene 托管完成";
+            case "publication_failed" -> "GeoScene 发布失败";
+            default -> "GeoScene 发布状态";
+        };
+        if ("portal_uploaded".equals(stage) || "scene_published".equals(stage)) {
+            updateTrace(trace, traceListener, round, title, detail, "success");
+        } else {
+            addTrace(trace, traceListener, round,
+                    "error".equalsIgnoreCase(status) ? "error" : "publish",
+                    title, detail, status);
+        }
+    }
+
+    private void updateTrace(
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> listener,
+            int round,
+            String title,
+            String detail,
+            String status) {
+        ExecutionTrace updated = new ExecutionTrace(round, "publish", title, detail, status);
+        for (int index = trace.size() - 1; index >= 0; index--) {
+            ExecutionTrace existing = trace.get(index);
+            if (existing.round() == round && existing.title().equals(title)) {
+                trace.set(index, updated);
+                if (listener != null) {
+                    try {
+                        listener.accept(updated);
+                    } catch (Exception ignored) {
+                        // A disconnected SSE client must not abort publication.
+                    }
+                }
+                return;
+            }
+        }
+        trace.add(updated);
+        if (listener != null) {
+            try {
+                listener.accept(updated);
+            } catch (Exception ignored) {
+                // A disconnected SSE client must not abort publication.
+            }
+        }
     }
 
     private String generateCityEngineRequirements(String userMessage, String ragContext) {
@@ -427,6 +583,19 @@ public class AgentLoopService {
             }
         }
         return null;
+    }
+
+    private Map<String, Object> extractPlanningMetrics(Map<String, Object> planningResult) {
+        if (planningResult == null) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> current = asMap(planningResult.get("current"));
+        Map<String, Object> nested = current == null ? null : asMap(current.get("metrics"));
+        if (nested != null && !nested.isEmpty()) {
+            return nested;
+        }
+        Map<String, Object> direct = asMap(planningResult.get("metrics"));
+        return direct != null && !direct.isEmpty() ? direct : planningResult;
     }
 
     private boolean isFailed(Map<String, Object> result) {
@@ -809,5 +978,3 @@ public class AgentLoopService {
             String status
     ) {}
 }
-
-

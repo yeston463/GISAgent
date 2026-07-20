@@ -26,7 +26,11 @@ public class PromptResourceService {
     }
 
     private String readRequiredResource(String resourcePath) {
-        ClassPathResource resource = new ClassPathResource(resourcePath);
+        // SSE/CompletableFuture work may run with the system context loader;
+        // use the application loader so resources inside the executable JAR
+        // remain visible on asynchronous Agent requests.
+        ClassPathResource resource = new ClassPathResource(
+                resourcePath, PromptResourceService.class.getClassLoader());
         try (var input = resource.getInputStream()) {
             String content = new String(input.readAllBytes(), StandardCharsets.UTF_8);
             return content.replace("\uFEFF", "").trim();
