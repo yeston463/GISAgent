@@ -16,6 +16,13 @@ set "PYTHON_REQUEST=python"
 if defined GIS_PYTHON_EXE set "PYTHON_REQUEST=%GIS_PYTHON_EXE%"
 set "PYTHON_REQUEST=%PYTHON_REQUEST:"=%"
 
+if not defined CITYENGINE_RUNTIME_ROOT set "CITYENGINE_RUNTIME_ROOT=C:\GISAgentCityEngine"
+powershell.exe -NoProfile -Command "$p=$env:CITYENGINE_RUNTIME_ROOT; try {$null=[IO.Path]::GetFullPath($p)} catch {exit 1}; foreach($c in $p.ToCharArray()){if([int]$c -gt 127){exit 2}}" >nul
+if errorlevel 1 (
+  echo [ERROR] CITYENGINE_RUNTIME_ROOT must be a valid ASCII-only path.
+  exit /b 1
+)
+
 if not defined QWEN-APIKEY (
   echo [ERROR] Missing QWEN-APIKEY.
   echo         Copy .env.example to .env and set the DashScope key.
@@ -34,7 +41,7 @@ if not exist "!FRONTEND!\package.json" (
   exit /b 1
 )
 
-where java >nul 2>nul || (echo [ERROR] Java 17+ not found.& exit /b 1)
+if not exist "!ROOT!start-java-backend.ps1" (echo [ERROR] Java backend launcher not found.& exit /b 1)
 set "PYTHON_EXE="
 if exist "!PYTHON_REQUEST!" set "PYTHON_EXE=!PYTHON_REQUEST!"
 if not defined PYTHON_EXE (
@@ -86,8 +93,55 @@ if "!DOCKER_READY!"=="1" if exist "!ROOT!compose.yaml" (
   echo [WARN] Redis/pgvector not started. PostgreSQL memory and Redis features may be degraded.
 )
 
+echo Verifying Java backend classes ...
+pushd "!ROOT!"
+call mvnw.cmd -q -DskipTests compile
+if errorlevel 1 (
+  popd
+  echo [ERROR] Java backend compilation failed.
+  pause
+  exit /b 1
+)
+
+javap -classpath "!ROOT!target\classes" org.example.Lc4j1Application >nul 2>nul
+if errorlevel 1 (
+  echo Java main class is missing. Rebuilding compiler output ...
+  call mvnw.cmd -q -DskipTests clean compile
+  if errorlevel 1 (
+    popd
+    echo [ERROR] Java backend clean rebuild failed.
+    pause
+    exit /b 1
+  )
+)
+
+javap -classpath "!ROOT!target\classes" org.example.Lc4j1Application >nul 2>nul
+if errorlevel 1 (
+  popd
+  echo [ERROR] Java main class is still missing after rebuild.
+  echo         Expected: target\classes\org\example\Lc4j1Application.class
+  pause
+  exit /b 1
+)
+
+echo Resolving Java runtime dependencies ...
+call mvnw.cmd -q dependency:build-classpath "-Dmdep.outputFile=target/runtime-classpath.txt" "-Dmdep.includeScope=runtime"
+if errorlevel 1 (
+  popd
+  echo [ERROR] Java runtime classpath generation failed.
+  pause
+  exit /b 1
+)
+if not exist "!ROOT!target\runtime-classpath.txt" (
+  popd
+  echo [ERROR] Java runtime classpath file was not generated.
+  pause
+  exit /b 1
+)
+popd
+
 echo Starting Java backend on http://127.0.0.1:8080 ...
-start "GIS Agent - Java" /D "%ROOT%" cmd /k "call mvnw.cmd spring-boot:run"
+start "GIS Agent - Java" /D "%ROOT%" powershell.exe -NoLogo -NoExit -ExecutionPolicy Bypass -File "%ROOT%start-java-backend.ps1" -SkipBuild
 
 echo Starting Python GIS service on http://127.0.0.1:8000 ...
 start "GIS Agent - Python" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000"

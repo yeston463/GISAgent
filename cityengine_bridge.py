@@ -1,6 +1,10 @@
 ﻿import json
 import os
+import shutil
+import stat
 import subprocess
+import threading
+import time
 import uuid
 from configparser import ConfigParser
 from datetime import datetime, timezone
@@ -12,26 +16,56 @@ WORKSPACE = Path(os.environ.get("CITYENGINE_WORKSPACE", ROOT / "cityengine-works
 PROJECT = Path(os.environ.get("CITYENGINE_PROJECT", ROOT / "cityengine-project"))
 JOBS_DIR = WORKSPACE / "automation" / "jobs"
 RESULTS_DIR = WORKSPACE / "automation" / "results"
-SCRIPTS_DIR = PROJECT / "scripts" / "generated"
-DATA_DIR = PROJECT / "data" / "generated"
-RULES_DIR = PROJECT / "rules" / "generated"
-MODELS_DIR = PROJECT / "models" / "generated"
-CONFIG_DIR = PROJECT / "config" / "generated"
-CITYENGINE_HOME = ROOT / "cityengine-home"
-JYTHON_STARTUP = CITYENGINE_HOME / ".CityEngine" / "2025.1R.win32.win32.x86_64" / "jythonCache3" / "startup.py"
-STARTUP_SCRIPT = JYTHON_STARTUP
+RUNTIME_ROOT = Path(os.environ.get("CITYENGINE_RUNTIME_ROOT", r"C:\GISAgentCityEngine"))
+RUNS_DIR = RUNTIME_ROOT / "runs"
+JYTHON_STARTUP_RELATIVE = Path(".CityEngine") / "2025.1R.win32.win32.x86_64" / "jythonCache3" / "startup.py"
 ALLOWED_EXPORTS = {"slpk", "obj", "fbx", "gltf"}
 ALLOWED_STYLES = {"modern", "residential", "commercial", "industrial", "institutional", "mixed_use"}
+TERMINAL_STATUSES = {"completed", "failed", "error"}
+_monitor_lock = threading.Lock()
+_monitor_threads = {}
+
+
+def _is_ascii_path(path):
+    try:
+        str(path).encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _positive_int_env(name, default, minimum):
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+STARTUP_TIMEOUT_SECONDS = _positive_int_env("CITYENGINE_STARTUP_TIMEOUT_SECONDS", 120, 10)
+JOB_TIMEOUT_SECONDS = max(
+    STARTUP_TIMEOUT_SECONDS,
+    _positive_int_env("CITYENGINE_JOB_TIMEOUT_SECONDS", 900, 60),
+)
+KEEP_RUNTIME_CACHE = os.environ.get("CITYENGINE_KEEP_RUNTIME_CACHE", "false").lower() in {
+    "1", "true", "yes",
+}
 
 
 def runtime_status():
+    startup_template = RUNS_DIR / "<jobId>" / "home" / JYTHON_STARTUP_RELATIVE
     return {
         "available": CITYENGINE_EXE.is_file(),
         "executable": str(CITYENGINE_EXE),
         "workspace": str(WORKSPACE),
         "project": str(PROJECT),
-        "startupScript": str(STARTUP_SCRIPT),
-        "automationConfigured": STARTUP_SCRIPT.is_file() and (PROJECT / ".project").is_file(),
+        "runtimeRoot": str(RUNTIME_ROOT),
+        "runsDirectory": str(RUNS_DIR),
+        "runtimeRootAscii": _is_ascii_path(RUNTIME_ROOT),
+        "startupTimeoutSeconds": STARTUP_TIMEOUT_SECONDS,
+        "jobTimeoutSeconds": JOB_TIMEOUT_SECONDS,
+        "keepRuntimeCache": KEEP_RUNTIME_CACHE,
+        "startupScriptTemplate": str(startup_template),
+        "automationConfigured": CITYENGINE_EXE.is_file() and _is_ascii_path(RUNTIME_ROOT),
     }
 
 
@@ -63,13 +97,85 @@ def normalize_requirements(requirements, rule_set):
     }
 
 
-def _ensure_project():
-    for path in (WORKSPACE, PROJECT, CITYENGINE_HOME, JYTHON_STARTUP.parent, JOBS_DIR, RESULTS_DIR, SCRIPTS_DIR, DATA_DIR, RULES_DIR, MODELS_DIR, CONFIG_DIR, PROJECT / "scenes"):
+def _atomic_write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(path)
+
+
+def _read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _prepare_runtime(job_id):
+    if not all(character.isascii() and (character.isalnum() or character in "-_") for character in job_id):
+        raise ValueError("CityEngine job id contains unsupported characters")
+    if not _is_ascii_path(RUNTIME_ROOT):
+        raise ValueError("CITYENGINE_RUNTIME_ROOT must contain ASCII characters only")
+
+    run_dir = RUNS_DIR / job_id
+    runtime = {
+        "run": run_dir,
+        "workspace": run_dir / "workspace",
+        "home": run_dir / "home",
+        "project": run_dir / "project",
+        "result": run_dir / "result" / f"{job_id}.json",
+        "started": run_dir / "result" / f"{job_id}.started",
+        "log": run_dir / "logs" / "cityengine.log",
+        "metadataLog": run_dir / "logs" / "cityengine-metadata.log",
+    }
+    runtime.update({
+        "startup": runtime["home"] / JYTHON_STARTUP_RELATIVE,
+        "workspaceMetadataLog": runtime["workspace"] / ".metadata" / ".log",
+        "scripts": runtime["project"] / "scripts" / "generated",
+        "data": runtime["project"] / "data" / "generated",
+        "rules": runtime["project"] / "rules" / "generated",
+        "models": runtime["project"] / "models" / "generated",
+        "config": runtime["project"] / "config" / "generated",
+        "scenes": runtime["project"] / "scenes",
+    })
+    for path in (
+        WORKSPACE, JOBS_DIR, RESULTS_DIR, runtime["workspace"], runtime["home"],
+        runtime["result"].parent, runtime["log"].parent, runtime["startup"].parent,
+        runtime["scripts"], runtime["data"], runtime["rules"], runtime["models"],
+        runtime["config"], runtime["scenes"],
+    ):
         path.mkdir(parents=True, exist_ok=True)
-    project_file = PROJECT / ".project"
-    if not project_file.exists():
-        project_file.write_text('''<?xml version="1.0" encoding="UTF-8"?>\n<projectDescription>\n  <name>GISAgentCityEngineAutomation</name>\n  <comment></comment>\n  <projects></projects>\n  <buildSpec></buildSpec>\n  <natures></natures>\n</projectDescription>\n''', encoding="utf-8")
-    STARTUP_SCRIPT.write_text(_startup_script(), encoding="utf-8")
+
+    if runtime["startup"].is_file():
+        runtime["startup"].unlink()
+
+    project_file = runtime["project"] / ".project"
+    project_file.write_text('''<?xml version="1.0" encoding="UTF-8"?>\n<projectDescription>\n  <name>GISAgentCityEngineAutomation</name>\n  <comment></comment>\n  <projects></projects>\n  <buildSpec></buildSpec>\n  <natures></natures>\n</projectDescription>\n''', encoding="ascii")
+    return runtime
+
+
+def _runtime_metadata(runtime):
+    return {
+        "runtimeRun": str(runtime["run"]),
+        "runtimeWorkspace": str(runtime["workspace"]),
+        "runtimeHome": str(runtime["home"]),
+        "runtimeProject": str(runtime["project"]),
+        "runtimeResult": str(runtime["result"]),
+        "runtimeStartedMarker": str(runtime["started"]),
+        "runtimeLog": str(runtime["log"]),
+        "runtimeMetadataLog": str(runtime["metadataLog"]),
+        "runtimeOutputRoot": str(runtime["models"]),
+    }
+
+
+def repository_result_path(job_id):
+    if not all(character.isascii() and (character.isalnum() or character in "-_") for character in job_id):
+        raise ValueError("CityEngine job id contains unsupported characters")
+    return RESULTS_DIR / f"{job_id}.json"
+
+
+def write_job_result(job_id, result):
+    _atomic_write_json(repository_result_path(job_id), result)
 
 
 def _startup_script():
@@ -122,29 +228,31 @@ def _generate_cga(requirements):
     return f'''version "2025.0"\n\nattr ce_height = 12\nattr ce_modify = 0\nattr ce_setback = 0\nattr ce_color = "#b7c1c8"\n\n@StartRule\nLot --> case ce_setback > 0: setback(ce_setback) {{ all: Buildable }} else: Buildable\nBuildable --> extrude(ce_height) Building\nBuilding --> comp(f) {{ side: Facade | top: Roof }}\nFacade --> color(ce_color) split(y) {{ ~{requirements["floorHeight"]}: Floor }}*\nFloor --> color(ce_color)\nRoof --> color("#d9e2e8")\n'''
 
 
-def _generated_script(job_id, layer_name, shp_workspace_path, rule_workspace_path, result_path, requirements):
+def _generated_script(job_id, layer_name, shp_workspace_path, rule_workspace_path, result_path, started_path, requirements):
     exports = requirements["exportFormats"]
-    return f'''from scripting import *\nimport json\nimport os\nimport traceback\n\nce = CE()\nJOB_ID = {job_id!r}\nRESULT_PATH = {str(result_path)!r}\nEXPORTS = {exports!r}\n\ndef write_result(status, outputs, message):\n    result = {{"jobId": JOB_ID, "status": status, "outputs": outputs, "message": message}}\n    f = open(RESULT_PATH, "w")\n    f.write(json.dumps(result, ensure_ascii=False, indent=2))\n    f.close()\n\ndef run():\n    outputs = {{}}\n    try:\n        scene_path = "/automationProject/scenes/{job_id}.cej"\n        ce.newFile(scene_path)\n        settings = SHPImportSettings()\n        ce.importFile(ce.toFSPath({shp_workspace_path!r}), settings)\n        layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer, ce.withName({layer_name!r}))\n        if not layers:\n            layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer)\n        if not layers:\n            raise RuntimeError("CityEngine did not create a shape layer from the footprint shapefile")\n        shapes = ce.getObjectsFrom(layers[0], ce.isShape)\n        if not shapes:\n            raise RuntimeError("No footprint shapes were imported")\n        ce.setRuleFile(shapes, {rule_workspace_path!r})\n        ce.setStartRule(shapes, "Lot")\n        ce.generateModels(shapes)\n        ce.waitForUIIdle()\n        output_dir = ce.toFSPath("/automationProject/models/generated/{job_id}")\n        if not os.path.isdir(output_dir):\n            os.makedirs(output_dir)\n        if "obj" in EXPORTS:\n            obj = OBJExportModelSettings()\n            obj.setOutputPath(output_dir)\n            obj.setBaseName("{job_id}")\n            obj.setFileGranularity(OBJExportModelSettings.START_SHAPE)\n            obj.setExistingFiles(OBJExportModelSettings.OVERWRITE)\n            obj.setTerrainLayers(OBJExportModelSettings.TERRAIN_NONE)\n            ce.export(shapes, obj)\n            outputs["obj"] = output_dir\n        if "slpk" in EXPORTS:\n            slpk = SPKMeshExportModelSettings()\n            slpk.setOutputPath(output_dir)\n            slpk.setBaseName("{job_id}")\n            slpk.setSceneType("Local")\n            slpk.setExistingFiles(SPKMeshExportModelSettings.OVERWRITE)\n            slpk.setFileSize(SPKMeshExportModelSettings.MIDSIZE_FILE)\n            ce.export(shapes, slpk)\n            outputs["slpk"] = os.path.join(output_dir, "{job_id}.slpk")\n        if "fbx" in EXPORTS:\n            fbx = FBXExportModelSettings()\n            fbx.setOutputPath(output_dir)\n            fbx.setBaseName("{job_id}")\n            ce.export(shapes, fbx)\n            outputs["fbx"] = output_dir\n        if "gltf" in EXPORTS:\n            gltf = GLTFExportModelSettings()\n            gltf.setOutputPath(output_dir)\n            gltf.setBaseName("{job_id}")\n            ce.export(shapes, gltf)\n            outputs["gltf"] = output_dir\n        ce.saveFile(scene_path)\n        write_result("completed", outputs, "CityEngine generation and export completed")\n    except Exception as exc:\n        write_result("failed", outputs, str(exc) + "\\n" + traceback.format_exc())\n    finally:\n        try:\n            ce.waitForUIIdle()\n            ce.closeFile()\n        except:\n            pass\n        ce.exit()\n\nrun()\n'''
+    return f'''from scripting import *\nimport json\nimport os\nimport traceback\n\nce = CE()\nJOB_ID = {job_id!r}\nRESULT_PATH = {str(result_path)!r}\nSTARTED_PATH = {str(started_path)!r}\nEXPORTS = {exports!r}\n\ndef write_result(status, outputs, message):\n    result = {{"jobId": JOB_ID, "status": status, "outputs": outputs, "message": message}}\n    f = open(RESULT_PATH, "w")\n    f.write(json.dumps(result, ensure_ascii=False, indent=2))\n    f.close()\n\ndef run():\n    outputs = {{}}\n    try:\n        started = open(STARTED_PATH, "w")\n        started.write(JOB_ID)\n        started.close()\n        scene_path = "/automationProject/scenes/{job_id}.cej"\n        ce.newFile(scene_path)\n        settings = SHPImportSettings()\n        ce.importFile(ce.toFSPath({shp_workspace_path!r}), settings)\n        layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer, ce.withName({layer_name!r}))\n        if not layers:\n            layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer)\n        if not layers:\n            raise RuntimeError("CityEngine did not create a shape layer from the footprint shapefile")\n        shapes = ce.getObjectsFrom(layers[0], ce.isShape)\n        if not shapes:\n            raise RuntimeError("No footprint shapes were imported")\n        ce.setRuleFile(shapes, {rule_workspace_path!r})\n        ce.setStartRule(shapes, "Lot")\n        ce.generateModels(shapes)\n        ce.waitForUIIdle()\n        output_dir = ce.toFSPath("/automationProject/models/generated/{job_id}")\n        if not os.path.isdir(output_dir):\n            os.makedirs(output_dir)\n        if "obj" in EXPORTS:\n            obj = OBJExportModelSettings()\n            obj.setOutputPath(output_dir)\n            obj.setBaseName("{job_id}")\n            obj.setFileGranularity(OBJExportModelSettings.START_SHAPE)\n            obj.setExistingFiles(OBJExportModelSettings.OVERWRITE)\n            obj.setTerrainLayers(OBJExportModelSettings.TERRAIN_NONE)\n            ce.export(shapes, obj)\n            outputs["obj"] = output_dir\n        if "slpk" in EXPORTS:\n            slpk = SPKMeshExportModelSettings()\n            slpk.setOutputPath(output_dir)\n            slpk.setBaseName("{job_id}")\n            slpk.setSceneType("Local")\n            slpk.setExistingFiles(SPKMeshExportModelSettings.OVERWRITE)\n            slpk.setFileSize(SPKMeshExportModelSettings.MIDSIZE_FILE)\n            ce.export(shapes, slpk)\n            outputs["slpk"] = os.path.join(output_dir, "{job_id}.slpk")\n        if "fbx" in EXPORTS:\n            fbx = FBXExportModelSettings()\n            fbx.setOutputPath(output_dir)\n            fbx.setBaseName("{job_id}")\n            ce.export(shapes, fbx)\n            outputs["fbx"] = output_dir\n        if "gltf" in EXPORTS:\n            gltf = GLTFExportModelSettings()\n            gltf.setOutputPath(output_dir)\n            gltf.setBaseName("{job_id}")\n            ce.export(shapes, gltf)\n            outputs["gltf"] = output_dir\n        ce.saveFile(scene_path)\n        write_result("completed", outputs, "CityEngine generation and export completed")\n    except Exception as exc:\n        write_result("failed", outputs, str(exc) + "\\n" + traceback.format_exc())\n    finally:\n        try:\n            ce.waitForUIIdle()\n            ce.closeFile()\n        except:\n            pass\n        ce.exit()\n\nrun()\n'''
 
 
 def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings, requirements=None, rag_context="", user_request=""):
-    _ensure_project()
     job_id = f"ce-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    runtime = _prepare_runtime(job_id)
     normalized = normalize_requirements(requirements, rule_set)
     prepared_buildings, optimization_actions = _prepare_buildings(case_data["buildings"], rule_set, problem_buildings, normalized)
     job_path = JOBS_DIR / f"{job_id}.json"
-    result_path = RESULTS_DIR / f"{job_id}.json"
-    cga_path = RULES_DIR / f"{job_id}.cga"
-    script_path = SCRIPTS_DIR / f"{job_id}.py"
-    config_path = CONFIG_DIR / f"{job_id}.cfg"
-    shp_path = DATA_DIR / f"{job_id}.shp"
+    result_path = repository_result_path(job_id)
+    cga_path = runtime["rules"] / f"{job_id}.cga"
+    script_path = runtime["scripts"] / f"{job_id}.py"
+    config_path = runtime["config"] / f"{job_id}.cfg"
+    startup_source_path = runtime["config"] / f"{job_id}-startup.py"
+    shp_path = runtime["data"] / f"{job_id}.shp"
     _write_shapefile(prepared_buildings, shp_path)
     cga_path.write_text(_generate_cga(normalized), encoding="utf-8")
-    script_path.write_text(_generated_script(job_id, job_id, f"/automationProject/data/generated/{job_id}.shp", f"/automationProject/rules/generated/{job_id}.cga", result_path, normalized), encoding="utf-8")
+    script_path.write_text(_generated_script(job_id, job_id, f"/automationProject/data/generated/{job_id}.shp", f"/automationProject/rules/generated/{job_id}.cga", runtime["result"], runtime["started"], normalized), encoding="utf-8")
     cfg = ConfigParser()
     cfg["config"] = {"scriptPath": str(script_path)}
     with config_path.open("w", encoding="utf-8") as stream:
         cfg.write(stream)
+    startup_source_path.write_text(_startup_script(), encoding="ascii")
     job = {
         "jobId": job_id, "status": "queued", "engine": "ArcGIS CityEngine 2025.1",
         "createdAt": datetime.now(timezone.utc).isoformat(), "requirements": normalized,
@@ -152,33 +260,268 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         "case": case_data, "currentMetrics": current_metrics, "problemBuildings": problem_buildings,
         "optimizationActions": optimization_actions,
         "footprints": str(shp_path), "generatedScript": str(script_path), "generatedRule": str(cga_path),
-        "configFile": str(config_path), "resultManifest": str(result_path),
+        "configFile": str(config_path), "startupSource": str(startup_source_path),
+        "resultManifest": str(result_path),
+        **_runtime_metadata(runtime),
     }
-    job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-    launch = launch_cityengine(config_path)
+    _atomic_write_json(job_path, job)
+    launch = launch_cityengine(job_id, runtime, config_path)
+    job["launch"] = launch
+    if launch.get("started"):
+        job["status"] = "running"
+        job["startedAt"] = datetime.now(timezone.utc).isoformat()
+    else:
+        job["status"] = "failed"
+        job["message"] = launch.get("reason", "CityEngine failed to start")
+        job["finishedAt"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(job_path, job)
+    if job["status"] == "failed":
+        _atomic_write_json(result_path, job)
     return {
-        "jobId": job_id, "status": "queued", "jobFile": str(job_path), "footprints": str(shp_path),
+        "jobId": job_id, "status": job["status"], "jobFile": str(job_path), "footprints": str(shp_path),
         "generatedScript": str(script_path), "generatedRule": str(cga_path), "configFile": str(config_path),
-        "resultManifest": str(result_path), "requirements": normalized, "cityEngine": runtime_status(), "launch": launch,
+        "startupSource": str(startup_source_path), "resultManifest": str(result_path),
+        "requirements": normalized, "cityEngine": runtime_status(), "launch": launch,
+        **_runtime_metadata(runtime),
     }
 
 
-def launch_cityengine(config_path):
+def _tail_log(path, maximum=12000):
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - maximum))
+            return stream.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _failure_message(return_code, runtime):
+    detail = _tail_log(runtime["log"])
+    metadata_detail = _tail_log(runtime["workspaceMetadataLog"]) or _tail_log(runtime["metadataLog"])
+    if metadata_detail and metadata_detail not in detail:
+        detail = f"{detail}\n\nCityEngine metadata log:\n{metadata_detail}".strip()
+    message = f"CityEngine exited with code {return_code} before producing a result"
+    return f"{message}\n{detail}".strip()
+
+
+def _write_process_failure(job_id, process, runtime, reason=None):
+    result_path = repository_result_path(job_id)
+    if runtime["result"].is_file() or result_path.is_file():
+        return
+    job = _read_json(JOBS_DIR / f"{job_id}.json") or {"jobId": job_id}
+    if str(job.get("status", "")).lower() in TERMINAL_STATUSES:
+        return
+    job["status"] = "failed"
+    job["message"] = reason or _failure_message(process.returncode, runtime)
+    job["exitCode"] = process.returncode
+    job["finishedAt"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write_json(result_path, job)
+
+
+def _stop_process(process):
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _cleanup_runtime_cache(runtime):
+    if KEEP_RUNTIME_CACHE:
+        return
+    workspace_metadata = runtime.get("workspaceMetadataLog")
+    archived_metadata = runtime.get("metadataLog")
+    if workspace_metadata and archived_metadata and workspace_metadata.is_file():
+        try:
+            archived_metadata.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(workspace_metadata, archived_metadata)
+        except OSError:
+            pass
+
+    def remove_readonly(function, path, _error):
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        function(path)
+
+    for key in ("home", "workspace"):
+        path = runtime[key]
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, onerror=remove_readonly)
+        except OSError:
+            pass
+
+
+def cleanup_finished_runtime(job_id):
+    job = _read_json(JOBS_DIR / f"{job_id}.json") or {}
+    if not job.get("runtimeRun"):
+        return False
+    run_dir = Path(job["runtimeRun"]).resolve()
+    runs_root = RUNS_DIR.resolve()
+    if runs_root not in run_dir.parents or run_dir.name != job_id:
+        raise ValueError("CityEngine runtime path is outside the configured runs directory")
+    runtime = {
+        "home": run_dir / "home",
+        "workspace": run_dir / "workspace",
+        "workspaceMetadataLog": run_dir / "workspace" / ".metadata" / ".log",
+        "metadataLog": run_dir / "logs" / "cityengine-metadata.log",
+    }
+    _cleanup_runtime_cache(runtime)
+    metadata_path = str(runtime["metadataLog"])
+    job["runtimeMetadataLog"] = metadata_path
+    _atomic_write_json(JOBS_DIR / f"{job_id}.json", job)
+    result_path = repository_result_path(job_id)
+    result = _read_json(result_path)
+    if result:
+        result["runtimeMetadataLog"] = metadata_path
+        _atomic_write_json(result_path, result)
+    return True
+
+
+def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
+    try:
+        started_deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+        job_deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+        startup_installed = False
+        while process.poll() is None and not runtime["result"].is_file():
+            now = time.monotonic()
+            if (
+                not startup_installed
+                and runtime["startup"].parent.is_dir()
+                and any(runtime["startup"].parent.iterdir())
+            ):
+                runtime["startup"].write_text(startup_script, encoding="ascii")
+                startup_installed = True
+            elif startup_installed and not runtime["startup"].is_file() and not runtime["started"].is_file():
+                runtime["startup"].write_text(startup_script, encoding="ascii")
+            if not runtime["started"].is_file() and now >= started_deadline:
+                _stop_process(process)
+                reason = (
+                    "CityEngine automation did not start within "
+                    f"{STARTUP_TIMEOUT_SECONDS} seconds. See {runtime['log']} and "
+                    f"{runtime['metadataLog']}"
+                )
+                _write_process_failure(job_id, process, runtime, reason)
+                return
+            if now >= job_deadline:
+                _stop_process(process)
+                reason = (
+                    f"CityEngine job exceeded {JOB_TIMEOUT_SECONDS} seconds. "
+                    f"See {runtime['log']} and {runtime['metadataLog']}"
+                )
+                _write_process_failure(job_id, process, runtime, reason)
+                return
+            time.sleep(0.5)
+        if process.poll() is None:
+            process.wait()
+        for _ in range(20):
+            if runtime["result"].is_file():
+                break
+            time.sleep(0.1)
+        if not runtime["result"].is_file():
+            _write_process_failure(job_id, process, runtime)
+    finally:
+        log_stream.close()
+        _cleanup_runtime_cache(runtime)
+        metadata_path = str(runtime["metadataLog"])
+        job_path = JOBS_DIR / f"{job_id}.json"
+        job = _read_json(job_path)
+        if job:
+            job["runtimeMetadataLog"] = metadata_path
+            _atomic_write_json(job_path, job)
+        result_path = repository_result_path(job_id)
+        result = _read_json(result_path)
+        if result:
+            result["runtimeMetadataLog"] = metadata_path
+            _atomic_write_json(result_path, result)
+        with _monitor_lock:
+            _monitor_threads.pop(job_id, None)
+
+
+def launch_cityengine(job_id, runtime, config_path):
     if not CITYENGINE_EXE.is_file():
         return {"started": False, "reason": "CityEngine executable not found"}
-    command = [str(CITYENGINE_EXE), "-data", str(WORKSPACE), "-vmargs", f"-Duser.home={CITYENGINE_HOME}", f"-DprojectFolder={PROJECT}", f"-DconfigFilePath={config_path}"]
+    command = [
+        str(CITYENGINE_EXE), "-nosplash", "-data", str(runtime["workspace"]), "-vmargs",
+        f"-Duser.home={runtime['home']}", f"-DprojectFolder={runtime['project']}",
+        f"-DconfigFilePath={config_path}",
+    ]
+    log_stream = None
     try:
-        process = subprocess.Popen(command, cwd=str(WORKSPACE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {"started": True, "pid": process.pid, "command": command}
+        startup_script = _startup_script()
+        log_stream = runtime["log"].open("ab")
+        process = subprocess.Popen(
+            command,
+            cwd=str(runtime["workspace"]),
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            return_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            monitor = threading.Thread(
+                target=_monitor_cityengine,
+                args=(job_id, process, runtime, log_stream, startup_script),
+                name=f"cityengine-{job_id}",
+                daemon=True,
+            )
+            with _monitor_lock:
+                _monitor_threads[job_id] = monitor
+            monitor.start()
+            return {
+                "started": True,
+                "pid": process.pid,
+                "command": command,
+                "logFile": str(runtime["log"]),
+            }
+        log_stream.close()
+        log_stream = None
+        if runtime["result"].is_file():
+            return {
+                "started": True,
+                "pid": process.pid,
+                "command": command,
+                "logFile": str(runtime["log"]),
+                "exitCode": return_code,
+            }
+        return {
+            "started": False,
+            "pid": process.pid,
+            "reason": _failure_message(return_code, runtime),
+            "command": command,
+            "logFile": str(runtime["log"]),
+            "exitCode": return_code,
+        }
     except Exception as exc:
-        return {"started": False, "reason": str(exc), "command": command}
+        if log_stream is not None:
+            log_stream.close()
+        return {
+            "started": False,
+            "reason": str(exc),
+            "command": command,
+            "logFile": str(runtime["log"]),
+        }
 
 
 def read_job(job_id):
-    result_path = RESULTS_DIR / f"{job_id}.json"
-    if result_path.is_file():
-        return json.loads(result_path.read_text(encoding="utf-8"))
     job_path = JOBS_DIR / f"{job_id}.json"
-    if job_path.is_file():
-        return json.loads(job_path.read_text(encoding="utf-8"))
+    result_path = repository_result_path(job_id)
+    job = _read_json(job_path)
+    runtime_result_path = Path(job["runtimeResult"]) if job and job.get("runtimeResult") else None
+    runtime_result = _read_json(runtime_result_path) if runtime_result_path else None
+    if runtime_result:
+        merged = dict(_read_json(result_path) or job or {})
+        merged.update(runtime_result)
+        merged.setdefault("resultManifest", str(result_path))
+        _atomic_write_json(result_path, merged)
+        return merged
+    repository_result = _read_json(result_path)
+    if repository_result:
+        return repository_result
+    if job:
+        return job
     return {"status": "not_found", "jobId": job_id}

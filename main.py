@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -19,9 +20,121 @@ from pathlib import Path
 from cityengine_bridge import read_job as read_cityengine_job
 from cityengine_bridge import runtime_status as cityengine_runtime_status
 from cityengine_bridge import submit_planning_job
-from geoscene_publisher import inspect_publication, publish_slpk, publishing_status, share_publication
+from cityengine_bridge import write_job_result as write_cityengine_job_result
+from geoscene_publisher import inspect_publication, publish_slpk, publishing_status, share_publication, verify_scene_service
 
 app = FastAPI(title="Esri Cup Professional GIS Engine")
+
+_publication_lock = threading.Lock()
+_publication_threads = {}
+
+
+def _write_cityengine_result(job_id, result):
+    write_cityengine_job_result(job_id, result)
+
+
+def _update_publication_progress(job_id, stage, status, message, details=None):
+    with _publication_lock:
+        result = read_cityengine_job(job_id)
+        event = {
+            "stage": stage,
+            "status": status,
+            "message": message,
+            "updatedAt": int(time.time()),
+        }
+        if details:
+            event.update(details)
+        result["publicationProgress"] = event
+        result.setdefault("publicationTimeline", []).append(dict(event))
+        _write_cityengine_result(job_id, result)
+
+
+def _publish_cityengine_result(job_id):
+    try:
+        result = read_cityengine_job(job_id)
+        outputs = result.get("outputs") or {}
+        publication = publish_slpk(
+            outputs["slpk"],
+            job_id,
+            lambda stage, status, message, details: _update_publication_progress(
+                job_id, stage, status, message, details
+            ),
+        )
+        _update_publication_progress(
+            job_id,
+            "geoscene_hosting",
+            "running",
+            "正在验证 GeoScene 托管的 SceneServer",
+            {"sceneServiceUrl": publication.get("sceneServiceUrl")},
+        )
+        hosted_service = verify_scene_service(publication["sceneServiceUrl"])
+        publication["hostedService"] = hosted_service
+        result = read_cityengine_job(job_id)
+        result["publication"] = inspect_publication(publication)
+        result["sceneServiceUrl"] = result["publication"].get(
+            "sceneServiceUrl", publication["sceneServiceUrl"]
+        )
+        hosted_event = {
+            "stage": "geoscene_hosted",
+            "status": "success",
+            "message": "GeoScene 托管完成，SceneServer 已可访问",
+            "sceneServiceUrl": result["sceneServiceUrl"],
+            "updatedAt": int(time.time()),
+        }
+        result["publicationProgress"] = hosted_event
+        result.setdefault("publicationTimeline", []).append(dict(hosted_event))
+        _write_cityengine_result(job_id, result)
+    except Exception as exc:
+        with _publication_lock:
+            result = read_cityengine_job(job_id)
+            previous_progress = result.get("publicationProgress") or {}
+            result["publication"] = {"status": "failed", "message": str(exc)}
+            failed_event = {
+                "stage": "publication_failed",
+                "failedStage": previous_progress.get("stage", "portal_uploading"),
+                "status": "error",
+                "message": str(exc),
+                "updatedAt": int(time.time()),
+            }
+            result["publicationProgress"] = failed_event
+            result.setdefault("publicationTimeline", []).append(dict(failed_event))
+            _write_cityengine_result(job_id, result)
+    finally:
+        with _publication_lock:
+            _publication_threads.pop(job_id, None)
+
+
+def _start_cityengine_publication(job_id, result):
+    if result.get("sceneServiceUrl"):
+        return result
+    outputs = result.get("outputs") or {}
+    if not outputs.get("slpk"):
+        return result
+    progress = result.get("publicationProgress") or {}
+    if progress.get("status") == "error":
+        return result
+    with _publication_lock:
+        active = _publication_threads.get(job_id)
+        if active and active.is_alive():
+            return result
+        exported_event = {
+            "stage": "slpk_exported",
+            "status": "success",
+            "message": "SLPK 导出完成，准备上传 GeoScene Portal",
+            "updatedAt": int(time.time()),
+        }
+        result["publicationProgress"] = exported_event
+        result.setdefault("publicationTimeline", []).append(dict(exported_event))
+        _write_cityengine_result(job_id, result)
+        worker = threading.Thread(
+            target=_publish_cityengine_result,
+            args=(job_id,),
+            name=f"geoscene-publish-{job_id}",
+            daemon=True,
+        )
+        _publication_threads[job_id] = worker
+        worker.start()
+    return read_cityengine_job(job_id)
 
 
 def ensure_cityengine_published(job_id, result):
@@ -34,22 +147,13 @@ def ensure_cityengine_published(job_id, result):
             try:
                 result["publication"] = inspect_publication(share_publication(publication))
                 result["sceneServiceUrl"] = result["publication"].get("sceneServiceUrl", result.get("sceneServiceUrl"))
-                result_path = Path(cityengine_runtime_status()["workspace"]) / "automation" / "results" / f"{job_id}.json"
-                result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                _write_cityengine_result(job_id, result)
             except Exception as exc:
                 result["publicationShareError"] = str(exc)
         return result
     if not outputs.get("slpk"):
         return result
-    result_path = Path(cityengine_runtime_status()["workspace"]) / "automation" / "results" / f"{job_id}.json"
-    try:
-        publication = publish_slpk(outputs["slpk"], job_id)
-        result["publication"] = publication
-        result["sceneServiceUrl"] = publication["sceneServiceUrl"]
-    except Exception as exc:
-        result["publication"] = {"status": "failed", "message": str(exc)}
-    result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return result
+    return _start_cityengine_publication(job_id, result)
 
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -1656,16 +1760,45 @@ async def get_cityengine_runtime():
 
 @app.get("/analysis/cityengine/jobs/{job_id}")
 async def get_cityengine_job(job_id: str):
-    return ensure_cityengine_published(job_id, read_cityengine_job(job_id))
+    try:
+        return ensure_cityengine_published(job_id, read_cityengine_job(job_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/analysis/cityengine/jobs/{job_id}/publish")
+async def retry_cityengine_publication(job_id: str):
+    try:
+        result = read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="CityEngine job is not completed")
+    if not (result.get("outputs") or {}).get("slpk"):
+        raise HTTPException(status_code=404, detail="CityEngine job has no SLPK output")
+    result.pop("publication", None)
+    result.pop("publicationShareError", None)
+    result["publicationProgress"] = {
+        "stage": "publication_retrying",
+        "status": "running",
+        "message": "正在重新发布到 GeoScene Portal",
+        "updatedAt": int(time.time()),
+    }
+    _write_cityengine_result(job_id, result)
+    return _start_cityengine_publication(job_id, result)
 
 @app.get("/analysis/cityengine/jobs/{job_id}/wait")
 async def wait_cityengine_job(job_id: str, timeout: int = 180):
+    try:
+        read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     deadline = time.time() + max(1, min(timeout, 600))
     while time.time() < deadline:
         result = read_cityengine_job(job_id)
         if result.get("status") == "completed":
             result = ensure_cityengine_published(job_id, result)
-        if result.get("status") in {"completed", "failed", "not_found"}:
+        if _cityengine_pipeline_terminal(result):
             return result
         await __import__("asyncio").sleep(2)
     result = read_cityengine_job(job_id)
@@ -1675,9 +1808,25 @@ async def wait_cityengine_job(job_id: str, timeout: int = 180):
     return result
 
 
+def _cityengine_pipeline_terminal(result):
+    status = str(result.get("status", "")).lower()
+    if status in {"failed", "not_found", "error"}:
+        return True
+    if status != "completed":
+        return False
+    outputs = result.get("outputs") or {}
+    if not outputs.get("slpk"):
+        return True
+    progress = result.get("publicationProgress") or {}
+    return bool(result.get("sceneServiceUrl")) or progress.get("status") == "error"
+
+
 @app.get("/analysis/cityengine/jobs/{job_id}/download/{format_name}")
 async def download_cityengine_output(job_id: str, format_name: str):
-    result = read_cityengine_job(job_id)
+    try:
+        result = read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result.get("status") != "completed":
         raise HTTPException(status_code=409, detail="CityEngine job is not completed")
     outputs = result.get("outputs") or {}
@@ -1685,8 +1834,15 @@ async def download_cityengine_output(job_id: str, format_name: str):
     if not output:
         raise HTTPException(status_code=404, detail="Requested output format was not generated")
     output_path = Path(output).resolve()
-    allowed_root = Path(cityengine_runtime_status()["project"]).resolve() / "models" / "generated"
-    if allowed_root not in output_path.parents and output_path != allowed_root:
+    allowed_roots = []
+    runtime_output_root = result.get("runtimeOutputRoot")
+    if runtime_output_root:
+        runtime_root = Path(cityengine_runtime_status()["runtimeRoot"]).resolve()
+        candidate_root = Path(runtime_output_root).resolve()
+        if runtime_root in candidate_root.parents:
+            allowed_roots.append(candidate_root)
+    allowed_roots.append(Path(cityengine_runtime_status()["project"]).resolve() / "models" / "generated")
+    if not any(root == output_path or root in output_path.parents for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Output path is outside the CityEngine project")
     if output_path.is_dir():
         archive_base = output_path.parent / f"{job_id}-{format_name.lower()}"
@@ -1820,9 +1976,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
-
-
-
-
-
-

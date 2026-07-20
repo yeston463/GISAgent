@@ -41,3 +41,8 @@ __pycache__/
 .codex-temp-*/
 .agents/
 /share/*.zip
+geoscene-services.log
+python-gis-service*.log
+/cityengine-home/
+/cityengine-project/
+/cityengine-workspace/
