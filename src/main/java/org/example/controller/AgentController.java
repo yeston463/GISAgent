@@ -4,8 +4,10 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.example.agent.AgentLoopService;
 import org.example.agent.DynamicCodeGenerator;
+import org.example.agent.DynamicExecutionGuard;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
@@ -42,6 +44,9 @@ public class AgentController {
 
     @Autowired
     private DynamicToolRegistry toolRegistry;
+
+    @Autowired
+    private DynamicExecutionGuard executionGuard;
 
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/chat/agentic")
@@ -95,7 +100,10 @@ public class AgentController {
 
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/execute")
-    public Map<String, Object> executeDynamic(@RequestBody ExecuteRequest request) {
+    public Map<String, Object> executeDynamic(@RequestBody ExecuteRequest request, HttpServletRequest httpRequest) {
+        if (!executionGuard.authorize(httpRequest)) {
+            return Map.of("status", "Forbidden", "message", "动态执行未授权：功能未启用或缺少有效令牌/本机来源");
+        }
         DynamicCodeGenerator.CodeExecutionResult result =
                 request.name() == null || request.name().isBlank()
                         ? codeGenerator.generateAndExecute(request.requirement(), request.context())
@@ -119,7 +127,10 @@ public class AgentController {
     }
 
     @DeleteMapping("/tools/{name}")
-    public Map<String, Object> removeDynamicTool(@PathVariable String name) {
+    public Map<String, Object> removeDynamicTool(@PathVariable String name, HttpServletRequest httpRequest) {
+        if (!executionGuard.authorize(httpRequest)) {
+            return Map.of("status", "Forbidden", "message", "动态工具删除未授权：功能未启用或缺少有效令牌/本机来源");
+        }
         boolean removed = toolRegistry.removeDynamicTool(name);
         return Map.of("status", removed ? "Success" : "NotFound", "tool", name);
     }

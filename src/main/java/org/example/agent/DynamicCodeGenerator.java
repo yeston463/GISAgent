@@ -5,24 +5,40 @@ import com.alibaba.fastjson.JSONObject;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.example.service.PromptResourceService;
 import org.example.tools.DynamicToolRegistry;
+import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import javax.script.Bindings;
-import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
+/**
+ * 动态代码生成与执行。LLM 生成 JavaScript，经“黑名单 + 沙箱 + 超时/配额 + 开关/鉴权”四层防护后执行。
+ *
+ * 执行实现说明：
+ * - 使用 GraalVM Polyglot {@link Context} 直接 API（而非 javax.script），以便超时后调用
+ *   {@code Context.close(true)} 从任意线程强制终止仍在运行的 JS。
+ * - 每次执行提交到独立有界线程池，配合信号量限制并发；超过 {@code timeoutMs} 即强制终止。
+ */
 @Service
 public class DynamicCodeGenerator {
 
     private static final int MAX_CODE_LENGTH = 12_000;
+    private static final long DEFAULT_TIMEOUT_MS = 3000;
+
     private static final Pattern RESULT_ASSIGNMENT = Pattern.compile(
             "(?:^|[;{}\\s])result\\s*=(?!=)", Pattern.MULTILINE);
     private static final Pattern INFINITE_LOOP = Pattern.compile(
@@ -48,7 +64,28 @@ public class DynamicCodeGenerator {
     @Autowired
     private PromptResourceService promptResources;
 
+    @Autowired
+    private DynamicExecutionConfig config;
+
+    // 执行线程池与并发信号灯，首次使用时惰性初始化（兼容无参构造的反射测试）。
+    private volatile ExecutorService executor;
+    private volatile Semaphore concurrency;
+    private final ReentrantLock initLock = new ReentrantLock();
+
+    /** Spring / 反射测试构造：使用安全默认值，随后由 @Autowired 覆盖为真实配置。 */
+    public DynamicCodeGenerator() {
+        this.config = DynamicExecutionConfig.defaults();
+    }
+
+    /** 测试专用：注入指定配置（如缩短超时做快速超时测试）。 */
+    DynamicCodeGenerator(DynamicExecutionConfig config) {
+        this.config = config;
+    }
+
     public CodeExecutionResult generateAndExecute(String requirement, JSONObject context) {
+        if (isDisabled()) {
+            return disabled();
+        }
         JSONObject safeContext = context == null ? new JSONObject() : context;
         String code = generateCode(requirement, safeContext);
         String violation = validateCode(code);
@@ -69,6 +106,9 @@ public class DynamicCodeGenerator {
             String description,
             String requirement,
             JSONObject context) {
+        if (isDisabled()) {
+            return disabled();
+        }
         JSONObject registrationContext = context == null ? new JSONObject() : context;
         String code = generateCode(requirement, registrationContext);
         String violation = validateCode(code);
@@ -90,6 +130,16 @@ public class DynamicCodeGenerator {
         } catch (Exception e) {
             return new CodeExecutionResult(null, "Error", "动态工具注册失败: " + e.getMessage(), code, null);
         }
+    }
+
+    /** 供 AgentLoopService 内部路径复用同一开关判断，避免绕过 /execute。 */
+    public boolean isDisabled() {
+        return config == null || !config.isEnabled();
+    }
+
+    private CodeExecutionResult disabled() {
+        return new CodeExecutionResult(
+                null, "Disabled", "动态代码执行功能已关闭（DYNAMIC_EXECUTION_ENABLED=false）", null, null);
     }
 
     private String generateCode(String requirement, JSONObject context) {
@@ -122,33 +172,105 @@ public class DynamicCodeGenerator {
     }
 
     private Object executeCode(String code, JSONObject context, JSONObject params) throws Exception {
-        ScriptEngine engine = new ScriptEngineManager().getEngineByName("graal.js");
-        if (engine == null) {
-            throw new IllegalStateException("GraalJS 引擎未初始化");
+        if (config != null) {
+            int inputBytes = estimateInputBytes(context, params);
+            if (inputBytes > config.getMaxInputBytes()) {
+                throw new IllegalArgumentException(
+                        "输入数据超过大小限制（" + inputBytes + " > " + config.getMaxInputBytes() + " 字节）");
+            }
         }
 
+        ExecutorService pool = executor();
+        Semaphore sem = concurrency();
+        if (!sem.tryAcquire()) {
+            throw new IllegalStateException("动态执行并发数已达上限");
+        }
+
+        AtomicReference<Context> ctxRef = new AtomicReference<>();
+        try {
+            Future<Object> future = pool.submit(() -> {
+                Context js = buildContext();
+                ctxRef.set(js);
+                try {
+                    bindInputs(js, context, params);
+                    String script = wrapScript(code);
+                    Value result = js.eval("js", script);
+                    if (result.isNull()) {
+                        return null;
+                    }
+                    String serialized = result.asString();
+                    if (config != null && serialized.length() > config.getMaxOutputBytes()) {
+                        throw new IllegalStateException("执行结果超过输出大小限制");
+                    }
+                    return normalizeResult(JSON.parse(serialized));
+                } finally {
+                    try {
+                        js.close();
+                    } catch (Exception ignored) {
+                        // 超时分支已强制关闭（Context.close(true)），这里忽略重复关闭异常。
+                    }
+                }
+            });
+
+            long timeout = config != null ? config.getTimeoutMs() : DEFAULT_TIMEOUT_MS;
+            try {
+                return future.get(timeout, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException te) {
+                Context ctx = ctxRef.get();
+                if (ctx != null) {
+                    try {
+                        // 跨线程强制终止仍在运行的 GraalJS 执行。
+                        ctx.close(true);
+                    } catch (Exception ignored) {
+                    }
+                }
+                future.cancel(true);
+                throw new IllegalStateException("动态代码执行超时（>" + timeout + "ms），已强制终止");
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("动态代码执行被中断", ie);
+            } catch (Exception e) {
+                throw new IllegalStateException("动态代码执行失败: " + e.getMessage(), e);
+            }
+        } finally {
+            sem.release();
+        }
+    }
+
+    private Context buildContext() {
+        return Context.newBuilder("js")
+                .allowHostAccess(false)
+                .allowHostClassLookup((Predicate<String>) className -> false)
+                .allowIO(false)
+                .allowCreateThread(false)
+                .build();
+    }
+
+    private void bindInputs(Context js, JSONObject context, JSONObject params) {
         JSONObject safeContext = context == null ? new JSONObject() : context;
         JSONObject safeParams = params == null ? new JSONObject() : params;
+        js.getBindings("js").putMember("contextJson", safeContext.toJSONString());
+        js.getBindings("js").putMember("paramsJson", safeParams.toJSONString());
+    }
 
-        Bindings bindings = engine.createBindings();
-        bindings.put("polyglot.js.allowHostAccess", false);
-        bindings.put("polyglot.js.allowHostClassLookup", (Predicate<String>) className -> false);
-        bindings.put("polyglot.js.allowIO", false);
-        bindings.put("polyglot.js.allowCreateThread", false);
-        bindings.put("contextJson", safeContext.toJSONString());
-        bindings.put("paramsJson", safeParams.toJSONString());
-
-        String script = "\"use strict\";\n"
+    private String wrapScript(String code) {
+        return "\"use strict\";\n"
                 + "var context = Object.freeze(JSON.parse(contextJson));\n"
                 + "var params = Object.freeze(JSON.parse(paramsJson));\n"
                 + "var result = null;\n"
                 + code
                 + "\nJSON.stringify(result === undefined ? null : result);";
-        Object serialized = engine.eval(script, bindings);
-        if (serialized == null) {
-            return null;
+    }
+
+    private int estimateInputBytes(JSONObject context, JSONObject params) {
+        int n = 0;
+        if (context != null) {
+            n += context.toJSONString().length();
         }
-        return normalizeResult(JSON.parse(String.valueOf(serialized)));
+        if (params != null) {
+            n += params.toJSONString().length();
+        }
+        return n;
     }
 
     private Object normalizeResult(Object value) {
@@ -156,10 +278,18 @@ public class DynamicCodeGenerator {
             return value;
         }
         if (value instanceof Value polyglot) {
-            if (polyglot.isNull()) return null;
-            if (polyglot.isBoolean()) return polyglot.asBoolean();
-            if (polyglot.isNumber()) return polyglot.asDouble();
-            if (polyglot.isString()) return polyglot.asString();
+            if (polyglot.isNull()) {
+                return null;
+            }
+            if (polyglot.isBoolean()) {
+                return polyglot.asBoolean();
+            }
+            if (polyglot.isNumber()) {
+                return polyglot.asDouble();
+            }
+            if (polyglot.isString()) {
+                return polyglot.asString();
+            }
             if (polyglot.hasArrayElements()) {
                 List<Object> values = new ArrayList<>();
                 for (long i = 0; i < polyglot.getArraySize(); i++) {
@@ -189,7 +319,9 @@ public class DynamicCodeGenerator {
     }
 
     private String stripCodeFence(String code) {
-        if (code == null) return "";
+        if (code == null) {
+            return "";
+        }
         String stripped = code.trim();
         if (stripped.startsWith("```")) {
             int newline = stripped.indexOf('\n');
@@ -199,6 +331,28 @@ public class DynamicCodeGenerator {
             stripped = stripped.substring(0, stripped.length() - 3);
         }
         return stripped.trim();
+    }
+
+    private ExecutorService executor() {
+        if (executor == null) {
+            initLock.lock();
+            try {
+                if (executor == null) {
+                    int pool = config != null ? config.getPoolSize() : 4;
+                    executor = Executors.newFixedThreadPool(Math.max(1, pool));
+                    concurrency = new Semaphore(config != null ? Math.max(1, config.getMaxConcurrency()) : 4);
+                }
+            } finally {
+                initLock.unlock();
+            }
+        }
+        return executor;
+    }
+
+    private Semaphore concurrency() {
+        // 确保与 executor 同一时刻初始化。
+        executor();
+        return concurrency;
     }
 
     private static ForbiddenPattern rule(String label, String regex) {

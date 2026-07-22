@@ -1,0 +1,28 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: '27 4 * * 1'   # weekly, Monday 04:27 UTC
+
+jobs:
+  pip-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies to audit
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run pip-audit
+        # continue-on-error keeps the scan advisory (visible in the run) without
+        # failing the whole pipeline on a transitive low-severity advisory — flip
+        # this to false once the team wants a hard supply-chain gate.
+        continue-on-error: true
+        run: |
+          python -m pip install pip-audit
+          pip-audit

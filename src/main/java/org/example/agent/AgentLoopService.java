@@ -6,6 +6,7 @@ import com.alibaba.fastjson.JSONObject;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
+import org.example.agent.DynamicExecutionConfig;
 import org.example.service.KnowledgeService;
 import org.example.service.PromptResourceService;
 import org.example.tools.pyGisTools;
@@ -50,6 +51,9 @@ public class AgentLoopService {
 
     @Autowired
     private DynamicCodeGenerator dynamicCodeGenerator;
+
+    @Autowired
+    private DynamicExecutionConfig dynamicExecutionConfig;
 
     @Autowired
     private pyGisTools gisTools;
@@ -510,6 +514,11 @@ public class AgentLoopService {
     private Object invokeTool(String action, JSONObject params) {
         try {
             if ("generateDynamicTool".equals(action)) {
+                // 受功能开关控制，避免模型在 /execute 关闭时仍能经 Agent 内部生成动态工具。
+                if (dynamicCodeGenerator.isDisabled()) {
+                    return Map.of("status", "Disabled",
+                            "message", "动态工具生成已关闭（DYNAMIC_EXECUTION_ENABLED=false）", "tool", "generateDynamicTool");
+                }
                 String name = params.getString("name");
                 String description = params.getString("description");
                 String requirement = params.getString("requirement");

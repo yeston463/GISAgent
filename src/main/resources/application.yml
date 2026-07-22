@@ -30,6 +30,8 @@ server:
       charset: UTF-8
       force: true
       enabled: true
+  # 仅绑定本机回环地址，配合动态执行的 local 鉴权模式，最小化暴露面。可用 SERVER_ADDRESS 切换。
+  address: ${SERVER_ADDRESS:127.0.0.1}
 
 gis:
   python-service-url: ${GIS_PYTHON_SERVICE_URL:http://127.0.0.1:8000/analysis}
@@ -44,6 +46,16 @@ rag:
 
 agent:
   max-rounds: 8
+
+# ===== 动态代码执行安全开关（均为环境变量，默认值以最小风险为准）=====
+# DYNAMIC_EXECUTION_ENABLED=false        是否启用动态执行（默认关闭）
+# DYNAMIC_EXECUTION_AUTH_MODE=token|local 鉴权模式（默认 local=仅本机）
+# GIS_AGENT_EXEC_TOKEN=                   token 模式下的独立令牌，绝不复用 QWEN-APIKEY
+# DYNAMIC_EXECUTION_TIMEOUT_MS=3000       单次执行硬超时（毫秒），超时强制终止 GraalJS
+# DYNAMIC_EXECUTION_MAX_INPUT_BYTES=65536 输入数据最大字节数
+# DYNAMIC_EXECUTION_MAX_OUTPUT_BYTES=65536 执行结果最大字节数
+# DYNAMIC_EXECUTION_MAX_CONCURRENCY=4     最大并发执行数
+# DYNAMIC_EXECUTION_POOL_SIZE=4           执行线程池大小
 
 logging:
   level:

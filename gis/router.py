@@ -1,0 +1,336 @@
+# -*- coding: utf-8 -*-
+"""Router layer: FastAPI app and HTTP route handlers.
+
+Handlers are thin adapters between HTTP and the service layer. They validate the
+request body against a Pydantic model (so malformed input fails fast with 422
+instead of 500), delegate to gis.service / gis.adapter, and translate errors
+into HTTP responses. No geometry/business logic lives here.
+"""
+import asyncio
+import shutil
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from cityengine_bridge import read_job as read_cityengine_job
+from cityengine_bridge import runtime_status as cityengine_runtime_status
+from geoscene_publisher import publishing_status
+
+from . import adapter, model, service
+
+
+# ---------------------------------------------------------------------------
+# Request models — every POST endpoint is validated at the boundary.
+# `extra="allow"` keeps the contract forward-compatible with the service layer,
+# while typed fields (lon/lat/radius) give us coercion + 422 on bad input.
+# ---------------------------------------------------------------------------
+class _BaseRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class PlanContextRequest(_BaseRequest):
+    pass
+
+
+class DemoCaseRequest(_BaseRequest):
+    requirements: Optional[Any] = None
+    ragContext: str = ""
+    userRequest: str = ""
+
+
+class UrbanMetricsRequest(_BaseRequest):
+    buildings: Optional[Any] = None
+    aoi: Optional[dict] = None
+
+
+class SkylineRequest(_BaseRequest):
+    buildings: Optional[Any] = None
+    aoi: Optional[dict] = None
+    analysis_type: Optional[str] = None
+
+
+class SunlightRequest(_BaseRequest):
+    buildings: Optional[Any] = None
+    aoi: Optional[dict] = None
+    analysis_type: Optional[str] = None
+
+
+class BufferRequest(_BaseRequest):
+    lon: float = Field(..., ge=-180, le=180)
+    lat: float = Field(..., ge=-90, le=90)
+    radius: float = Field(default=500, gt=0, le=100000)
+
+
+class _AoiOrCoordsRequest(_BaseRequest):
+    aoi: Optional[dict] = None
+    lon: Optional[float] = Field(default=None, ge=-180, le=180)
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    radius: float = Field(default=500, gt=0, le=100000)
+
+    @model_validator(mode="after")
+    def _require_aoi_or_coords(self):
+        if self.aoi is None and (self.lon is None or self.lat is None):
+            raise ValueError("Either 'aoi' or both 'lon' and 'lat' must be provided.")
+        return self
+
+
+class FetchBuildingsRequest(_AoiOrCoordsRequest):
+    pass
+
+
+class AnalyzeAreaRequest(_AoiOrCoordsRequest):
+    pass
+
+
+app = FastAPI(title="Esri Cup Professional GIS Engine")
+
+
+def _cityengine_pipeline_terminal(result):
+    status = str(result.get("status", "")).lower()
+    if status in {"failed", "not_found", "error"}:
+        return True
+    if status != "completed":
+        return False
+    outputs = result.get("outputs") or {}
+    if not outputs.get("slpk"):
+        return True
+    progress = result.get("publicationProgress") or {}
+    return bool(result.get("sceneServiceUrl")) or progress.get("status") == "error"
+
+
+@app.post("/analysis/cityengine/plan-context")
+async def plan_current_context(payload: PlanContextRequest):
+    try:
+        return service.evaluate_context_case(payload.model_dump())
+    except Exception as exc:
+        print(f"Context planning failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "context_planning", "message": str(exc)}
+
+
+@app.post("/analysis/demo_case/evaluate")
+async def evaluate_planning_demo(payload: DemoCaseRequest):
+    try:
+        return service.evaluate_demo_case(payload.requirements, payload.ragContext, payload.userRequest)
+    except Exception as exc:
+        print(f"Demo case evaluation failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "planning_evaluation", "message": str(exc)}
+
+
+@app.get("/analysis/geoscene/publishing")
+async def get_geoscene_publishing_status():
+    return publishing_status()
+
+
+@app.get("/analysis/cityengine/runtime")
+async def get_cityengine_runtime():
+    return cityengine_runtime_status()
+
+
+@app.get("/analysis/cityengine/jobs/{job_id}")
+async def get_cityengine_job(job_id: str):
+    try:
+        return adapter.ensure_cityengine_published(job_id, read_cityengine_job(job_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/analysis/cityengine/jobs/{job_id}/publish")
+async def retry_cityengine_publication(job_id: str):
+    try:
+        result = read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="CityEngine job is not completed")
+    if not (result.get("outputs") or {}).get("slpk"):
+        raise HTTPException(status_code=404, detail="CityEngine job has no SLPK output")
+    result.pop("publication", None)
+    result.pop("publicationShareError", None)
+    result["publicationProgress"] = {
+        "stage": "publication_retrying",
+        "status": "running",
+        "message": "正在重新发布到 GeoScene Portal",
+        "updatedAt": int(time.time()),
+    }
+    adapter._write_cityengine_result(job_id, result)
+    return adapter._start_cityengine_publication(job_id, result)
+
+
+@app.get("/analysis/cityengine/jobs/{job_id}/wait")
+async def wait_cityengine_job(job_id: str, timeout: int = 180):
+    try:
+        read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    deadline = time.time() + max(1, min(timeout, 600))
+    while time.time() < deadline:
+        result = read_cityengine_job(job_id)
+        if result.get("status") == "completed":
+            result = adapter.ensure_cityengine_published(job_id, result)
+        if _cityengine_pipeline_terminal(result):
+            return result
+        await asyncio.sleep(2)
+    result = read_cityengine_job(job_id)
+    if result.get("status") == "completed":
+        result = adapter.ensure_cityengine_published(job_id, result)
+    result["waitTimedOut"] = True
+    return result
+
+
+@app.get("/analysis/cityengine/jobs/{job_id}/download/{format_name}")
+async def download_cityengine_output(job_id: str, format_name: str):
+    try:
+        result = read_cityengine_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="CityEngine job is not completed")
+    outputs = result.get("outputs") or {}
+    output = outputs.get(format_name.lower())
+    if not output:
+        raise HTTPException(status_code=404, detail="Requested output format was not generated")
+    output_path = Path(output).resolve()
+    allowed_roots = []
+    runtime_output_root = result.get("runtimeOutputRoot")
+    if runtime_output_root:
+        runtime_root = Path(cityengine_runtime_status()["runtimeRoot"]).resolve()
+        candidate_root = Path(runtime_output_root).resolve()
+        if runtime_root in candidate_root.parents:
+            allowed_roots.append(candidate_root)
+    allowed_roots.append(Path(cityengine_runtime_status()["project"]).resolve() / "models" / "generated")
+    if not any(root == output_path or root in output_path.parents for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="Output path is outside the CityEngine project")
+    if output_path.is_dir():
+        archive_base = output_path.parent / f"{job_id}-{format_name.lower()}"
+        archive_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=output_path))
+        return FileResponse(archive_path, filename=archive_path.name, media_type="application/zip")
+    if not output_path.is_file():
+        raise HTTPException(status_code=404, detail="Generated output file is missing")
+    media_type = "application/octet-stream"
+    return FileResponse(output_path, filename=output_path.name, media_type=media_type)
+
+
+@app.get("/analysis/runtime")
+async def get_runtime_status():
+    return adapter.runtime_status()
+
+
+@app.post("/analysis/urban_metrics")
+async def calculate_urban_metrics(payload: UrbanMetricsRequest):
+    try:
+        return service.calculate_metrics(payload.model_dump())
+    except Exception as exc:
+        print(f"urban_metrics failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "urban_metrics", "far": 0, "message": str(exc)}
+
+
+@app.post("/analysis/skyline")
+async def execute_skyline_analysis(payload: SkylineRequest):
+    try:
+        return service.calculate_skyline(payload.model_dump())
+    except Exception as exc:
+        print(f"skyline analysis failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "skyline_analysis", "analysis_type": "skyline", "message": str(exc)}
+
+
+@app.post("/analysis/sunlight")
+async def execute_sunlight_analysis(payload: SunlightRequest):
+    try:
+        return service.calculate_sunlight(payload.model_dump())
+    except Exception as exc:
+        print(f"sunlight analysis failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "sunlight_analysis", "analysis_type": "sunlight", "message": str(exc)}
+
+
+@app.post("/analysis/buffer")
+async def execute_buffer(payload: BufferRequest):
+    try:
+        feature = service.create_buffer_feature(payload.lon, payload.lat, payload.radius)
+        return model._feature_collection([feature])
+    except Exception as exc:
+        print(f"buffer failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "buffer", "message": str(exc)}
+
+
+@app.post("/analysis/fetch_buildings")
+async def fetch_buildings(payload: FetchBuildingsRequest):
+    try:
+        data = payload.model_dump()
+        aoi = data.get("aoi")
+        if not aoi:
+            aoi = {
+                "type": "Feature",
+                "geometry": service.create_buffer_feature(
+                    payload.lon, payload.lat, payload.radius
+                )["geometry"],
+                "properties": {"source": "server_buffer"},
+            }
+        return service.fetch_buildings_for_aoi(aoi)
+    except Exception as exc:
+        print(f"fetch_buildings failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "fetch_buildings", "building_count": 0, "message": str(exc)}
+
+
+@app.post("/analysis/analyze_area")
+async def analyze_area(payload: AnalyzeAreaRequest):
+    """Create/accept an AOI, fetch real OSM buildings, then calculate metrics."""
+    try:
+        data = payload.model_dump()
+        explicit_aoi = data.get("aoi")
+        radius = float(data.get("radius", 500) or 500)
+        radii = [radius] if explicit_aoi else [radius, radius * 1.5, radius * 2]
+        last_fetch = None
+
+        for attempt, current_radius in enumerate(radii, start=1):
+            if explicit_aoi:
+                aoi = explicit_aoi
+            else:
+                feature = service.create_buffer_feature(payload.lon, payload.lat, current_radius)
+                aoi = {
+                    "type": "Feature",
+                    "geometry": feature["geometry"],
+                    "properties": feature["properties"],
+                }
+
+            fetch_result = service.fetch_buildings_for_aoi(aoi)
+            last_fetch = fetch_result
+            if fetch_result.get("status") != "Success":
+                continue
+
+            metrics = service.calculate_metrics({
+                "buildings": fetch_result.get("buildings"),
+                "aoi": aoi,
+            })
+            if metrics.get("status") == "Success" and int(metrics.get("building_count", 0)) > 0:
+                metrics.update({
+                    "aoi": aoi,
+                    "buildings": fetch_result.get("buildings"),
+                    "data_source": fetch_result.get("source"),
+                    "fetch_stage": fetch_result,
+                    "radius": current_radius,
+                    "attempt": attempt,
+                    "action": "addBuffer",
+                    "params": {
+                        "longitude": payload.lon,
+                        "latitude": payload.lat,
+                        "radius": current_radius,
+                    },
+                })
+                return metrics
+
+        fallback = last_fetch or {"status": "NoData", "message": "No fetch attempt was completed."}
+        fallback.update({
+            "far": 0,
+            "stage": "analyze_area",
+            "message": fallback.get("message", "No valid building data was found after retries."),
+            "runtime": adapter.runtime_status(),
+        })
+        return fallback
+    except Exception as exc:
+        print(f"analyze_area failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "analyze_area", "far": 0, "building_count": 0, "message": str(exc)}
