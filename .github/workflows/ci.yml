@@ -36,7 +36,7 @@ jobs:
       - name: Install dev dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q tests
 
   frontend:
     name: Frontend build
