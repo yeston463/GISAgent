@@ -10,6 +10,7 @@ import org.example.tools.DynamicToolRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.http.ResponseEntity;
 
 import java.util.Map;
 
@@ -27,8 +28,8 @@ import static org.mockito.Mockito.when;
  * 真实 DynamicExecutionGuard（config: authMode=token, token=test-token）。
  *
  * 验证：
- *  - 正确令牌（X-GIS-Agent-Token / Authorization: Bearer）放行并触发危险操作；
- *  - 错误令牌 / 缺失令牌拒绝（status=Forbidden）。
+ *  - 正确令牌（X-GIS-Agent-Token / Authorization: Bearer）放行（HTTP 200）并触发危险操作；
+ *  - 错误令牌 / 缺失令牌拒绝（真实 HTTP 403，status=Forbidden）。
  * token 模式下裁决与来源 IP 无关（remote 设为非本机 10.x 仍可凭令牌通过），证明
  * “CORS 只挡浏览器、挡不住 curl” 的缺口由独立的令牌鉴权补齐。
  */
@@ -69,10 +70,11 @@ class AgentControllerGuardTokenTest {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.1");
         req.addHeader("X-GIS-Agent-Token", TOKEN);
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Success", result.get("status"));
+        assertEquals(200, result.getStatusCode().value());
+        assertEquals("Success", result.getBody().get("status"));
         verify(codeGenerator).generateAndExecute(anyString(), any());
     }
 
@@ -81,20 +83,22 @@ class AgentControllerGuardTokenTest {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.1");
         req.addHeader("X-GIS-Agent-Token", "wrong");
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Forbidden", result.get("status"));
+        assertEquals(403, result.getStatusCode().value());
+        assertEquals("Forbidden", result.getBody().get("status"));
     }
 
     @Test
     void execute_missingToken_returnsForbidden() {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.1");
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Forbidden", result.get("status"));
+        assertEquals(403, result.getStatusCode().value());
+        assertEquals("Forbidden", result.getBody().get("status"));
     }
 
     @Test
@@ -105,10 +109,11 @@ class AgentControllerGuardTokenTest {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.2");
         req.addHeader("Authorization", "Bearer " + TOKEN);
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Success", result.get("status"));
+        assertEquals(200, result.getStatusCode().value());
+        assertEquals("Success", result.getBody().get("status"));
         verify(codeGenerator).generateAndExecute(anyString(), any());
     }
 

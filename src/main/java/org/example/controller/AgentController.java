@@ -100,9 +100,14 @@ public class AgentController {
 
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/execute")
-    public Map<String, Object> executeDynamic(@RequestBody ExecuteRequest request, HttpServletRequest httpRequest) {
+    public ResponseEntity<Map<String, Object>> executeDynamic(@RequestBody ExecuteRequest request, HttpServletRequest httpRequest) {
+        if (!executionGuard.isEnabled()) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("status", "Disabled", "message", "动态执行功能未启用"));
+        }
         if (!executionGuard.authorize(httpRequest)) {
-            return Map.of("status", "Forbidden", "message", "动态执行未授权：功能未启用或缺少有效令牌/本机来源");
+            return ResponseEntity.status(403)
+                    .body(Map.of("status", "Forbidden", "message", "动态执行未授权：缺少有效令牌或本机来源"));
         }
         DynamicCodeGenerator.CodeExecutionResult result =
                 request.name() == null || request.name().isBlank()
@@ -118,7 +123,7 @@ public class AgentController {
         if (result.registeredTool() != null) {
             response.put("registeredTool", result.registeredTool());
         }
-        return response;
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/tools")
@@ -127,12 +132,17 @@ public class AgentController {
     }
 
     @DeleteMapping("/tools/{name}")
-    public Map<String, Object> removeDynamicTool(@PathVariable String name, HttpServletRequest httpRequest) {
+    public ResponseEntity<Map<String, Object>> removeDynamicTool(@PathVariable String name, HttpServletRequest httpRequest) {
+        if (!executionGuard.isEnabled()) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("status", "Disabled", "message", "动态执行功能未启用"));
+        }
         if (!executionGuard.authorize(httpRequest)) {
-            return Map.of("status", "Forbidden", "message", "动态工具删除未授权：功能未启用或缺少有效令牌/本机来源");
+            return ResponseEntity.status(403)
+                    .body(Map.of("status", "Forbidden", "message", "动态工具删除未授权：缺少有效令牌或本机来源"));
         }
         boolean removed = toolRegistry.removeDynamicTool(name);
-        return Map.of("status", removed ? "Success" : "NotFound", "tool", name);
+        return ResponseEntity.ok(Map.of("status", removed ? "Success" : "NotFound", "tool", name));
     }
 
     public record ChatRequest(String message, String memoryId) {}

@@ -10,6 +10,7 @@ import org.example.tools.DynamicToolRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.http.ResponseEntity;
 
 import java.util.Map;
 
@@ -30,8 +31,8 @@ import static org.mockito.Mockito.when;
  * 在“控制器方法内部调用守卫”的真实代码路径上验证鉴权中间件，等价覆盖且更稳健。
  *
  * 结论性断言：
- *  - 本机回环（127.0.0.1）放行，危险操作（代码生成 / 工具注销）被执行；
- *  - 非本机地址拒绝，返回 status=Forbidden，且危险操作从未被调用。
+ *  - 本机回环（127.0.0.1）放行（HTTP 200），危险操作（代码生成 / 工具注销）被执行；
+ *  - 非本机地址拒绝，返回真实 HTTP 403 且 status=Forbidden，危险操作从未被调用。
  */
 class AgentControllerGuardLocalTest {
 
@@ -66,10 +67,11 @@ class AgentControllerGuardLocalTest {
 
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("127.0.0.1");
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Success", result.get("status"));
+        assertEquals(200, result.getStatusCode().value());
+        assertEquals("Success", result.getBody().get("status"));
         verify(codeGenerator).generateAndExecute(anyString(), any());
     }
 
@@ -77,10 +79,11 @@ class AgentControllerGuardLocalTest {
     void execute_rejectedFromRemote_returnsForbidden() {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.5");
-        Map<String, Object> result = controller.executeDynamic(
+        ResponseEntity<Map<String, Object>> result = controller.executeDynamic(
                 new AgentController.ExecuteRequest("demo", new JSONObject(), null, null), req);
 
-        assertEquals("Forbidden", result.get("status"));
+        assertEquals(403, result.getStatusCode().value());
+        assertEquals("Forbidden", result.getBody().get("status"));
         verify(codeGenerator, never()).generateAndExecute(anyString(), any());
     }
 
@@ -90,9 +93,10 @@ class AgentControllerGuardLocalTest {
 
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("127.0.0.1");
-        Map<String, Object> result = controller.removeDynamicTool("demo", req);
+        ResponseEntity<Map<String, Object>> result = controller.removeDynamicTool("demo", req);
 
-        assertEquals("Success", result.get("status"));
+        assertEquals(200, result.getStatusCode().value());
+        assertEquals("Success", result.getBody().get("status"));
         verify(toolRegistry).removeDynamicTool("demo");
     }
 
@@ -100,9 +104,10 @@ class AgentControllerGuardLocalTest {
     void deleteTool_rejectedFromRemote_returnsForbidden() {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.setRemoteAddr("10.0.0.9");
-        Map<String, Object> result = controller.removeDynamicTool("demo", req);
+        ResponseEntity<Map<String, Object>> result = controller.removeDynamicTool("demo", req);
 
-        assertEquals("Forbidden", result.get("status"));
+        assertEquals(403, result.getStatusCode().value());
+        assertEquals("Forbidden", result.getBody().get("status"));
         verify(toolRegistry, never()).removeDynamicTool(anyString());
     }
 

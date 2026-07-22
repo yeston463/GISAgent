@@ -42,8 +42,9 @@ __pycache__/
 .agents/
 /share/*.zip
 geoscene-services.log
+geoscene-services.log.*
 python-gis-service*.log
+python-gis-service.log.*
 /cityengine-home/
 /cityengine-project/
 /cityengine-workspace/
-/src/main/resources/static/assets/
