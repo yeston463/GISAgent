@@ -37,6 +37,7 @@ build/
 **/.env
 __pycache__/
 *.py[cod]
+.venv/
 .codex/
 .codex-temp-*/
 .agents/

@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import math
 import shutil
 import stat
 import subprocess
@@ -41,9 +42,19 @@ def _positive_int_env(name, default, minimum):
         return default
 
 
-STARTUP_TIMEOUT_SECONDS = _positive_int_env("CITYENGINE_STARTUP_TIMEOUT_SECONDS", 120, 10)
+LEGACY_STARTUP_TIMEOUT_SECONDS = _positive_int_env("CITYENGINE_STARTUP_TIMEOUT_SECONDS", 120, 10)
+CITYENGINE_BOOT_TIMEOUT_SECONDS = _positive_int_env(
+    "CITYENGINE_BOOT_TIMEOUT_SECONDS",
+    max(300, LEGACY_STARTUP_TIMEOUT_SECONDS),
+    30,
+)
+CITYENGINE_AUTOMATION_TIMEOUT_SECONDS = _positive_int_env(
+    "CITYENGINE_AUTOMATION_TIMEOUT_SECONDS",
+    LEGACY_STARTUP_TIMEOUT_SECONDS,
+    30,
+)
 JOB_TIMEOUT_SECONDS = max(
-    STARTUP_TIMEOUT_SECONDS,
+    CITYENGINE_BOOT_TIMEOUT_SECONDS + CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
     _positive_int_env("CITYENGINE_JOB_TIMEOUT_SECONDS", 900, 60),
 )
 KEEP_RUNTIME_CACHE = os.environ.get("CITYENGINE_KEEP_RUNTIME_CACHE", "false").lower() in {
@@ -61,7 +72,9 @@ def runtime_status():
         "runtimeRoot": str(RUNTIME_ROOT),
         "runsDirectory": str(RUNS_DIR),
         "runtimeRootAscii": _is_ascii_path(RUNTIME_ROOT),
-        "startupTimeoutSeconds": STARTUP_TIMEOUT_SECONDS,
+        "startupTimeoutSeconds": CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
+        "bootTimeoutSeconds": CITYENGINE_BOOT_TIMEOUT_SECONDS,
+        "automationTimeoutSeconds": CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
         "jobTimeoutSeconds": JOB_TIMEOUT_SECONDS,
         "keepRuntimeCache": KEEP_RUNTIME_CACHE,
         "startupScriptTemplate": str(startup_template),
@@ -182,6 +195,67 @@ def _startup_script():
     return '''from scripting import *\nfrom java import lang\nimport ConfigParser\nimport sys\n\nif __name__ == '__startup__':\n    ce = CE()\n    projectFolder = lang.System.getProperty("projectFolder")\n    configFilePath = lang.System.getProperty("configFilePath")\n    if "automationProject" in ce.listProjects():\n        ce.removeProject("automationProject")\n    ce.importProject(projectFolder, False, "automationProject")\n    cp = ConfigParser.ConfigParser()\n    cp.read(configFilePath)\n    scriptPath = cp.get("config", "scriptPath")\n    sys.path.append(ce.toFSPath("/automationProject/scripts/generated"))\n    execfile(scriptPath)\n'''
 
 
+def _is_finite_coordinate(point):
+    return (
+        isinstance(point, (list, tuple))
+        and len(point) >= 2
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in point[:2]
+        )
+    )
+
+
+def _valid_ring(ring):
+    return (
+        isinstance(ring, list)
+        and len(ring) >= 4
+        and all(_is_finite_coordinate(point) for point in ring)
+        and ring[0][:2] == ring[-1][:2]
+    )
+
+
+def _validate_footprint_geometry(geometry):
+    if not isinstance(geometry, dict):
+        return False, "缺少 GeoJSON 面几何"
+    geometry_type = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    if geometry_type == "Polygon":
+        valid = isinstance(coordinates, list) and bool(coordinates) and all(_valid_ring(ring) for ring in coordinates)
+    elif geometry_type == "MultiPolygon":
+        valid = (
+            isinstance(coordinates, list)
+            and bool(coordinates)
+            and all(
+                isinstance(polygon, list)
+                and bool(polygon)
+                and all(_valid_ring(ring) for ring in polygon)
+                for polygon in coordinates
+            )
+        )
+    else:
+        return False, f"不支持 {geometry_type or 'unknown'} 几何，仅接受 Polygon/MultiPolygon"
+    if not valid:
+        return False, "面坐标为空、无效或 rings 未闭合"
+    return True, ""
+
+
+def _footprint_vertex_count(geometry):
+    coordinates = geometry["coordinates"]
+    polygons = [coordinates] if geometry["type"] == "Polygon" else coordinates
+    return sum(max(0, len(ring) - 1) for polygon in polygons for ring in polygon)
+
+
+def _is_approximate_geometry(properties):
+    value = properties.get("geometryApproximation", False)
+    if isinstance(value, str):
+        value = value.strip().lower() in {"1", "true", "yes", "extent", "bounding_box"}
+    source = str(properties.get("geometrySource", "")).strip().lower()
+    return bool(value) or source in {"extent", "extent_bbox", "bounding_box", "envelope"}
+
+
 def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
     problem_ids = {
         str((feature.get("properties") or {}).get("id"))
@@ -190,16 +264,59 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
     rule_height = _number(rule_set.get("rules", {}).get("buildingHeight", {}).get("max"), 54.0, 3, 300)
     prepared = {"type": "FeatureCollection", "features": []}
     actions = []
-    for feature in buildings.get("features", []):
+    decisions = []
+    input_features = buildings.get("features", []) if isinstance(buildings, dict) else []
+    for index, feature in enumerate(input_features):
         props = dict(feature.get("properties") or {})
-        building_id = str(props.get("id", ""))
+        building_id = str(props.get("id", f"feature-{index + 1}"))
+        geometry = feature.get("geometry")
+        source = str(props.get("geometrySource") or "geojson_polygon")
+        if _is_approximate_geometry(props):
+            decisions.append({
+                "buildingId": building_id,
+                "name": props.get("name"),
+                "decision": "skip_approximate_footprint",
+                "geometrySource": source,
+                "geometryChanged": False,
+                "reason": "输入仅为 extent/包围盒近似，已跳过，避免把原建筑静默变成四棱柱。",
+            })
+            continue
+        valid, invalid_reason = _validate_footprint_geometry(geometry)
+        if not valid:
+            decisions.append({
+                "buildingId": building_id,
+                "name": props.get("name"),
+                "decision": "skip_invalid_footprint",
+                "geometrySource": source,
+                "geometryChanged": False,
+                "reason": f"{invalid_reason}；已跳过且未生成替代矩形。",
+            })
+            continue
+
+        vertex_count = _footprint_vertex_count(geometry)
         current_height = _number(props.get("height"), 3.0, 3, 300)
         should_modify = building_id in problem_ids
         target_height = min(current_height, rule_height) if should_modify else current_height
+        target_setback = requirements["setback"] if should_modify else 0.0
+        geometry_changed = target_setback > 0
+        source_reason = str(props.get("geometryChangeReason") or "").strip()[:500]
+        geometry_reason = (
+            f"用户/规划要求对问题建筑退界 {target_setback:g} 米；原始轮廓仍作为输入基准。"
+            if geometry_changed
+            else source_reason or "保留原始 Polygon/MultiPolygon 轮廓，CityEngine 仅沿该轮廓拉伸高度。"
+        )
+        for metadata_field in (
+            "geometrySource", "geometryApproximation", "originalVertexCount", "geometryChangeReason"
+        ):
+            props.pop(metadata_field, None)
         props["ce_height"] = target_height
         props["ce_modify"] = 1 if target_height != current_height else 0
-        props["ce_setback"] = 0.0
+        props["ce_setback"] = target_setback
         props["ce_color"] = requirements["primaryColor"] if should_modify else "#b7c1c8"
+        props["geom_src"] = source[:40]
+        props["geom_aprx"] = 0
+        props["orig_vtx"] = vertex_count
+        props["geom_note"] = geometry_reason[:240]
         if target_height != current_height:
             actions.append({
                 "buildingId": building_id,
@@ -207,9 +324,44 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
                 "action": "reduce_height",
                 "fromHeight": current_height,
                 "toHeight": target_height,
+                "reason": f"建筑现状高度 {current_height:g} 米超过规划限高 {rule_height:g} 米。",
             })
-        prepared["features"].append({"type": "Feature", "properties": props, "geometry": feature.get("geometry")})
-    return prepared, actions
+        if geometry_changed:
+            actions.append({
+                "buildingId": building_id,
+                "name": props.get("name"),
+                "action": "apply_setback",
+                "setback": target_setback,
+                "reason": geometry_reason,
+            })
+        decisions.append({
+            "buildingId": building_id,
+            "name": props.get("name"),
+            "decision": "apply_explicit_setback" if geometry_changed else "preserve_footprint",
+            "geometrySource": source,
+            "originalVertexCount": vertex_count,
+            "geometryChanged": geometry_changed,
+            "reason": geometry_reason,
+        })
+        prepared["features"].append({"type": "Feature", "properties": props, "geometry": geometry})
+
+    if not prepared["features"]:
+        reasons = "; ".join(item["reason"] for item in decisions[:3])
+        raise ValueError(f"没有可用于 CityEngine 的真实建筑面轮廓。{reasons}")
+
+    skipped = [item for item in decisions if item["decision"].startswith("skip_")]
+    changed = [item for item in decisions if item["geometryChanged"]]
+    summary = {
+        "policy": "preserve_original_footprint",
+        "inputCount": len(input_features),
+        "preservedCount": len(prepared["features"]) - len(changed),
+        "changedGeometryCount": len(changed),
+        "approximatedCount": 0,
+        "skippedCount": len(skipped),
+        "message": "默认保持原始建筑轮廓；仅在明确要求退界时改变生成轮廓，绝不使用 extent 静默替代。",
+        "decisions": decisions,
+    }
+    return prepared, actions, summary
 
 
 def _write_shapefile(buildings, shp_path):
@@ -218,7 +370,11 @@ def _write_shapefile(buildings, shp_path):
     rows = []
     for feature in buildings.get("features", []):
         props = dict(feature.get("properties") or {})
-        props["geometry"] = shape(feature["geometry"])
+        geometry = shape(feature["geometry"])
+        if geometry.geom_type not in {"Polygon", "MultiPolygon"} or geometry.is_empty or not geometry.is_valid:
+            building_id = props.get("id", "unknown")
+            raise ValueError(f"建筑 {building_id} 的原始轮廓无法无损写入 Shapefile，已停止生成")
+        props["geometry"] = geometry
         rows.append(props)
     gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
     gdf.to_file(shp_path, driver="ESRI Shapefile", encoding="UTF-8")
@@ -235,9 +391,11 @@ def _generated_script(job_id, layer_name, shp_workspace_path, rule_workspace_pat
 
 def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings, requirements=None, rag_context="", user_request=""):
     job_id = f"ce-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    runtime = _prepare_runtime(job_id)
     normalized = normalize_requirements(requirements, rule_set)
-    prepared_buildings, optimization_actions = _prepare_buildings(case_data["buildings"], rule_set, problem_buildings, normalized)
+    prepared_buildings, optimization_actions, geometry_summary = _prepare_buildings(
+        case_data["buildings"], rule_set, problem_buildings, normalized
+    )
+    runtime = _prepare_runtime(job_id)
     job_path = JOBS_DIR / f"{job_id}.json"
     result_path = repository_result_path(job_id)
     cga_path = runtime["rules"] / f"{job_id}.cga"
@@ -259,6 +417,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         "requirementsSource": {"userRequest": user_request, "ragContext": rag_context},
         "case": case_data, "currentMetrics": current_metrics, "problemBuildings": problem_buildings,
         "optimizationActions": optimization_actions,
+        "geometrySummary": geometry_summary,
         "footprints": str(shp_path), "generatedScript": str(script_path), "generatedRule": str(cga_path),
         "configFile": str(config_path), "startupSource": str(startup_source_path),
         "resultManifest": str(result_path),
@@ -282,6 +441,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         "generatedScript": str(script_path), "generatedRule": str(cga_path), "configFile": str(config_path),
         "startupSource": str(startup_source_path), "resultManifest": str(result_path),
         "requirements": normalized, "cityEngine": runtime_status(), "launch": launch,
+        "optimizationActions": optimization_actions, "geometrySummary": geometry_summary,
         **_runtime_metadata(runtime),
     }
 
@@ -384,7 +544,8 @@ def cleanup_finished_runtime(job_id):
 
 def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
     try:
-        started_deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+        boot_deadline = time.monotonic() + CITYENGINE_BOOT_TIMEOUT_SECONDS
+        automation_deadline = None
         job_deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
         startup_installed = False
         while process.poll() is None and not runtime["result"].is_file():
@@ -396,13 +557,37 @@ def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
             ):
                 runtime["startup"].write_text(startup_script, encoding="ascii")
                 startup_installed = True
+                automation_deadline = now + CITYENGINE_AUTOMATION_TIMEOUT_SECONDS
+                log_stream.write(
+                    (
+                        "[GISAgent] CityEngine startup hook installed; "
+                        f"automation timeout is {CITYENGINE_AUTOMATION_TIMEOUT_SECONDS} seconds.\n"
+                    ).encode("utf-8")
+                )
+                log_stream.flush()
             elif startup_installed and not runtime["startup"].is_file() and not runtime["started"].is_file():
                 runtime["startup"].write_text(startup_script, encoding="ascii")
-            if not runtime["started"].is_file() and now >= started_deadline:
+                log_stream.write("[GISAgent] CityEngine startup hook was removed; reinstalling it.\n".encode("utf-8"))
+                log_stream.flush()
+            if not runtime["started"].is_file() and not startup_installed and now >= boot_deadline:
                 _stop_process(process)
                 reason = (
-                    "CityEngine automation did not start within "
-                    f"{STARTUP_TIMEOUT_SECONDS} seconds. See {runtime['log']} and "
+                    "CityEngine did not finish workspace initialization within "
+                    f"{CITYENGINE_BOOT_TIMEOUT_SECONDS} seconds. See {runtime['log']} and "
+                    f"{runtime['metadataLog']}"
+                )
+                _write_process_failure(job_id, process, runtime, reason)
+                return
+            if (
+                not runtime["started"].is_file()
+                and startup_installed
+                and automation_deadline is not None
+                and now >= automation_deadline
+            ):
+                _stop_process(process)
+                reason = (
+                    "CityEngine startup hook was installed but automation did not start within "
+                    f"{CITYENGINE_AUTOMATION_TIMEOUT_SECONDS} seconds. See {runtime['log']} and "
                     f"{runtime['metadataLog']}"
                 )
                 _write_process_failure(job_id, process, runtime, reason)

@@ -45,7 +45,9 @@
 | `GIS_PYTHON_SERVICE_URL` | 前端调用的 Python 服务地址 | `http://127.0.0.1:8000/analysis` |
 | `POSTGRES_*` | pgvector 向量库（记忆/检索，可选） | 本地 5432 |
 | `CITYENGINE_RUNTIME_ROOT` | CityEngine 运行时根目录（**必须 ASCII 路径**） | `C:/GISAgentCityEngine` |
-| `CITYENGINE_*_TIMEOUT_SECONDS` | 启动 / 单任务超时 | 120 / 900 |
+| `CITYENGINE_BOOT_TIMEOUT_SECONDS` | CityEngine 冷启动、Python 支持文件重建预算 | 300 |
+| `CITYENGINE_AUTOMATION_TIMEOUT_SECONDS` | 启动钩子安装后的自动化启动预算 | 120 |
+| `CITYENGINE_JOB_TIMEOUT_SECONDS` | 单任务总超时 | 900 |
 | `GEOSCENE_*` | GeoScene Enterprise 发布凭据 | — |
 | `DYNAMIC_EXECUTION_ENABLED` | 动态代码执行总开关 | `false` |
 | `DYNAMIC_EXECUTION_AUTH_MODE` | `token`（独立令牌）或 `local`（仅回环） | `local` |

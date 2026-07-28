@@ -58,19 +58,30 @@ if not exist "!FRONTEND!\node_modules" (
   popd
 )
 
-call "!PYTHON_EXE!" -c "import fastapi,uvicorn" >nul 2>nul
-if errorlevel 1 if exist "!ROOT!requirements.txt" (
-  echo Installing Python GIS dependencies ...
-  call "!PYTHON_EXE!" -m pip install -r "!ROOT!requirements.txt"
-  if errorlevel 1 (echo [WARN] Python dependency install failed; GIS service may not start.)
+set "PYTHON_RUNTIME_EXE=!PYTHON_EXE!"
+call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn" >nul 2>nul
+if errorlevel 1 (
+  set "PYTHON_VENV=!ROOT!.venv"
+  set "PYTHON_RUNTIME_EXE=!PYTHON_VENV!\Scripts\python.exe"
+  if not exist "!PYTHON_RUNTIME_EXE!" (
+    echo Creating local Python environment ...
+    call "!PYTHON_EXE!" -m venv "!PYTHON_VENV!"
+    if errorlevel 1 (echo [ERROR] Failed to create local Python environment.& exit /b 1)
+  )
+  echo Installing Python GIS dependencies into .venv ...
+  call "!PYTHON_RUNTIME_EXE!" -m pip install -r "!ROOT!requirements.txt"
+  if errorlevel 1 (echo [ERROR] Python dependency installation failed.& exit /b 1)
 )
+
+call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn" >nul 2>nul
+if errorlevel 1 (echo [ERROR] Python GIS runtime dependencies are unavailable.& exit /b 1)
 
 set "DOCKER_READY=0"
 where docker >nul 2>nul
 if not errorlevel 1 (
   docker info >nul 2>nul
   if not errorlevel 1 set "DOCKER_READY=1"
-  if "!DOCKER_READY!"=="0" (
+  if "!DOCKER_READY!"=="0" if /i "!GIS_AUTO_START_DOCKER!"=="1" (
     echo Docker engine is not running. Trying to start Docker Desktop ...
     if exist "%ProgramFiles%\Docker\Docker\Docker Desktop.exe" start "" "%ProgramFiles%\Docker\Docker\Docker Desktop.exe"
     if exist "%LocalAppData%\Docker\Docker Desktop.exe" start "" "%LocalAppData%\Docker\Docker Desktop.exe"
@@ -79,6 +90,10 @@ if not errorlevel 1 (
       if not errorlevel 1 (set "DOCKER_READY=1"& goto docker_ready)
       timeout /t 2 /nobreak >nul
     )
+  )
+  if "!DOCKER_READY!"=="0" if /i not "!GIS_AUTO_START_DOCKER!"=="1" (
+    echo [WARN] Docker is not running and automatic startup is disabled to preserve memory for GeoScene.
+    echo        Set GIS_AUTO_START_DOCKER=1 in .env only when Redis/pgvector containers are required.
   )
 ) else (
   echo [WARN] Docker CLI not found; continuing with local service fallback.
@@ -144,7 +159,7 @@ echo Starting Java backend on http://127.0.0.1:8080 ...
 start "GIS Agent - Java" /D "%ROOT%" powershell.exe -NoLogo -NoExit -ExecutionPolicy Bypass -File "%ROOT%start-java-backend.ps1" -SkipBuild
 
 echo Starting Python GIS service on http://127.0.0.1:8000 ...
-start "GIS Agent - Python" /D "%ROOT%" cmd /k ""%PYTHON_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000"
+start "GIS Agent - Python" /D "%ROOT%" cmd /k ""%PYTHON_RUNTIME_EXE%" main.py"
 
 echo Starting Vue frontend on http://127.0.0.1:5173 ...
 start "GIS Agent - Vue" /D "%FRONTEND%" cmd /k "call npm run dev -- --host 127.0.0.1"

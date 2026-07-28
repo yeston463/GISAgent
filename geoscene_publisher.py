@@ -26,33 +26,59 @@ def _service_name(job_id):
     return name[:120]
 
 
-def _find_existing_service(token, job_id):
+def _find_service_items(token, job_id):
     search = _request_json(f"{PORTAL_URL}/sharing/rest/search", {
         "token": token,
         "f": "json",
         "q": f'owner:"{PORTAL_USERNAME}" AND title:"{job_id}" AND type:"Scene Service"',
         "num": 100,
     })
-    item = next(
-        (
-            result
-            for result in search.get("results", [])
-            if result.get("title") == job_id and result.get("type") == "Scene Service"
-        ),
-        None,
-    )
-    if not item:
-        return None
-    service_url = item.get("url")
-    if not service_url:
-        details = _request_json(
-            f"{PORTAL_URL}/sharing/rest/content/items/{item['id']}",
-            {"token": token, "f": "json"},
-        )
-        service_url = details.get("url")
-    if not service_url:
-        return None
-    return {"serviceItemId": item.get("id"), "sceneServiceUrl": service_url}
+    return [
+        result
+        for result in search.get("results", [])
+        if result.get("title") == job_id and result.get("type") == "Scene Service"
+    ]
+
+
+def _read_scene_service(scene_service_url, token=None, timeout=30):
+    fields = {"f": "json"}
+    if token:
+        fields["token"] = token
+    details = _request_json(scene_service_url, fields, timeout=timeout)
+    service_name = details.get("name") or details.get("serviceName")
+    if not service_name and details.get("layers") is None:
+        raise RuntimeError("SceneServer response did not contain service metadata")
+    return {
+        "url": scene_service_url,
+        "serviceName": service_name,
+        "serviceType": details.get("serviceType") or "SceneServer",
+        "verified": True,
+    }
+
+
+def _find_existing_service(token, job_id, items=None):
+    for item in items if items is not None else _find_service_items(token, job_id):
+        service_url = item.get("url")
+        if not service_url:
+            details = _request_json(
+                f"{PORTAL_URL}/sharing/rest/content/items/{item['id']}",
+                {"token": token, "f": "json"},
+            )
+            service_url = details.get("url")
+        if not service_url:
+            continue
+        try:
+            hosted_service = _read_scene_service(service_url, token=token)
+        except Exception:
+            # A Portal item can remain after its hosting job failed. It must not
+            # be reused unless the corresponding SceneServer really exists.
+            continue
+        return {
+            "serviceItemId": item.get("id"),
+            "sceneServiceUrl": service_url,
+            "hostedService": hosted_service,
+        }
+    return None
 
 
 def _report_progress(callback, stage, status, message, **details):
@@ -134,6 +160,31 @@ def _poll(status_url, token, timeout=600):
     raise TimeoutError("Timed out waiting for GeoScene scene service publication")
 
 
+def _poll_item_status(token, item_id, timeout=600, poll_interval=3):
+    user = urllib.parse.quote(PORTAL_USERNAME)
+    status_url = f"{PORTAL_URL}/sharing/rest/content/users/{user}/items/{item_id}/status"
+    deadline = time.time() + timeout
+    last_status = {}
+    while time.time() < deadline:
+        last_status = _request_json(status_url, {"token": token, "f": "json"})
+        state = str(last_status.get("status", "")).lower()
+        if state in {"completed", "success"}:
+            return last_status
+        if state in {"failed", "error"}:
+            raise RuntimeError(
+                last_status.get("statusMessage")
+                or last_status.get("message")
+                or "Scene service publishing failed"
+            )
+        # GeoScene reports "partial" while the asynchronous hosting job is
+        # still being assembled. Only a real SceneServer response is success.
+        time.sleep(poll_interval)
+    state = last_status.get("status") or "unknown"
+    message = last_status.get("statusMessage") or last_status.get("message") or ""
+    suffix = f": {message}" if message else ""
+    raise TimeoutError(f"Timed out waiting for Portal item {item_id} (status={state}){suffix}")
+
+
 
 
 def inspect_publication(publication):
@@ -182,30 +233,21 @@ def share_publication(publication):
     publication["sharedWithEveryone"] = bool(shared_ids)
     return publication
 
-def verify_scene_service(scene_service_url, timeout=90):
+def verify_scene_service(scene_service_url, timeout=90, token=None, poll_interval=3):
     if not scene_service_url:
         raise RuntimeError("Scene service URL is empty")
-    separator = "&" if "?" in scene_service_url else "?"
     deadline = time.time() + timeout
     last_error = None
     while time.time() < deadline:
         try:
-            details = _request_json(
-                f"{scene_service_url}{separator}{urllib.parse.urlencode({'f': 'json'})}",
+            return _read_scene_service(
+                scene_service_url,
+                token=token,
                 timeout=min(30, max(1, int(deadline - time.time()))),
             )
-            service_name = details.get("name") or details.get("serviceName")
-            if service_name or details.get("layers") is not None:
-                return {
-                    "url": scene_service_url,
-                    "serviceName": service_name,
-                    "serviceType": details.get("serviceType") or "SceneServer",
-                    "verified": True,
-                }
-            last_error = RuntimeError("SceneServer response did not contain service metadata")
         except Exception as exc:
             last_error = exc
-        time.sleep(3)
+        time.sleep(poll_interval)
     raise RuntimeError(f"SceneServer did not become publicly available: {last_error}")
 
 
@@ -254,11 +296,37 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
         "正在将场景包发布为 Scene Service",
         sourceItemId=item_id,
     )
-    published = _request_json(f"{PORTAL_URL}/sharing/rest/content/users/{user}/publish", {"token": token, "f": "json", "itemID": item_id, "filetype": "scenepackage", "outputType": "sceneService", "publishParameters": json.dumps({"name": _service_name(job_id), "maxRecordCount": 2000})})
+    service_items = _find_service_items(token, job_id)
+    existing_service = _find_existing_service(token, job_id, service_items)
+    if existing_service:
+        _report_progress(
+            progress_callback,
+            "scene_published",
+            "success",
+            "已复用验证通过的 Scene Service",
+            serviceItemId=existing_service["serviceItemId"],
+            sceneServiceUrl=existing_service["sceneServiceUrl"],
+        )
+        return share_publication({
+            "status": "completed",
+            "portalUrl": PORTAL_URL,
+            "sourceItemId": item_id,
+            "serviceItemId": existing_service["serviceItemId"],
+            "sceneServiceUrl": existing_service["sceneServiceUrl"],
+            "hostedService": existing_service["hostedService"],
+            "publishedAt": int(time.time()),
+        })
+
+    service_name = _service_name(job_id)
+    if service_items:
+        # Preserve orphaned Portal items for manual inspection, but publish a
+        # fresh service name so retries are not trapped by the stale item.
+        service_name = _service_name(f"{job_id}_retry_{uuid.uuid4().hex[:8]}")
+    published = _request_json(f"{PORTAL_URL}/sharing/rest/content/users/{user}/publish", {"token": token, "f": "json", "itemID": item_id, "filetype": "scenepackage", "outputType": "sceneService", "publishParameters": json.dumps({"name": service_name, "maxRecordCount": 2000})})
     services = published.get("services") or []
     service = services[0] if services else published
     if service.get("success") is False:
-        existing_service = _find_existing_service(token, job_id)
+        existing_service = _find_existing_service(token, job_id, service_items)
         if existing_service:
             service = {
                 "success": True,
@@ -269,12 +337,26 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
             raise RuntimeError(f"GeoScene scene service publication failed: {service.get('error') or service}")
     if service.get("statusURL"):
         _poll(service["statusURL"], token)
-    service_url = service.get("serviceurl") or service.get("serviceUrl")
     service_item_id = service.get("serviceItemId")
+    if not service_item_id:
+        raise RuntimeError(f"GeoScene publish response did not contain a service item id: {published}")
+    try:
+        _poll_item_status(token, service_item_id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Portal 项目已创建，但 SceneServer 服务未生成（服务项目 {service_item_id}）：{exc}"
+        ) from exc
+    service_url = service.get("serviceurl") or service.get("serviceUrl")
     if not service_url and service_item_id:
         service_url = _request_json(f"{PORTAL_URL}/sharing/rest/content/items/{service_item_id}", {"token": token, "f": "json"}).get("url")
     if not service_url:
         raise RuntimeError(f"GeoScene publish response did not contain a scene service URL: {published}")
+    try:
+        hosted_service = verify_scene_service(service_url, token=token)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Portal 项目已创建，但 SceneServer 服务未生成（服务项目 {service_item_id}）：{exc}"
+        ) from exc
     _report_progress(
         progress_callback,
         "scene_published",
@@ -283,4 +365,4 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
         serviceItemId=service_item_id,
         sceneServiceUrl=service_url,
     )
-    return share_publication({"status": "completed", "portalUrl": PORTAL_URL, "sourceItemId": item_id, "serviceItemId": service_item_id, "sceneServiceUrl": service_url, "publishedAt": int(time.time())})
+    return share_publication({"status": "completed", "portalUrl": PORTAL_URL, "sourceItemId": item_id, "serviceItemId": service_item_id, "sceneServiceUrl": service_url, "hostedService": hosted_service, "publishedAt": int(time.time())})
