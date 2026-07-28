@@ -96,3 +96,28 @@ def test_analyze_area_e2e_pipeline(client, monkeypatch):
     assert body.get("status") == "Success"
     assert body.get("building_count") == 2
     assert "aoi" in body
+
+
+def test_urban_metrics_returns_effective_height_and_source(client):
+    aoi = {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[[121.47, 31.23], [121.471, 31.23], [121.471, 31.231], [121.47, 31.231], [121.47, 31.23]]]},
+        "properties": {},
+    }
+    buildings = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[[121.4701, 31.2301], [121.4703, 31.2301], [121.4703, 31.2303], [121.4701, 31.2303], [121.4701, 31.2301]]]},
+            "properties": {"id": "heightless-1", "building": "apartments"},
+        }],
+    }
+
+    resp = client.post("/analysis/urban_metrics", json={"aoi": aoi, "buildings": buildings})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["height_stats"]["max"] == 38.4
+    assert body["height_stats"]["confidence"] == "low"
+    assert body["vertical_profile"][0]["building_id"] == "heightless-1"
+    assert body["vertical_profile"][0]["height_source"] == "building_type_estimated"

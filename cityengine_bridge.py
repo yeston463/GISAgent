@@ -57,6 +57,7 @@ JOB_TIMEOUT_SECONDS = max(
     CITYENGINE_BOOT_TIMEOUT_SECONDS + CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
     _positive_int_env("CITYENGINE_JOB_TIMEOUT_SECONDS", 900, 60),
 )
+CITYENGINE_MAX_INPUT_BUILDINGS = _positive_int_env("CITYENGINE_MAX_INPUT_BUILDINGS", 300, 1)
 KEEP_RUNTIME_CACHE = os.environ.get("CITYENGINE_KEEP_RUNTIME_CACHE", "false").lower() in {
     "1", "true", "yes",
 }
@@ -76,6 +77,8 @@ def runtime_status():
         "bootTimeoutSeconds": CITYENGINE_BOOT_TIMEOUT_SECONDS,
         "automationTimeoutSeconds": CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
         "jobTimeoutSeconds": JOB_TIMEOUT_SECONDS,
+        "maxInputBuildings": CITYENGINE_MAX_INPUT_BUILDINGS,
+        "maxConcurrentJobs": 1,
         "keepRuntimeCache": KEEP_RUNTIME_CACHE,
         "startupScriptTemplate": str(startup_template),
         "automationConfigured": CITYENGINE_EXE.is_file() and _is_ascii_path(RUNTIME_ROOT),
@@ -92,8 +95,10 @@ def _number(value, default, minimum, maximum):
 def normalize_requirements(requirements, rule_set):
     requirements = requirements if isinstance(requirements, dict) else {}
     rule_height = rule_set.get("rules", {}).get("buildingHeight", {}).get("max", 54)
-    exports = [str(item).lower() for item in requirements.get("exportFormats", ["slpk", "obj"])]
-    exports = [item for item in exports if item in ALLOWED_EXPORTS] or ["slpk", "obj"]
+    # SLPK is the browser/GeoScene delivery format. OBJ is optional because a
+    # second full export substantially increases large-AOI job time.
+    exports = [str(item).lower() for item in requirements.get("exportFormats", ["slpk"])]
+    exports = [item for item in exports if item in ALLOWED_EXPORTS] or ["slpk"]
     style = str(requirements.get("facadeStyle", "modern")).lower()
     return {
         "maxBuildingHeight": _number(requirements.get("maxBuildingHeight"), float(rule_height), 3, 300),
@@ -256,7 +261,7 @@ def _is_approximate_geometry(properties):
     return bool(value) or source in {"extent", "extent_bbox", "bounding_box", "envelope"}
 
 
-def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
+def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, vertical_profile=None):
     problem_ids = {
         str((feature.get("properties") or {}).get("id"))
         for feature in (problem_buildings or {}).get("features", [])
@@ -265,22 +270,23 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
     prepared = {"type": "FeatureCollection", "features": []}
     actions = []
     decisions = []
+    vertical_by_id = {
+        str(item.get("building_id")): item
+        for item in (vertical_profile or [])
+        if isinstance(item, dict) and item.get("building_id") is not None
+    }
     input_features = buildings.get("features", []) if isinstance(buildings, dict) else []
+    if len(input_features) > CITYENGINE_MAX_INPUT_BUILDINGS:
+        raise ValueError(
+            f"CityEngine input has {len(input_features)} buildings; the safe limit is "
+            f"{CITYENGINE_MAX_INPUT_BUILDINGS}. Reduce the AOI or raise CITYENGINE_MAX_INPUT_BUILDINGS explicitly."
+        )
     for index, feature in enumerate(input_features):
         props = dict(feature.get("properties") or {})
         building_id = str(props.get("id", f"feature-{index + 1}"))
         geometry = feature.get("geometry")
         source = str(props.get("geometrySource") or "geojson_polygon")
-        if _is_approximate_geometry(props):
-            decisions.append({
-                "buildingId": building_id,
-                "name": props.get("name"),
-                "decision": "skip_approximate_footprint",
-                "geometrySource": source,
-                "geometryChanged": False,
-                "reason": "输入仅为 extent/包围盒近似，已跳过，避免把原建筑静默变成四棱柱。",
-            })
-            continue
+        geometry_approximation = _is_approximate_geometry(props)
         valid, invalid_reason = _validate_footprint_geometry(geometry)
         if not valid:
             decisions.append({
@@ -294,7 +300,11 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
             continue
 
         vertex_count = _footprint_vertex_count(geometry)
-        current_height = _number(props.get("height"), 3.0, 3, 300)
+        vertical = vertical_by_id.get(building_id) or vertical_by_id.get(str(props.get("osm_id"))) or {}
+        current_height = _number(vertical.get("height_m"), _number(props.get("height"), 3.0, 3, 300), 3, 300)
+        floor_count = int(_number(vertical.get("floors"), _number(props.get("floors"), 0.0, 0, 80), 0, 80))
+        height_source = str(vertical.get("height_source") or "input_height")
+        height_estimated = bool(vertical.get("estimated", False))
         should_modify = building_id in problem_ids
         target_height = min(current_height, rule_height) if should_modify else current_height
         target_setback = requirements["setback"] if should_modify else 0.0
@@ -303,18 +313,25 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
         geometry_reason = (
             f"用户/规划要求对问题建筑退界 {target_setback:g} 米；原始轮廓仍作为输入基准。"
             if geometry_changed
-            else source_reason or "保留原始 Polygon/MultiPolygon 轮廓，CityEngine 仅沿该轮廓拉伸高度。"
+            else source_reason or (
+                "输入仅提供建筑 extent 外包矩形；已作为近似体导出 SLPK。"
+                if geometry_approximation
+                else "保留原始 Polygon/MultiPolygon 轮廓，CityEngine 仅沿该轮廓拉伸高度。"
+            )
         )
         for metadata_field in (
             "geometrySource", "geometryApproximation", "originalVertexCount", "geometryChangeReason"
         ):
             props.pop(metadata_field, None)
         props["ce_height"] = target_height
+        props["ce_floors"] = floor_count
+        props["vert_src"] = height_source[:40]
+        props["vert_est"] = 1 if height_estimated else 0
         props["ce_modify"] = 1 if target_height != current_height else 0
         props["ce_setback"] = target_setback
         props["ce_color"] = requirements["primaryColor"] if should_modify else "#b7c1c8"
         props["geom_src"] = source[:40]
-        props["geom_aprx"] = 0
+        props["geom_aprx"] = 1 if geometry_approximation else 0
         props["orig_vtx"] = vertex_count
         props["geom_note"] = geometry_reason[:240]
         if target_height != current_height:
@@ -337,28 +354,36 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements):
         decisions.append({
             "buildingId": building_id,
             "name": props.get("name"),
-            "decision": "apply_explicit_setback" if geometry_changed else "preserve_footprint",
+            "decision": "apply_explicit_setback" if geometry_changed else (
+                "approximate_extent_rectangle" if geometry_approximation else "preserve_footprint"
+            ),
             "geometrySource": source,
+            "geometryApproximation": geometry_approximation,
             "originalVertexCount": vertex_count,
             "geometryChanged": geometry_changed,
+            "heightM": target_height,
+            "floors": floor_count,
+            "heightSource": height_source,
+            "heightEstimated": height_estimated,
             "reason": geometry_reason,
         })
         prepared["features"].append({"type": "Feature", "properties": props, "geometry": geometry})
 
     if not prepared["features"]:
         reasons = "; ".join(item["reason"] for item in decisions[:3])
-        raise ValueError(f"没有可用于 CityEngine 的真实建筑面轮廓。{reasons}")
+        raise ValueError(f"没有可用于 CityEngine 的有效建筑 Polygon/MultiPolygon。{reasons}")
 
     skipped = [item for item in decisions if item["decision"].startswith("skip_")]
     changed = [item for item in decisions if item["geometryChanged"]]
+    approximated = [item for item in decisions if item.get("geometryApproximation")]
     summary = {
-        "policy": "preserve_original_footprint",
+        "policy": "prefer_exact_footprint_allow_extent_approximation",
         "inputCount": len(input_features),
-        "preservedCount": len(prepared["features"]) - len(changed),
+        "preservedCount": sum(item["decision"] == "preserve_footprint" for item in decisions),
         "changedGeometryCount": len(changed),
-        "approximatedCount": 0,
+        "approximatedCount": len(approximated),
         "skippedCount": len(skipped),
-        "message": "默认保持原始建筑轮廓；仅在明确要求退界时改变生成轮廓，绝不使用 extent 静默替代。",
+        "message": "优先保留真实建筑轮廓；仅在没有真实轮廓时，将前端可展示建筑的 extent 外包矩形作为明确标注的近似体导出 SLPK。",
         "decisions": decisions,
     }
     return prepared, actions, summary
@@ -393,7 +418,8 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
     job_id = f"ce-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     normalized = normalize_requirements(requirements, rule_set)
     prepared_buildings, optimization_actions, geometry_summary = _prepare_buildings(
-        case_data["buildings"], rule_set, problem_buildings, normalized
+        case_data["buildings"], rule_set, problem_buildings, normalized,
+        current_metrics.get("vertical_profile") if isinstance(current_metrics, dict) else None,
     )
     runtime = _prepare_runtime(job_id)
     job_path = JOBS_DIR / f"{job_id}.json"
@@ -630,6 +656,14 @@ def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
 def launch_cityengine(job_id, runtime, config_path):
     if not CITYENGINE_EXE.is_file():
         return {"started": False, "reason": "CityEngine executable not found"}
+    with _monitor_lock:
+        active_jobs = [active_id for active_id, monitor in _monitor_threads.items() if monitor.is_alive()]
+    if active_jobs:
+        return {
+            "started": False,
+            "reason": "CityEngine is already processing " + active_jobs[0] + ". Wait for it before starting another large-AOI job.",
+            "activeJobId": active_jobs[0],
+        }
     command = [
         str(CITYENGINE_EXE), "-nosplash", "-data", str(runtime["workspace"]), "-vmargs",
         f"-Duser.home={runtime['home']}", f"-DprojectFolder={runtime['project']}",

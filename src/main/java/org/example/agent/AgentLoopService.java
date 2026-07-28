@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class AgentLoopService {
@@ -71,6 +73,9 @@ public class AgentLoopService {
             String memoryId,
             Consumer<ExecutionTrace> traceListener) {
         List<ExecutionTrace> trace = new ArrayList<>();
+        if (isCurrentContextPlanningRequest(userMessage)) {
+            return executePlanningDemo(userMessage, userId, trace, traceListener);
+        }
         if (isPlanningDemoRequest(userMessage)) {
             return executePlanningDemo(userMessage, userId, trace, traceListener);
         }
@@ -81,6 +86,13 @@ public class AgentLoopService {
                 addTrace(trace, traceListener, 0, "ask", "需要补充信息", question, "waiting");
                 return new AgentResult(null, null, question, true, null, List.of(), trace);
             }
+        }
+
+        // A clear "place + radius" request is deterministic GIS work. Do not
+        // make a transient planner-format failure block geocoding and analysis.
+        AgentResult directPlaceResult = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
+        if (directPlaceResult != null) {
+            return directPlaceResult;
         }
 
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -224,6 +236,18 @@ public class AgentLoopService {
                 || userMessage.contains("方案对比");
     }
 
+    private boolean isCurrentContextPlanningRequest(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        String lower = userMessage.toLowerCase();
+        return lower.contains("cityengine")
+                && (lower.contains("geoscene")
+                || lower.contains("slpk")
+                || lower.contains("publish")
+                || lower.contains("generate"));
+    }
+
     private AgentResult executePlanningDemo(
             String userMessage,
             String userId,
@@ -245,6 +269,16 @@ public class AgentLoopService {
         addTrace(trace, traceListener, 2, "action", "提交 CityEngine 规划任务",
                 "使用当前 AOI、建筑和受约束规划参数", "running");
         Map<String, Object> result = asMap(invokeTool("submitCityEnginePlanningJob", params));
+        if (result != null && isFailed(result) && parsePlaceAnalysisRequest(userMessage) != null) {
+            addTrace(trace, traceListener, 2, "fallback", "从请求恢复空间上下文",
+                    "当前上下文不可用；根据请求中的地点和半径重新定位、分析并构建 AOI", "running");
+            AgentResult recovered = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
+            if (recovered != null && recovered.metrics() != null) {
+                addTrace(trace, traceListener, 2, "action", "重新提交 CityEngine 规划任务",
+                        "已恢复地点 AOI 与建筑数据，继续生成三维成果", "running");
+                result = asMap(invokeTool("submitCityEnginePlanningJob", params));
+            }
+        }
         if (result == null || isFailed(result)) {
             String message = result == null
                     ? "CityEngine 任务没有返回有效结果。"
@@ -500,6 +534,165 @@ public class AgentLoopService {
             return false;
         }
         return clarificationEngine.needsClarification(userMessage);
+    }
+
+    private AgentResult executeExplicitPlaceAnalysis(
+            String userMessage,
+            String userId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        PlaceAnalysisRequest request = parsePlaceAnalysisRequest(userMessage);
+        if (request == null) {
+            return null;
+        }
+
+        addTrace(trace, traceListener, 1, "decision", "识别地点分析请求",
+                "地点：" + request.locationName() + "；半径：" + request.radiusMeters() + " 米", "running");
+        JSONObject aiGeocodeParams = new JSONObject();
+        aiGeocodeParams.put("locationName", request.locationName());
+        Map<String, Object> aiCandidate = asMap(invokeTool("aiGeocode", aiGeocodeParams));
+        String cityHint = getString(aiCandidate, "city", "");
+
+        JSONObject geocodeParams = new JSONObject();
+        geocodeParams.put("locationName", request.locationName());
+        if (!cityHint.isBlank()) {
+            geocodeParams.put("city", cityHint);
+        }
+        // geocodeWithCity first uses an exact POI search and refuses ambiguous
+        // same-name POIs before falling back to city-constrained address lookup.
+        Map<String, Object> amapCandidate = asMap(invokeTool("geocodeWithCity", geocodeParams));
+        Map<String, Object> geocode = null;
+        if (hasValidCoordinate(amapCandidate)
+                && !"inconsistent".equalsIgnoreCase(getString(amapCandidate, "verification", ""))) {
+            geocode = amapCandidate;
+            addTrace(trace, traceListener, 1, "observation", "地点定位完成",
+                    "千问识别城市“" + safe(cityHint, "未提供") + "”，高德已返回受城市约束的坐标", "success");
+        } else if (hasValidCoordinate(aiCandidate)) {
+            addTrace(trace, traceListener, 1, "fallback", "地理编码降级",
+                    cityHint.isBlank()
+                            ? "高德 POI 搜索未返回唯一候选，采用千问地点语义坐标"
+                            : "高德未返回可校验结果，采用千问地点语义坐标，并在结果中标记来源",
+                    "running");
+            geocode = aiCandidate;
+        }
+        if (geocode == null || isFailed(geocode)) {
+            String detail = geocode == null ? "未返回地点坐标" : formatTraceDetail(geocode);
+            addTrace(trace, traceListener, 1, "error", "地点定位失败", detail, "error");
+            return new AgentResult(
+                    "未能定位“" + request.locationName() + "”。请检查地点名称，或配置高德地理编码后重试。",
+                    List.of("绘制 AOI 后分析", "上传建筑 GeoJSON"), null, false, null, List.of(), trace);
+        }
+
+        double lon = getDouble(geocode, "longitude", getDouble(geocode, "lon", Double.NaN));
+        double lat = getDouble(geocode, "latitude", getDouble(geocode, "lat", Double.NaN));
+        if (!isValidCoordinate(lon, lat)) {
+            addTrace(trace, traceListener, 1, "error", "地点坐标无效", formatTraceDetail(geocode), "error");
+            return new AgentResult(
+                    "“" + request.locationName() + "”未返回有效坐标，无法开始空间分析。",
+                    List.of("绘制 AOI 后分析", "提供经纬度坐标"), null, false, null, List.of(), trace);
+        }
+        if (!matchesCityHint(cityHint, lon, lat)) {
+            String detail = "地点“" + request.locationName() + "”应位于" + cityHint
+                    + "，但地理编码返回了范围外坐标：" + lon + ", " + lat;
+            addTrace(trace, traceListener, 1, "error", "地点定位校验失败", detail, "error");
+            return new AgentResult(
+                    "已拒绝使用“" + request.locationName() + "”的异常定位结果，避免在错误城市执行分析。请重试或提供完整地址。",
+                    List.of("提供“北京市清华大学”", "绘制 AOI 后分析"), null, false, null, List.of(), trace);
+        }
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        collectCommands(geocode, commands);
+        addTrace(trace, traceListener, 1, "observation", "地点坐标确认",
+                "坐标：" + lon + ", " + lat + "；来源：" + getString(geocode, "source", "unknown"), "success");
+
+        JSONObject analysisParams = new JSONObject();
+        analysisParams.put("lon", lon);
+        analysisParams.put("lat", lat);
+        analysisParams.put("radius", request.radiusMeters());
+        addTrace(trace, traceListener, 2, "action", "调用 analyzeArea",
+                "以“" + request.locationName() + "”为中心分析 " + request.radiusMeters() + " 米范围", "running");
+        Map<String, Object> analysis = asMap(invokeTool("analyzeArea", analysisParams));
+        if (analysis != null && isFailed(analysis)) {
+            JSONObject widerParams = new JSONObject(analysisParams);
+            widerParams.put("radius", Math.min(request.radiusMeters() + 500, 5000));
+            addTrace(trace, traceListener, 2, "fallback", "扩大地点分析范围",
+                    "未回退到旧红线，改为分析 " + widerParams.getIntValue("radius") + " 米范围", "running");
+            analysis = asMap(invokeTool("analyzeArea", widerParams));
+        }
+        collectCommands(analysis == null ? Map.of() : analysis, commands);
+        addTrace(trace, traceListener, 2, "observation", "获得空间分析结果",
+                formatTraceDetail(analysis), analysis != null && !isFailed(analysis) ? "success" : "error");
+
+        if (analysis != null && isValidMetrics(analysis)) {
+            Map<String, Object> metrics = validationLayer.validateMetrics(analysis);
+            saveAnalysis(userId, userMessage, metrics);
+            memoryStore.cleanupExpired();
+            addTrace(trace, traceListener, 3, "complete", "地点分析完成", "已返回 GIS 真值指标与地图命令", "success");
+            return new AgentResult(buildMetricReply(metrics), suggestionEngine.generateSuggestions(metrics), null,
+                    false, metrics, dedupeCommands(commands), trace);
+        }
+
+        String detail = analysis == null ? "分析服务未返回结果" : formatTraceDetail(analysis);
+        return new AgentResult("已定位“" + request.locationName() + "”，但未取得可用建筑指标：" + detail,
+                List.of("扩大分析半径", "绘制 AOI 后分析"), null, false, null,
+                dedupeCommands(commands), trace);
+    }
+
+    private PlaceAnalysisRequest parsePlaceAnalysisRequest(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return null;
+        }
+        String normalizedMessage = userMessage.trim().replaceFirst("^(?:基于)?当前", "");
+        Matcher placeMatcher = Pattern.compile(
+                "(?:分析|查询|查看|评估|统计|计算)?\\s*(.+?)(?:周边|附近|周围|半径|(?=\\d+(?:\\.\\d+)?\\s*(?:公里|千米|km|米|m))|范围)"
+        ).matcher(normalizedMessage);
+        if (!placeMatcher.find()) {
+            return null;
+        }
+        String locationName = placeMatcher.group(1).replaceAll("^[：:，,。.!！?？\\s]+", "").trim();
+        if (locationName.isBlank() || locationName.contains("当前") || locationName.contains("红线") || locationName.contains("AOI")) {
+            return null;
+        }
+        Matcher radiusMatcher = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(公里|千米|km|米|m)").matcher(userMessage);
+        if (!radiusMatcher.find()) {
+            return null;
+        }
+        double radius = Double.parseDouble(radiusMatcher.group(1));
+        String unit = radiusMatcher.group(2).toLowerCase();
+        if (unit.contains("公里") || unit.contains("千米") || "km".equals(unit)) {
+            radius *= 1000;
+        }
+        int radiusMeters = Math.max(50, Math.min((int) Math.round(radius), 5000));
+        return new PlaceAnalysisRequest(locationName, radiusMeters);
+    }
+
+    private boolean matchesCityHint(String cityHint, double lon, double lat) {
+        if (cityHint == null || cityHint.isBlank()) {
+            return true;
+        }
+        // Broad municipal bounds are intentionally used only as a wrong-city guard,
+        // not as a replacement for authoritative geocoding.
+        if ("北京市".equals(cityHint)) {
+            return lon >= 115.7 && lon <= 117.4 && lat >= 39.4 && lat <= 41.1;
+        }
+        return true;
+    }
+
+    private boolean hasValidCoordinate(Map<String, Object> candidate) {
+        if (candidate == null || isFailed(candidate)) {
+            return false;
+        }
+        return isValidCoordinate(
+                getDouble(candidate, "longitude", getDouble(candidate, "lon", Double.NaN)),
+                getDouble(candidate, "latitude", getDouble(candidate, "lat", Double.NaN)));
+    }
+
+    private String getString(Map<?, ?> map, String key, String fallback) {
+        if (map == null || map.get(key) == null) {
+            return fallback;
+        }
+        String value = String.valueOf(map.get(key)).trim();
+        return value.isBlank() || "null".equalsIgnoreCase(value) ? fallback : value;
     }
 
     private JSONObject askModelForDecision(List<Map<String, Object>> messages) {
@@ -986,4 +1179,6 @@ public class AgentLoopService {
             String detail,
             String status
     ) {}
+
+    private record PlaceAnalysisRequest(String locationName, int radiusMeters) {}
 }

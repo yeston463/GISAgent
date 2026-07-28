@@ -68,7 +68,7 @@ def test_l_shaped_footprint_is_preserved_and_height_reason_is_reported():
     assert "超过规划限高" in actions[0]["reason"]
 
 
-def test_extent_approximation_is_skipped_instead_of_becoming_a_prism():
+def test_extent_approximation_is_exported_with_an_explicit_marker():
     approximate = _feature(
         "bbox-01",
         geometry={
@@ -80,15 +80,15 @@ def test_extent_approximation_is_skipped_instead_of_becoming_a_prism():
     )
     prepared, _actions, summary = _prepare([_feature(), approximate])
 
-    assert len(prepared["features"]) == 1
-    assert summary["skippedCount"] == 1
-    assert summary["approximatedCount"] == 0
-    skipped = next(item for item in summary["decisions"] if item["buildingId"] == "bbox-01")
-    assert skipped["decision"] == "skip_approximate_footprint"
-    assert "四棱柱" in skipped["reason"]
+    assert len(prepared["features"]) == 2
+    assert summary["skippedCount"] == 0
+    assert summary["approximatedCount"] == 1
+    approximated = next(item for item in summary["decisions"] if item["buildingId"] == "bbox-01")
+    assert approximated["decision"] == "approximate_extent_rectangle"
+    assert prepared["features"][1]["properties"]["geom_aprx"] == 1
 
 
-def test_only_approximate_footprints_stop_generation():
+def test_only_approximate_footprints_can_generate_slpk():
     approximate = _feature(
         geometry={
             "type": "Polygon",
@@ -97,8 +97,9 @@ def test_only_approximate_footprints_stop_generation():
         geometrySource="extent",
         geometryApproximation=True,
     )
-    with pytest.raises(ValueError, match="没有可用于 CityEngine 的真实建筑面轮廓"):
-        _prepare([approximate])
+    prepared, _actions, summary = _prepare([approximate])
+    assert len(prepared["features"]) == 1
+    assert summary["approximatedCount"] == 1
 
 
 def test_explicit_setback_is_the_only_reported_footprint_change():
@@ -110,6 +111,32 @@ def test_explicit_setback_is_the_only_reported_footprint_change():
     assert summary["decisions"][0]["decision"] == "apply_explicit_setback"
     assert "退界 3 米" in summary["decisions"][0]["reason"]
     assert any(action["action"] == "apply_setback" for action in actions)
+
+
+def test_cityengine_uses_metrics_vertical_profile_for_missing_input_height():
+    feature = _feature("estimated-01", height=None)
+    feature["properties"].pop("height")
+    rules = {"rules": {"buildingHeight": {"max": 54}}}
+    requirements = normalize_requirements({}, rules)
+    prepared, _actions, summary = _prepare_buildings(
+        {"type": "FeatureCollection", "features": [feature]},
+        rules,
+        {"type": "FeatureCollection", "features": []},
+        requirements,
+        [{
+            "building_id": "estimated-01",
+            "floors": 7,
+            "floor_source": "estimated",
+            "height_m": 22.4,
+            "height_source": "building_type_estimated",
+            "estimated": True,
+        }],
+    )
+
+    assert prepared["features"][0]["properties"]["ce_height"] == 22.4
+    assert prepared["features"][0]["properties"]["ce_floors"] == 7
+    assert prepared["features"][0]["properties"]["vert_est"] == 1
+    assert summary["decisions"][0]["heightSource"] == "building_type_estimated"
 
 
 def test_shapefile_round_trip_keeps_l_shaped_geometry(tmp_path):

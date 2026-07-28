@@ -15,10 +15,12 @@ Design rules (so the suite runs in a clean env without optional GIS libs):
   ensure_cityengine_published are exercised.
 """
 import math
+import urllib.error
 
 import pytest
 
 import main
+from gis import adapter
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +81,41 @@ def test_overpass_query_bbox_ordering():
     # Overpass expects south,west,north,east
     q = main._overpass_query((116.0, 39.0, 117.0, 40.0))
     assert "39.0,116.0,40.0,117.0" in q
+    assert "out tags geom qt;" in q
+
+
+def test_overpass_uses_backup_endpoint_and_caches_result(monkeypatch):
+    """A busy public endpoint must not turn valid OSM geometry into a bbox fallback."""
+    query = "[out:json];way[building](0,0,1,1);out tags geom qt;"
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"elements": [{"id": 42}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 504, "Gateway Timeout", {}, None)
+        return FakeResponse()
+
+    monkeypatch.setattr(adapter, "OVERPASS_ENDPOINTS", ["https://busy.example", "https://backup.example"])
+    monkeypatch.setattr(adapter.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(adapter.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(adapter, "_overpass_cache", {})
+
+    assert adapter._call_overpass(query) == {"elements": [{"id": 42}]}
+    assert calls == [("https://busy.example", 25), ("https://backup.example", 25)]
+
+    # Same query is served from the short-lived cache; no further network call.
+    assert adapter._call_overpass(query) == {"elements": [{"id": 42}]}
+    assert len(calls) == 2
 
 
 def test_elements_to_features_lock():
@@ -206,6 +243,40 @@ def test_build_metrics_result_far_lock():
     assert result["floor_stats"]["max"] == 10
     assert result["floor_stats"]["confidence"] == "high"
     assert result["floor_stats"]["measured_ratio"] == 1.0
+
+
+def test_vertical_profile_uses_transparent_estimate_when_height_is_missing():
+    result = main._build_metrics_result(
+        [{"properties": {"id": "estimated-1", "building": "apartments"}, "footprint_area": 100.0}],
+        site_area=100.0,
+        buffer_area=0.0,
+        backend="open_source_geopandas",
+    )
+
+    assert result["height_stats"]["max"] == 38.4
+    assert result["height_stats"]["estimated_ratio"] == 1.0
+    assert result["height_stats"]["confidence"] == "low"
+    assert result["vertical_profile"] == [{
+        "building_id": "estimated-1",
+        "floors": 12,
+        "floor_source": "estimated",
+        "height_m": 38.4,
+        "height_source": "building_type_estimated",
+        "estimated": True,
+    }]
+
+
+def test_vertical_profile_prefers_measured_height():
+    result = main._build_metrics_result(
+        [{"properties": {"id": "measured-1", "height": 35}, "footprint_area": 100.0}],
+        site_area=100.0,
+        buffer_area=0.0,
+        backend="open_source_geopandas",
+    )
+
+    assert result["height_stats"]["max"] == 35.0
+    assert result["height_stats"]["measured_ratio"] == 1.0
+    assert result["vertical_profile"][0]["height_source"] == "height"
 
 
 def test_build_metrics_result_no_buildings_lock():

@@ -13,6 +13,23 @@ $mavenWrapper = Join-Path $ProjectRoot 'mvnw.cmd'
 $mainClassFile = Join-Path $ProjectRoot 'target\classes\org\example\Lc4j1Application.class'
 $classpathFile = Join-Path $ProjectRoot 'target\runtime-classpath.txt'
 
+# The standalone Java launcher must receive the same local configuration as
+# start-dev.bat. Do not overwrite environment variables supplied by the user.
+$envFile = Join-Path $ProjectRoot '.env'
+if (Test-Path -LiteralPath $envFile -PathType Leaf) {
+    foreach ($line in Get-Content -LiteralPath $envFile -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $pair = $trimmed -split '=', 2
+        if ($pair.Count -ne 2 -or [string]::IsNullOrWhiteSpace($pair[0])) { continue }
+        $key = $pair[0].Trim()
+        $value = $pair[1].Trim().Trim('"').Trim("'")
+        if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($key, 'Process'))) {
+            [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        }
+    }
+}
+
 function Get-Java17Executable {
     $candidates = [System.Collections.Generic.List[string]]::new()
 

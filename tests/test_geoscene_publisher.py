@@ -1,7 +1,23 @@
 # -*- coding: utf-8 -*-
 import json
+import os
 
 import geoscene_publisher as publisher
+
+
+def test_load_env_file_uses_file_values_without_overriding_process_environment(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# local settings\nGEOSCENE_PORTAL_USERNAME=file-user\nGEOSCENE_PORTAL_PASSWORD='file-password'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GEOSCENE_PORTAL_USERNAME", raising=False)
+    monkeypatch.setenv("GEOSCENE_PORTAL_PASSWORD", "process-password")
+
+    publisher._load_env_file(env_file)
+
+    assert os.environ["GEOSCENE_PORTAL_USERNAME"] == "file-user"
+    assert os.environ["GEOSCENE_PORTAL_PASSWORD"] == "process-password"
 
 
 def test_poll_item_status_waits_for_partial(monkeypatch):

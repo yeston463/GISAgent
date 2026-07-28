@@ -13,6 +13,7 @@ import re
 from collections import Counter
 
 MAX_BUILDINGS = 3000
+DEFAULT_STOREY_HEIGHT_M = 3.2
 
 try:
     from shapely.geometry import Point, Polygon, mapping, shape
@@ -244,7 +245,8 @@ def _metric_crs_for_gdf(gdf_obj):
     if gdf_obj is None or gdf_obj.empty:
         return "EPSG:3857"
     wgs = gdf_obj if str(gdf_obj.crs).upper().endswith("4326") else gdf_obj.to_crs("EPSG:4326")
-    centroid = wgs.unary_union.centroid
+    union = wgs.geometry.union_all() if hasattr(wgs.geometry, "union_all") else wgs.unary_union
+    centroid = union.centroid
     return _metric_crs(centroid.x, centroid.y)
 
 
@@ -359,20 +361,58 @@ def _value_counts_records(records, field, limit=12):
     return {str(k): int(v) for k, v in Counter(values).most_common(limit)}
 
 
-def _height_stats_records(records):
+def _vertical_for_record(props, footprint_area):
+    """Return one explicit vertical model used by metrics and CityEngine."""
+    floors, floor_source = _floor_for_record(props, footprint_area)
     for field in ("height", "render_height", "HEIGHT", "H_AVG"):
-        values = [
-            _parse_number(record.get("properties", {}).get(field))
-            for record in records
-        ]
-        values = [value for value in values if value is not None]
-        if values:
+        height = _parse_number(props.get(field))
+        if height is not None and height > 0:
             return {
-                "avg": round(sum(values) / len(values), 1),
-                "max": round(max(values), 1),
-                "min": round(min(values), 1),
+                "floors": int(floors),
+                "floor_source": floor_source,
+                "height_m": round(min(height, 300.0), 1),
+                "height_source": field,
+                "estimated": False,
             }
-    return {}
+
+    inferred_from_levels = floor_source != "estimated"
+    return {
+        "floors": int(floors),
+        "floor_source": floor_source,
+        "height_m": round(min(floors * DEFAULT_STOREY_HEIGHT_M, 300.0), 1),
+        "height_source": "levels_inferred" if inferred_from_levels else "building_type_estimated",
+        "estimated": not inferred_from_levels,
+    }
+
+
+def _building_identifier(props, index):
+    value = props.get("id") or props.get("osm_id") or props.get("OBJECTID") or props.get("objectid")
+    return str(value) if value is not None else f"feature-{index + 1}"
+
+
+def _height_stats(verticals):
+    if not verticals:
+        return {}
+    heights = [item["height_m"] for item in verticals]
+    source_counts = Counter(item["height_source"] for item in verticals)
+    measured_count = sum(int(source_counts.get(field, 0)) for field in ("height", "render_height", "HEIGHT", "H_AVG"))
+    levels_count = int(source_counts.get("levels_inferred", 0))
+    estimated_count = int(source_counts.get("building_type_estimated", 0))
+    count = len(verticals)
+    measured_ratio = measured_count / count
+    levels_ratio = levels_count / count
+    estimated_ratio = estimated_count / count
+    confidence = "high" if measured_ratio >= 0.7 else "medium" if measured_ratio + levels_ratio >= 0.7 else "low"
+    return {
+        "avg": round(sum(heights) / count, 1),
+        "max": round(max(heights), 1),
+        "min": round(min(heights), 1),
+        "source_counts": {str(key): int(value) for key, value in source_counts.items()},
+        "measured_ratio": round(measured_ratio, 3),
+        "levels_inferred_ratio": round(levels_ratio, 3),
+        "estimated_ratio": round(estimated_ratio, 3),
+        "confidence": confidence,
+    }
 
 
 def _build_metrics_result(records, site_area, buffer_area, backend, metric_crs=None, fallback_errors=None):
@@ -401,12 +441,23 @@ def _build_metrics_result(records, site_area, buffer_area, backend, metric_crs=N
     floors = []
     floor_sources = []
     footprint_areas = []
-    for record in records:
+    verticals = []
+    for index, record in enumerate(records):
         footprint_area = float(record.get("footprint_area") or 0)
-        floor, source = _floor_for_record(record.get("properties", {}), footprint_area)
+        props = record.get("properties", {})
+        vertical = _vertical_for_record(props, footprint_area)
+        floor, source = vertical["floors"], vertical["floor_source"]
         footprint_areas.append(footprint_area)
         floors.append(floor)
         floor_sources.append(source)
+        verticals.append({
+            "building_id": _building_identifier(props, index),
+            "floors": floor,
+            "floor_source": source,
+            "height_m": vertical["height_m"],
+            "height_source": vertical["height_source"],
+            "estimated": vertical["estimated"],
+        })
 
     total_const_area = sum(area * floor for area, floor in zip(footprint_areas, floors))
     lower_bound_const_area = sum(
@@ -466,9 +517,10 @@ def _build_metrics_result(records, site_area, buffer_area, backend, metric_crs=N
         "lower_bound_building_area_sqm": round(lower_bound_const_area, 2),
         "footprint_area_sqm": round(footprint_total, 2),
         "building_density": round(footprint_total / site_area * 100.0, 2),
-        "height_stats": _height_stats_records(records),
+        "height_stats": _height_stats(verticals),
         "floor_stats": floor_stats,
         "floor_confidence": confidence,
+        "vertical_profile": verticals,
         "building_types": _value_counts_records(records, "building"),
         "roof_types": _value_counts_records(records, "roof:shape"),
         "materials": _value_counts_records(records, "building:material"),
@@ -513,15 +565,9 @@ def _feature_centroid(feature):
 
 def _feature_height(feature):
     props = (feature or {}).get("properties") or {}
-    for field in ("height", "render_height", "HEIGHT", "H_AVG"):
-        value = _parse_number(props.get(field))
-        if value is not None and value > 0:
-            return min(float(value), 400.0), field
-    for field in ("building:levels", "levels", "floors"):
-        value = _parse_number(props.get(field))
-        if value is not None and value > 0:
-            return min(float(value) * 3.2, 400.0), field
-    return 10.0, "default_estimate"
+    vertical = _vertical_for_record(props, 0.0)
+    source = vertical["height_source"]
+    return min(float(vertical["height_m"]), 400.0), source
 
 
 def _distance_and_bearing(origin, target):
@@ -618,7 +664,7 @@ def _overpass_query(bbox):
       way["building"]({box});
       relation["building"]({box});
     );
-    out body geom;
+    out tags geom qt;
     """
 
 

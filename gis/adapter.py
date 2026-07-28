@@ -29,7 +29,12 @@ from . import model
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
 ]
+OVERPASS_CACHE_TTL_SECONDS = 900
+_overpass_cache = {}
+_overpass_cache_lock = threading.Lock()
 
 
 def _optional_import(module_name):
@@ -118,20 +123,34 @@ def runtime_status():
 # Overpass (OSM building footprints)
 # --------------------------------------------------------------------------- #
 def _call_overpass(query):
+    now = time.monotonic()
+    with _overpass_cache_lock:
+        cached = _overpass_cache.get(query)
+        if cached and now - cached["stored_at"] < OVERPASS_CACHE_TTL_SECONDS:
+            return cached["payload"]
+
     encoded = urllib.parse.urlencode({"data": query}).encode("utf-8")
     errors = []
-    for endpoint in OVERPASS_ENDPOINTS:
-        req = urllib.request.Request(
-            endpoint,
-            data=encoded,
-            headers={"User-Agent": "esri-cup-gis-agent/1.0"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=40) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            errors.append(f"{endpoint}: {exc}")
+    # Public Overpass nodes occasionally return 429/504 under load. A second
+    # pass is short and only begins after every independent node was tried.
+    for pass_number in range(2):
+        for endpoint in OVERPASS_ENDPOINTS:
+            req = urllib.request.Request(
+                endpoint,
+                data=encoded,
+                headers={"User-Agent": "esri-cup-gis-agent/1.0"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=25) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    with _overpass_cache_lock:
+                        _overpass_cache[query] = {"stored_at": time.monotonic(), "payload": payload}
+                    return payload
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                errors.append(f"{endpoint}: {exc}")
+        if pass_number == 0:
+            time.sleep(1.0)
     raise RuntimeError("; ".join(errors))
 
 

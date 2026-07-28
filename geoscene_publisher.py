@@ -10,6 +10,26 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+
+def _load_env_file(path):
+    """Load local key=value settings without replacing explicitly set process env."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_env_file(Path(__file__).resolve().with_name(".env"))
+
 PORTAL_URL = os.environ.get("GEOSCENE_PORTAL_URL", "https://product.geosceneenterprise.cn/geoscene").rstrip("/")
 PORTAL_USERNAME = os.environ.get("GEOSCENE_PORTAL_USERNAME", "")
 PORTAL_PASSWORD = os.environ.get("GEOSCENE_PORTAL_PASSWORD", "")

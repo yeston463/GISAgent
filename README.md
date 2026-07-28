@@ -37,6 +37,12 @@
    - Java 后端：http://127.0.0.1:8080
    - Python GIS API：http://127.0.0.1:8000/analysis/runtime（交互式文档 `/docs`）
 
+3. 仅重启 Python GIS 服务（不重启 Java、前端、Portal）：双击或在终端运行：
+
+   ```bat
+   start-python-gis.bat
+   ```
+
 ## 环境变量（`.env`）
 
 | 变量 | 说明 | 默认 |

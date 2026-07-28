@@ -12,6 +12,8 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 import org.example.service.PromptResourceService;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -90,10 +92,11 @@ public class GisMapTools {
                     return "{\"status\": \"error\", \"message\": \"AI返回的坐标无效(0,0)。请改用 geocodeWithCity 通过高德API查询\"}";
                 }
                 String addr = root.has("address") ? root.get("address").asText() : locationName;
+                String city = root.has("city") ? root.get("city").asText() : "";
                 System.out.println("✅ [AI地名查找] " + locationName + " → " + lng + ", " + lat);
                 return String.format(
-                        "{\"longitude\": %f, \"latitude\": %f, \"lon\": %f, \"lat\": %f, \"address\": \"%s\", \"status\": \"success\", \"source\": \"ai\"}",
-                        lng, lat, lng, lat, addr);
+                        "{\"longitude\": %f, \"latitude\": %f, \"lon\": %f, \"lat\": %f, \"address\": \"%s\", \"city\": \"%s\", \"status\": \"success\", \"source\": \"ai\"}",
+                        lng, lat, lng, lat, addr, city);
             }
             return "{\"status\": \"error\", \"message\": \"AI无法确定该地点坐标\"}";
         } catch (Exception e) {
@@ -106,6 +109,16 @@ public class GisMapTools {
         try {
             if (amapKey == null || amapKey.isBlank()) {
                 return "{\"status\": \"error\", \"message\": \"AMAP_KEY environment variable is not configured\"}";
+            }
+            String poiResult = searchPoi(locationName, city);
+            JsonNode poiRoot = objectMapper.readTree(poiResult);
+            if ("success".equalsIgnoreCase(poiRoot.path("status").asText())) {
+                return poiResult;
+            }
+            // An unqualified address geocode can return an unrelated same-name
+            // settlement. Only permit this weaker fallback once a city is known.
+            if (city == null || city.isBlank()) {
+                return poiResult;
             }
             UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl("https://restapi.amap.com/v3/geocode/geo")
                     .queryParam("key", amapKey)
@@ -138,6 +151,52 @@ public class GisMapTools {
         } catch (Exception e) {
             return "{\"status\": \"error\", \"message\": \"" + e.getMessage() + "\"}";
         }
+    }
+
+    private String searchPoi(String locationName, String city) throws Exception {
+        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl("https://restapi.amap.com/v3/place/text")
+                .queryParam("key", amapKey)
+                .queryParam("keywords", locationName)
+                .queryParam("offset", 20)
+                .queryParam("page", 1)
+                .queryParam("extensions", "base");
+        if (city != null && !city.isBlank()) {
+            builder.queryParam("city", city).queryParam("citylimit", true);
+        }
+        String response = new RestTemplate().getForObject(builder.build().toUriString(), String.class);
+        JsonNode root = objectMapper.readTree(response);
+        JsonNode pois = root.path("pois");
+        if (!"1".equals(root.path("status").asText()) || !pois.isArray() || pois.isEmpty()) {
+            return "{\"status\": \"error\", \"message\": \"POI search returned no result\"}";
+        }
+
+        String normalizedQuery = locationName.replaceAll("\\s+", "");
+        List<JsonNode> exactMatches = new ArrayList<>();
+        for (JsonNode poi : pois) {
+            String name = poi.path("name").asText("").replaceAll("\\s+", "");
+            if (normalizedQuery.equals(name)) {
+                exactMatches.add(poi);
+            }
+        }
+        List<JsonNode> candidates = exactMatches.isEmpty() ? List.of(pois.get(0)) : exactMatches;
+        if ((city == null || city.isBlank()) && candidates.size() > 1) {
+            return "{\"status\": \"error\", \"message\": \"Ambiguous same-name POI; provide a city or full address\"}";
+        }
+
+        JsonNode selected = candidates.get(0);
+        String[] parts = selected.path("location").asText().split(",");
+        if (parts.length != 2) {
+            return "{\"status\": \"error\", \"message\": \"POI did not provide a valid coordinate\"}";
+        }
+        double[] wgs84 = CoordinateTransform.gcj02ToWgs84(
+                Double.parseDouble(parts[0]), Double.parseDouble(parts[1]));
+        String selectedCity = selected.path("cityname").asText("");
+        String address = selected.path("pname").asText("")
+                + selectedCity + selected.path("adname").asText("")
+                + selected.path("name").asText(locationName);
+        return String.format(
+                "{\"longitude\": %f, \"latitude\": %f, \"lon\": %f, \"lat\": %f, \"address\": \"%s\", \"city\": \"%s\", \"status\": \"success\", \"source\": \"amap_poi\", \"verification\": \"poi_exact\"}",
+                wgs84[0], wgs84[1], wgs84[0], wgs84[1], address, selectedCity);
     }
 
     private String verifyWithAi(String locationName, double lng, double lat) {
