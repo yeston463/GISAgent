@@ -22,9 +22,13 @@ RUNS_DIR = RUNTIME_ROOT / "runs"
 JYTHON_STARTUP_RELATIVE = Path(".CityEngine") / "2025.1R.win32.win32.x86_64" / "jythonCache3" / "startup.py"
 ALLOWED_EXPORTS = {"slpk", "obj", "fbx", "gltf"}
 ALLOWED_STYLES = {"modern", "residential", "commercial", "industrial", "institutional", "mixed_use"}
-TERMINAL_STATUSES = {"completed", "failed", "error"}
+TERMINAL_STATUSES = {"completed", "failed", "error", "cancelled"}
 _monitor_lock = threading.Lock()
 _monitor_threads = {}
+_running_processes = {}
+_queue_lock = threading.Lock()
+_job_queue = []
+_queue_worker = None
 
 
 def _is_ascii_path(path):
@@ -127,6 +131,31 @@ def _read_json(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+
+
+def _recover_unstarted_jobs():
+    """Close jobs abandoned by a GIS-service restart before CityEngine launched."""
+    if not JOBS_DIR.is_dir():
+        return
+    for job_path in JOBS_DIR.glob("ce-*.json"):
+        job = _read_json(job_path)
+        if not isinstance(job, dict) or str(job.get("status", "")).lower() not in {"queued", "starting"}:
+            continue
+        result_path = Path(job["runtimeResult"]) if job.get("runtimeResult") else None
+        started_path = Path(job["runtimeStartedMarker"]) if job.get("runtimeStartedMarker") else None
+        if (result_path and result_path.is_file()) or (started_path and started_path.is_file()):
+            continue
+        job.update({
+            "status": "failed",
+            "message": "GIS service restarted before CityEngine automation began; submit a new job.",
+            "finishedAt": datetime.now(timezone.utc).isoformat(),
+            "progress": {"stage": "failed", "percent": 100, "updatedAt": datetime.now(timezone.utc).isoformat()},
+        })
+        _atomic_write_json(job_path, job)
+        _atomic_write_json(RESULTS_DIR / f"{job_path.stem}.json", job)
+
+
+_recover_unstarted_jobs()
 
 
 def _prepare_runtime(job_id):
@@ -439,6 +468,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
     startup_source_path.write_text(_startup_script(), encoding="ascii")
     job = {
         "jobId": job_id, "status": "queued", "engine": "ArcGIS CityEngine 2025.1",
+        "progress": {"stage": "queued", "percent": 0, "updatedAt": datetime.now(timezone.utc).isoformat()},
         "createdAt": datetime.now(timezone.utc).isoformat(), "requirements": normalized,
         "requirementsSource": {"userRequest": user_request, "ragContext": rag_context},
         "case": case_data, "currentMetrics": current_metrics, "problemBuildings": problem_buildings,
@@ -450,18 +480,9 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         **_runtime_metadata(runtime),
     }
     _atomic_write_json(job_path, job)
-    launch = launch_cityengine(job_id, runtime, config_path)
+    launch = enqueue_cityengine(job_id, runtime, config_path)
     job["launch"] = launch
-    if launch.get("started"):
-        job["status"] = "running"
-        job["startedAt"] = datetime.now(timezone.utc).isoformat()
-    else:
-        job["status"] = "failed"
-        job["message"] = launch.get("reason", "CityEngine failed to start")
-        job["finishedAt"] = datetime.now(timezone.utc).isoformat()
     _atomic_write_json(job_path, job)
-    if job["status"] == "failed":
-        _atomic_write_json(result_path, job)
     return {
         "jobId": job_id, "status": job["status"], "jobFile": str(job_path), "footprints": str(shp_path),
         "generatedScript": str(script_path), "generatedRule": str(cga_path), "configFile": str(config_path),
@@ -515,6 +536,28 @@ def _stop_process(process):
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=10)
+
+
+def cancel_job(job_id):
+    with _queue_lock:
+        for index, item in enumerate(_job_queue):
+            if item[0] == job_id:
+                _job_queue.pop(index)
+                job = _read_json(JOBS_DIR / f"{job_id}.json") or {"jobId": job_id}
+                job.update({"status": "cancelled", "message": "Cancelled while queued", "finishedAt": datetime.now(timezone.utc).isoformat()})
+                _atomic_write_json(JOBS_DIR / f"{job_id}.json", job)
+                _atomic_write_json(repository_result_path(job_id), job)
+                return job
+    with _monitor_lock:
+        process = _running_processes.get(job_id)
+    if process is None:
+        raise ValueError(f"CityEngine job is not queued or running: {job_id}")
+    _stop_process(process)
+    job = _read_json(JOBS_DIR / f"{job_id}.json") or {"jobId": job_id}
+    job.update({"status": "cancelled", "message": "Cancelled by user", "finishedAt": datetime.now(timezone.utc).isoformat()})
+    _atomic_write_json(JOBS_DIR / f"{job_id}.json", job)
+    _atomic_write_json(repository_result_path(job_id), job)
+    return job
 
 
 def _cleanup_runtime_cache(runtime):
@@ -591,6 +634,12 @@ def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
                     ).encode("utf-8")
                 )
                 log_stream.flush()
+            if runtime["started"].is_file():
+                job = _read_json(JOBS_DIR / f"{job_id}.json") or {"jobId": job_id}
+                progress = job.get("progress") or {}
+                if progress.get("stage") != "generating":
+                    job["progress"] = {"stage": "generating", "percent": 45, "updatedAt": datetime.now(timezone.utc).isoformat()}
+                    _atomic_write_json(JOBS_DIR / f"{job_id}.json", job)
             elif startup_installed and not runtime["startup"].is_file() and not runtime["started"].is_file():
                 runtime["startup"].write_text(startup_script, encoding="ascii")
                 log_stream.write("[GISAgent] CityEngine startup hook was removed; reinstalling it.\n".encode("utf-8"))
@@ -651,6 +700,7 @@ def _monitor_cityengine(job_id, process, runtime, log_stream, startup_script):
             _atomic_write_json(result_path, result)
         with _monitor_lock:
             _monitor_threads.pop(job_id, None)
+            _running_processes.pop(job_id, None)
 
 
 def launch_cityengine(job_id, runtime, config_path):
@@ -664,6 +714,7 @@ def launch_cityengine(job_id, runtime, config_path):
             "reason": "CityEngine is already processing " + active_jobs[0] + ". Wait for it before starting another large-AOI job.",
             "activeJobId": active_jobs[0],
         }
+
     command = [
         str(CITYENGINE_EXE), "-nosplash", "-data", str(runtime["workspace"]), "-vmargs",
         f"-Duser.home={runtime['home']}", f"-DprojectFolder={runtime['project']}",
@@ -679,6 +730,8 @@ def launch_cityengine(job_id, runtime, config_path):
             stdout=log_stream,
             stderr=subprocess.STDOUT,
         )
+        with _monitor_lock:
+            _running_processes[job_id] = process
         try:
             return_code = process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -726,6 +779,43 @@ def launch_cityengine(job_id, runtime, config_path):
         }
 
 
+def enqueue_cityengine(job_id, runtime, config_path):
+    global _queue_worker
+    with _queue_lock:
+        _job_queue.append((job_id, runtime, config_path))
+        if _queue_worker is None or not _queue_worker.is_alive():
+            _queue_worker = threading.Thread(target=_run_cityengine_queue, name="cityengine-queue", daemon=True)
+            _queue_worker.start()
+    return {"started": True, "queued": True, "queuePosition": len(_job_queue)}
+
+
+def _run_cityengine_queue():
+    while True:
+        with _queue_lock:
+            if not _job_queue:
+                return
+            job_id, runtime, config_path = _job_queue.pop(0)
+        job_path = JOBS_DIR / f"{job_id}.json"
+        job = _read_json(job_path) or {"jobId": job_id}
+        job["status"] = "starting"
+        job["startedAt"] = datetime.now(timezone.utc).isoformat()
+        job["progress"] = {"stage": "starting", "percent": 5, "updatedAt": datetime.now(timezone.utc).isoformat()}
+        _atomic_write_json(job_path, job)
+        launch = launch_cityengine(job_id, runtime, config_path)
+        if not launch.get("started"):
+            _write_process_failure(job_id, type("FailedProcess", (), {"returncode": None})(), runtime, launch.get("reason"))
+            continue
+        job = _read_json(job_path) or job
+        job["status"] = "running"
+        job["launch"] = launch
+        job["progress"] = {"stage": "generating", "percent": 20, "updatedAt": datetime.now(timezone.utc).isoformat()}
+        _atomic_write_json(job_path, job)
+        with _monitor_lock:
+            monitor = _monitor_threads.get(job_id)
+        if monitor:
+            monitor.join()
+
+
 def read_job(job_id):
     job_path = JOBS_DIR / f"{job_id}.json"
     result_path = repository_result_path(job_id)
@@ -735,6 +825,10 @@ def read_job(job_id):
     if runtime_result:
         merged = dict(_read_json(result_path) or job or {})
         merged.update(runtime_result)
+        if str(merged.get("status", "")).lower() == "completed":
+            merged["progress"] = {"stage": "completed", "percent": 100, "updatedAt": datetime.now(timezone.utc).isoformat()}
+        elif str(merged.get("status", "")).lower() in {"failed", "error"}:
+            merged["progress"] = {"stage": "failed", "percent": 100, "updatedAt": datetime.now(timezone.utc).isoformat()}
         merged.setdefault("resultManifest", str(result_path))
         _atomic_write_json(result_path, merged)
         return merged

@@ -84,7 +84,7 @@ def test_overpass_query_bbox_ordering():
     assert "out tags geom qt;" in q
 
 
-def test_overpass_uses_backup_endpoint_and_caches_result(monkeypatch):
+def test_overpass_uses_backup_endpoint_and_caches_result(monkeypatch, tmp_path):
     """A busy public endpoint must not turn valid OSM geometry into a bbox fallback."""
     query = "[out:json];way[building](0,0,1,1);out tags geom qt;"
     calls = []
@@ -106,16 +106,54 @@ def test_overpass_uses_backup_endpoint_and_caches_result(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr(adapter, "OVERPASS_ENDPOINTS", ["https://busy.example", "https://backup.example"])
+    monkeypatch.setattr(adapter, "OVERPASS_CACHE_DIR", tmp_path)
     monkeypatch.setattr(adapter.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(adapter.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(adapter, "_overpass_cache", {})
+    monkeypatch.setattr(adapter, "OVERPASS_REQUEST_TIMEOUT_SECONDS", 6.0)
+    monkeypatch.setattr(adapter, "OVERPASS_TOTAL_TIMEOUT_SECONDS", 14.0)
 
     assert adapter._call_overpass(query) == {"elements": [{"id": 42}]}
-    assert calls == [("https://busy.example", 25), ("https://backup.example", 25)]
+    assert calls == [("https://busy.example", 6.0), ("https://backup.example", 6.0)]
 
     # Same query is served from the short-lived cache; no further network call.
     assert adapter._call_overpass(query) == {"elements": [{"id": 42}]}
     assert len(calls) == 2
+
+
+def test_overpass_disk_cache_survives_process_cache_reset(monkeypatch, tmp_path):
+    query = "[out:json];way[building](0,0,1,1);out tags geom qt;"
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"elements": [{"id": 7}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(adapter, "OVERPASS_ENDPOINTS", ["https://cache.example"])
+    monkeypatch.setattr(adapter, "OVERPASS_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(adapter, "OVERPASS_CACHE_TTL_SECONDS", 900)
+    monkeypatch.setattr(adapter, "OVERPASS_DISK_CACHE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(adapter.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(adapter, "_overpass_cache", {})
+
+    assert adapter._call_overpass(query) == {"elements": [{"id": 7}]}
+    assert len(calls) == 1
+
+    # Simulate a Python GIS service restart: memory is empty, network must not
+    # be called because the exact, still-valid OSM response is persisted.
+    monkeypatch.setattr(adapter, "_overpass_cache", {})
+    assert adapter._call_overpass(query) == {"elements": [{"id": 7}]}
+    assert len(calls) == 1
 
 
 def test_elements_to_features_lock():

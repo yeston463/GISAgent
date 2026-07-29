@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 from copy import deepcopy
 
 import pytest
@@ -196,3 +197,71 @@ def test_cold_boot_timeout_does_not_consume_automation_timeout(tmp_path, monkeyp
 
     assert result.is_file()
     assert "startup hook installed" in log_path.read_text(encoding="utf-8")
+
+
+def test_launch_cityengine_starts_process_before_queue_monitoring(tmp_path, monkeypatch):
+    job_id = "ce-test-launch"
+    executable = tmp_path / "CityEngine.exe"
+    executable.write_text("", encoding="ascii")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = {
+        "workspace": workspace,
+        "home": tmp_path / "home",
+        "project": tmp_path / "project",
+        "log": tmp_path / "logs" / "cityengine.log",
+        "result": tmp_path / "result" / f"{job_id}.json",
+    }
+    runtime["result"].parent.mkdir(parents=True)
+    runtime["log"].parent.mkdir(parents=True)
+    runtime["result"].write_text("{}", encoding="utf-8")
+    calls = []
+
+    class Process:
+        pid = 12345
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return Process()
+
+    monkeypatch.setattr(bridge, "CITYENGINE_EXE", executable)
+    monkeypatch.setattr(bridge.subprocess, "Popen", fake_popen)
+    with bridge._monitor_lock:
+        bridge._monitor_threads.clear()
+        bridge._running_processes.clear()
+
+    result = bridge.launch_cityengine(job_id, runtime, tmp_path / "job.cfg")
+
+    assert result["started"] is True
+    assert calls and calls[0][0][0] == str(executable)
+    assert calls[0][1]["cwd"] == str(workspace)
+
+
+def test_service_restart_closes_unstarted_cityengine_job(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / "jobs"
+    results_dir = tmp_path / "results"
+    jobs_dir.mkdir()
+    job_id = "ce-test-abandoned"
+    started_marker = tmp_path / "runtime" / f"{job_id}.started"
+    job_path = jobs_dir / f"{job_id}.json"
+    job_path.write_text(
+        json.dumps({
+            "jobId": job_id,
+            "status": "starting",
+            "runtimeStartedMarker": str(started_marker),
+            "runtimeResult": str(tmp_path / "runtime" / f"{job_id}.json"),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge, "JOBS_DIR", jobs_dir)
+    monkeypatch.setattr(bridge, "RESULTS_DIR", results_dir)
+
+    bridge._recover_unstarted_jobs()
+
+    recovered = json.loads(job_path.read_text(encoding="utf-8"))
+    assert recovered["status"] == "failed"
+    assert "restarted" in recovered["message"]
+    assert (results_dir / f"{job_id}.json").is_file()

@@ -21,7 +21,7 @@ public class AiConfig {
     @Value("${QWEN-APIKEY}")
     private String apiKey;
 
-    @Value("${ai.qwen.model-name:qwen-plus}")
+    @Value("${ai.qwen.model-name:qwen3.7-flash-2026-07-15}")
     private String chatModelName;
 
     @Value("${rag.min-score:0.6}")

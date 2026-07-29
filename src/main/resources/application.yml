@@ -23,7 +23,7 @@ spring:
 
 ai:
   qwen:
-    model-name: qwen-plus
+    model-name: qwen3.7-flash-2026-07-15
 server:
   servlet:
     encoding:
@@ -61,4 +61,3 @@ logging:
   level:
     dev.langchain4j: debug
     dev.ai4j.openai4j: debug
-

@@ -94,6 +94,16 @@ bash scripts/build-frontend.sh    # Linux / CI
 
 Python 测试依赖：`pip install -r requirements-dev.txt`（含 `fastapi`/`pydantic`/`pytest`/`httpx`）。
 
+### 本地冒烟测试
+
+在 Java、Python 和前端服务均已启动后运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
+```
+
+脚本不会提交新的 CityEngine 作业。它检查前端和 Python 服务、地点导航是否返回 `flyTo`、`analyze_area` 是否在限定时间内返回，以及最近完成作业是否同时具备 SLPK 与 SceneServer 元数据。
+
 ## CI / CD
 
 `.github/workflows/ci.yml` 在 push/PR 时自动运行三件事：

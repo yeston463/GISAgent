@@ -10,13 +10,17 @@ Responsibilities:
 No FastAPI / route concerns live here.
 """
 import importlib
+import hashlib
 import json
+import os
 import threading
 import time
 import traceback
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from cityengine_bridge import read_job as read_cityengine_job
 from cityengine_bridge import runtime_status as cityengine_runtime_status
@@ -33,8 +37,57 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.nchc.org.tw/api/interpreter",
 ]
 OVERPASS_CACHE_TTL_SECONDS = 900
+OVERPASS_DISK_CACHE_TTL_SECONDS = max(
+    OVERPASS_CACHE_TTL_SECONDS,
+    int(os.environ.get("OVERPASS_DISK_CACHE_TTL_SECONDS", "604800")),
+)
+OVERPASS_CACHE_DIR = Path(os.environ.get(
+    "GISAGENT_OVERPASS_CACHE_DIR",
+    str(Path(tempfile.gettempdir()) / "GISAgent" / "overpass-cache"),
+))
+OVERPASS_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("OVERPASS_REQUEST_TIMEOUT_SECONDS", "6")))
+OVERPASS_TOTAL_TIMEOUT_SECONDS = max(OVERPASS_REQUEST_TIMEOUT_SECONDS, float(
+    os.environ.get("OVERPASS_TOTAL_TIMEOUT_SECONDS", "14")
+))
 _overpass_cache = {}
 _overpass_cache_lock = threading.Lock()
+
+
+def _overpass_cache_path(query):
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    return OVERPASS_CACHE_DIR / f"{digest}.json"
+
+
+def _read_overpass_disk_cache(query):
+    path = _overpass_cache_path(query)
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        stored_at = float(cached.get("storedAtEpoch", 0))
+        payload = cached.get("payload")
+        if time.time() - stored_at > OVERPASS_DISK_CACHE_TTL_SECONDS:
+            return None
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _write_overpass_disk_cache(query, payload):
+    if not isinstance(payload, dict):
+        return
+    path = _overpass_cache_path(query)
+    temporary_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path.write_text(json.dumps({
+            "storedAtEpoch": time.time(),
+            "payload": payload,
+        }, ensure_ascii=False), encoding="utf-8")
+        temporary_path.replace(path)
+    except OSError:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _optional_import(module_name):
@@ -129,12 +182,22 @@ def _call_overpass(query):
         if cached and now - cached["stored_at"] < OVERPASS_CACHE_TTL_SECONDS:
             return cached["payload"]
 
+    disk_cached = _read_overpass_disk_cache(query)
+    if disk_cached is not None:
+        with _overpass_cache_lock:
+            _overpass_cache[query] = {"stored_at": now, "payload": disk_cached}
+        return disk_cached
+
     encoded = urllib.parse.urlencode({"data": query}).encode("utf-8")
     errors = []
-    # Public Overpass nodes occasionally return 429/504 under load. A second
-    # pass is short and only begins after every independent node was tried.
+    deadline = time.monotonic() + OVERPASS_TOTAL_TIMEOUT_SECONDS
+    # Public Overpass nodes can be overloaded. Bound the total acquisition
+    # time so the Agent can promptly fall back to the visible SceneLayer.
     for pass_number in range(2):
         for endpoint in OVERPASS_ENDPOINTS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             req = urllib.request.Request(
                 endpoint,
                 data=encoded,
@@ -142,16 +205,20 @@ def _call_overpass(query):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=25) as response:
+                with urllib.request.urlopen(req, timeout=min(OVERPASS_REQUEST_TIMEOUT_SECONDS, remaining)) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                     with _overpass_cache_lock:
                         _overpass_cache[query] = {"stored_at": time.monotonic(), "payload": payload}
+                    _write_overpass_disk_cache(query, payload)
                     return payload
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                 errors.append(f"{endpoint}: {exc}")
+        if time.monotonic() >= deadline:
+            break
         if pass_number == 0:
-            time.sleep(1.0)
-    raise RuntimeError("; ".join(errors))
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    detail = "; ".join(errors[-3:]) or "no Overpass endpoint responded"
+    raise RuntimeError(f"Overpass unavailable within {OVERPASS_TOTAL_TIMEOUT_SECONDS:g}s: {detail}")
 
 
 # --------------------------------------------------------------------------- #

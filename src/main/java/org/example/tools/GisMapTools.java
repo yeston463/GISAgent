@@ -172,15 +172,34 @@ public class GisMapTools {
 
         String normalizedQuery = locationName.replaceAll("\\s+", "");
         List<JsonNode> exactMatches = new ArrayList<>();
+        List<JsonNode> prefixMatches = new ArrayList<>();
         for (JsonNode poi : pois) {
             String name = poi.path("name").asText("").replaceAll("\\s+", "");
             if (normalizedQuery.equals(name)) {
                 exactMatches.add(poi);
+            } else if (!normalizedQuery.isBlank() && name.startsWith(normalizedQuery)) {
+                // POI often names a campus or gate as "<institution><campus>".
+                // It is a valid fallback only when all candidates belong to one city.
+                prefixMatches.add(poi);
             }
         }
-        List<JsonNode> candidates = exactMatches.isEmpty() ? List.of(pois.get(0)) : exactMatches;
-        if ((city == null || city.isBlank()) && candidates.size() > 1) {
-            return "{\"status\": \"error\", \"message\": \"Ambiguous same-name POI; provide a city or full address\"}";
+
+        boolean cityConstrained = city != null && !city.isBlank();
+        List<JsonNode> candidates = !exactMatches.isEmpty()
+                ? exactMatches
+                : !prefixMatches.isEmpty() ? prefixMatches : List.of();
+        String matchType = !exactMatches.isEmpty() ? "poi_exact" : "poi_prefix_same_city";
+        if (!cityConstrained) {
+            if (candidates.isEmpty()) {
+                return "{\"status\": \"error\", \"message\": \"POI name is not a reliable match; provide a city or full address\"}";
+            }
+            if (candidates.size() > 1 && !allCandidatesShareCity(candidates)) {
+                return "{\"status\": \"error\", \"message\": \"Ambiguous same-name POI across cities; provide a city or full address\"}";
+            }
+        } else if (candidates.isEmpty()) {
+            // The request is city-constrained, so AMap ranking is a safe fallback.
+            candidates = List.of(pois.get(0));
+            matchType = "poi_city_ranked";
         }
 
         JsonNode selected = candidates.get(0);
@@ -194,9 +213,26 @@ public class GisMapTools {
         String address = selected.path("pname").asText("")
                 + selectedCity + selected.path("adname").asText("")
                 + selected.path("name").asText(locationName);
+        String confidence = "poi_exact".equals(matchType) && candidates.size() == 1 ? "high" : "medium";
         return String.format(
-                "{\"longitude\": %f, \"latitude\": %f, \"lon\": %f, \"lat\": %f, \"address\": \"%s\", \"city\": \"%s\", \"status\": \"success\", \"source\": \"amap_poi\", \"verification\": \"poi_exact\"}",
-                wgs84[0], wgs84[1], wgs84[0], wgs84[1], address, selectedCity);
+                "{\"longitude\": %f, \"latitude\": %f, \"lon\": %f, \"lat\": %f, \"address\": \"%s\", \"city\": \"%s\", \"status\": \"success\", \"source\": \"amap_poi\", \"verification\": \"%s\", \"confidence\": \"%s\", \"candidateCount\": %d}",
+                wgs84[0], wgs84[1], wgs84[0], wgs84[1], address, selectedCity, matchType, confidence, candidates.size());
+    }
+
+    private boolean allCandidatesShareCity(List<JsonNode> candidates) {
+        String sharedCity = null;
+        for (JsonNode candidate : candidates) {
+            String candidateCity = candidate.path("cityname").asText("").trim();
+            if (candidateCity.isBlank()) {
+                return false;
+            }
+            if (sharedCity == null) {
+                sharedCity = candidateCity;
+            } else if (!sharedCity.equals(candidateCity)) {
+                return false;
+            }
+        }
+        return sharedCity != null;
     }
 
     private String verifyWithAi(String locationName, double lng, double lat) {

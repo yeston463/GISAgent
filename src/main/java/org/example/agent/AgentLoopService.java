@@ -9,6 +9,7 @@ import org.example.tools.DynamicToolRegistry;
 import org.example.agent.DynamicExecutionConfig;
 import org.example.service.KnowledgeService;
 import org.example.service.PromptResourceService;
+import org.example.service.GisContextService;
 import org.example.tools.pyGisTools;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -60,6 +61,9 @@ public class AgentLoopService {
     @Autowired
     private pyGisTools gisTools;
 
+    @Autowired
+    private GisContextService gisContextService;
+
     @Value("${agent.max-rounds:8}")
     private int maxRounds;
 
@@ -72,12 +76,18 @@ public class AgentLoopService {
             String userId,
             String memoryId,
             Consumer<ExecutionTrace> traceListener) {
+        gisContextService.activateSession(memoryId);
         List<ExecutionTrace> trace = new ArrayList<>();
-        if (isCurrentContextPlanningRequest(userMessage)) {
-            return executePlanningDemo(userMessage, userId, trace, traceListener);
+        NavigationRequest navigationRequest = parseNavigationRequest(userMessage);
+        if (navigationRequest != null) {
+            return executeNavigation(navigationRequest, trace, traceListener);
+        }
+        TaskPlan taskPlan = createTaskPlan(userMessage);
+        if (taskPlan.isModelPipeline()) {
+            return executePlanningDemo(userMessage, userId, taskPlan, trace, traceListener);
         }
         if (isPlanningDemoRequest(userMessage)) {
-            return executePlanningDemo(userMessage, userId, trace, traceListener);
+            return executePlanningDemo(userMessage, userId, taskPlan, trace, traceListener);
         }
 
         if (shouldAskClarification(userMessage)) {
@@ -90,7 +100,9 @@ public class AgentLoopService {
 
         // A clear "place + radius" request is deterministic GIS work. Do not
         // make a transient planner-format failure block geocoding and analysis.
-        AgentResult directPlaceResult = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
+        AgentResult directPlaceResult = taskPlan.isPlaceAnalysis()
+                ? executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener)
+                : null;
         if (directPlaceResult != null) {
             return directPlaceResult;
         }
@@ -248,11 +260,54 @@ public class AgentLoopService {
                 || lower.contains("generate"));
     }
 
+    private TaskPlan createTaskPlan(String message) {
+        PlaceAnalysisRequest placeRequest = parsePlaceAnalysisRequest(message);
+        String lower = message == null ? "" : message.toLowerCase();
+        boolean model = lower.contains("cityengine") || lower.contains("slpk") || lower.contains("geoscene");
+        Subject subject = placeRequest != null ? Subject.PLACE
+                : lower.contains("current") || (message != null && message.contains("当前")) ? Subject.CURRENT_CONTEXT : Subject.AOI;
+        return new TaskPlan(model ? Intent.MODEL : placeRequest != null ? Intent.ANALYZE : Intent.OPEN, subject, placeRequest);
+    }
+
+    private record TaskPlan(Intent intent, Subject subject, PlaceAnalysisRequest placeRequest) {
+        static TaskPlan legacyParse(String message) {
+            String lower = message == null ? "" : message.toLowerCase();
+            boolean model = lower.contains("cityengine") || lower.contains("slpk") || lower.contains("geoscene");
+            boolean place = Pattern.compile("(?:周边|附近|周围|半径|范围|\\d+(?:\\.\\d+)?\\s*(?:公里|千米|km|米|m))")
+                    .matcher(message == null ? "" : message).find();
+            Subject subject = lower.contains("current") || (message != null && message.contains("当前"))
+                    ? Subject.CURRENT_CONTEXT : place ? Subject.PLACE : Subject.AOI;
+            return new TaskPlan(model ? Intent.MODEL : place ? Intent.ANALYZE : Intent.OPEN, subject, null);
+        }
+
+        boolean isModelPipeline() { return intent == Intent.MODEL; }
+        boolean isPlaceAnalysis() { return intent == Intent.ANALYZE && subject == Subject.PLACE; }
+    }
+
+    private enum Intent { ANALYZE, MODEL, OPEN }
+    private enum Subject { CURRENT_CONTEXT, PLACE, AOI }
+
     private AgentResult executePlanningDemo(
             String userMessage,
             String userId,
+            TaskPlan taskPlan,
             List<ExecutionTrace> trace,
             Consumer<ExecutionTrace> traceListener) {
+        List<Map<String, Object>> planningCommands = new ArrayList<>();
+        if (taskPlan.subject() == Subject.PLACE && taskPlan.placeRequest() != null) {
+            addTrace(trace, traceListener, 1, "action", "按任务计划恢复地点上下文",
+                    "地点：" + taskPlan.placeRequest().locationName() + "；半径："
+                            + taskPlan.placeRequest().radiusMeters() + " 米", "running");
+            AgentResult recovered = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
+            if (recovered == null || recovered.metrics() == null) {
+                return recovered == null
+                        ? new AgentResult("无法根据请求恢复地点分析上下文。", List.of("提供地点和半径"), null, false, null, List.of(), trace)
+                        : recovered;
+            }
+            if (recovered.commands() != null) {
+                planningCommands.addAll(recovered.commands());
+            }
+        }
         addTrace(trace, traceListener, 1, "action", "检索规划知识库",
                 "提取 CityEngine、CGA 与规划控制资料", "running");
         String ragContext = knowledgeService.search(
@@ -269,14 +324,19 @@ public class AgentLoopService {
         addTrace(trace, traceListener, 2, "action", "提交 CityEngine 规划任务",
                 "使用当前 AOI、建筑和受约束规划参数", "running");
         Map<String, Object> result = asMap(invokeTool("submitCityEnginePlanningJob", params));
+        collectCommands(result, planningCommands);
         if (result != null && isFailed(result) && parsePlaceAnalysisRequest(userMessage) != null) {
             addTrace(trace, traceListener, 2, "fallback", "从请求恢复空间上下文",
                     "当前上下文不可用；根据请求中的地点和半径重新定位、分析并构建 AOI", "running");
             AgentResult recovered = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
             if (recovered != null && recovered.metrics() != null) {
+                if (recovered.commands() != null) {
+                    planningCommands.addAll(recovered.commands());
+                }
                 addTrace(trace, traceListener, 2, "action", "重新提交 CityEngine 规划任务",
                         "已恢复地点 AOI 与建筑数据，继续生成三维成果", "running");
                 result = asMap(invokeTool("submitCityEnginePlanningJob", params));
+                collectCommands(result, planningCommands);
             }
         }
         if (result == null || isFailed(result)) {
@@ -285,7 +345,7 @@ public class AgentLoopService {
                     : String.valueOf(result.getOrDefault("message", "CityEngine 任务提交失败。"));
             addTrace(trace, traceListener, 2, "error", "规划任务提交失败", message, "error");
             return new AgentResult(message, List.of("检查 Python GIS 服务与 CityEngine 2025.1"),
-                    null, false, null, List.of(), trace);
+                    null, false, null, dedupeCommands(planningCommands), trace);
         }
 
         // The planning endpoints wrap the deterministic building metrics in
@@ -348,7 +408,7 @@ public class AgentLoopService {
                 pipelineComplete ? "CityEngine、GeoScene 发布与前端加载准备已完成" : "当前状态：" + status,
                 pipelineComplete ? "success" : pipelineFailed ? "error" : "waiting");
         saveAnalysis(userId, userMessage, metrics);
-        return new AgentResult(reply, suggestions, null, false, metrics, List.of(), trace);
+        return new AgentResult(reply, suggestions, null, false, metrics, dedupeCommands(planningCommands), trace);
     }
 
     private Map<String, Object> waitForPlanningPipeline(
@@ -378,6 +438,16 @@ public class AgentLoopService {
                     addTrace(trace, traceListener, 4, "artifact", "SLPK 导出完成",
                             String.valueOf(outputs.get("slpk")), "success");
                 }
+            }
+
+            if ("completed".equalsIgnoreCase(jobStatus)
+                    && asMap(latest.get("outputs")) != null
+                    && asMap(latest.get("outputs")).get("slpk") != null
+                    && latest.get("sceneServiceUrl") == null
+                    && emittedStages.add("publication_requested")) {
+                addTrace(trace, traceListener, 5, "publish", "正在上传 GeoScene Portal",
+                        "SLPK 已生成，开始发布托管 Scene Service", "running");
+                latest = gisTools.publishCityEngineJob(jobId);
             }
 
             emitPublicationTimeline(latest, emittedStages, trace, traceListener);
@@ -536,6 +606,54 @@ public class AgentLoopService {
         return clarificationEngine.needsClarification(userMessage);
     }
 
+    private AgentResult executeNavigation(
+            NavigationRequest request,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        addTrace(trace, traceListener, 1, "decision", "识别地图定位请求",
+                "目标地点：" + request.locationName(), "running");
+
+        JSONObject aiParams = new JSONObject();
+        aiParams.put("locationName", request.locationName());
+        Map<String, Object> aiCandidate = asMap(invokeTool("aiGeocode", aiParams));
+        String cityHint = getString(aiCandidate, "city", "");
+
+        JSONObject amapParams = new JSONObject();
+        amapParams.put("locationName", request.locationName());
+        if (!cityHint.isBlank()) {
+            amapParams.put("city", cityHint);
+        }
+        Map<String, Object> amapCandidate = asMap(invokeTool("geocodeWithCity", amapParams));
+        Map<String, Object> geocode = hasValidCoordinate(amapCandidate) ? amapCandidate
+                : hasValidCoordinate(aiCandidate) ? aiCandidate : null;
+        if (geocode == null) {
+            addTrace(trace, traceListener, 1, "error", "地点定位失败", "未返回有效坐标", "error");
+            return new AgentResult("未能定位“" + request.locationName() + "”。请提供更完整的地点名称或城市。",
+                    List.of("例如：北京市清华大学", "例如：上海市人民广场"), null, false,
+                    null, List.of(), trace);
+        }
+
+        double lon = getDouble(geocode, "longitude", getDouble(geocode, "lon", Double.NaN));
+        double lat = getDouble(geocode, "latitude", getDouble(geocode, "lat", Double.NaN));
+        if (!isValidCoordinate(lon, lat) || !matchesCityHint(cityHint, lon, lat)) {
+            addTrace(trace, traceListener, 1, "error", "地点坐标校验失败",
+                    "定位结果未通过坐标校验", "error");
+            return new AgentResult("“" + request.locationName() + "”的坐标未通过校验，未执行地图跳转。",
+                    List.of("提供城市名称后重试"), null, false, null, List.of(), trace);
+        }
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        collectCommands(geocode, commands);
+        if (commands.isEmpty()) {
+            commands.add(Map.of("action", "flyTo", "params", Map.of(
+                    "longitude", lon, "latitude", lat, "zoom", 17)));
+        }
+        addTrace(trace, traceListener, 2, "complete", "地图定位完成",
+                "已定位“" + request.locationName() + "”，正在调整三维视角", "success");
+        return new AgentResult("已定位“" + request.locationName() + "”。", List.of(), null, false,
+                null, dedupeCommands(commands), trace);
+    }
+
     private AgentResult executeExplicitPlaceAnalysis(
             String userMessage,
             String userId,
@@ -612,12 +730,21 @@ public class AgentLoopService {
         addTrace(trace, traceListener, 2, "action", "调用 analyzeArea",
                 "以“" + request.locationName() + "”为中心分析 " + request.radiusMeters() + " 米范围", "running");
         Map<String, Object> analysis = asMap(invokeTool("analyzeArea", analysisParams));
-        if (analysis != null && isFailed(analysis)) {
-            JSONObject widerParams = new JSONObject(analysisParams);
-            widerParams.put("radius", Math.min(request.radiusMeters() + 500, 5000));
-            addTrace(trace, traceListener, 2, "fallback", "扩大地点分析范围",
-                    "未回退到旧红线，改为分析 " + widerParams.getIntValue("radius") + " 米范围", "running");
-            analysis = asMap(invokeTool("analyzeArea", widerParams));
+        if (analysis == null || isFailed(analysis)) {
+            addTrace(trace, traceListener, 2, "fallback", "切换前端场景建筑数据",
+                    "OSM 建筑服务暂不可用；保持 " + request.radiusMeters()
+                            + " 米范围，从当前 SceneLayer 提取建筑并回传服务端校验", "running");
+            // The SceneLayer fallback needs the same explicit AOI as the
+            // failed server-side request. Without this command, a flyTo-only
+            // workflow has no buffer geometry to query on the frontend.
+            commands.add(Map.of("action", "addBuffer", "params", Map.of(
+                    "longitude", lon, "latitude", lat, "radius", request.radiusMeters())));
+            commands.add(Map.of("action", "getScreenBuildings", "params", Map.of(
+                    "longitude", lon, "latitude", lat, "radius", request.radiusMeters())));
+            return new AgentResult(
+                    "地点已定位，但在线建筑数据暂不可用；正在从当前三维场景提取建筑轮廓。",
+                    List.of("等待场景建筑同步", "稍后重试在线数据"), null, false, null,
+                    dedupeCommands(commands), trace);
         }
         collectCommands(analysis == null ? Map.of() : analysis, commands);
         addTrace(trace, traceListener, 2, "observation", "获得空间分析结果",
@@ -664,6 +791,22 @@ public class AgentLoopService {
         }
         int radiusMeters = Math.max(50, Math.min((int) Math.round(radius), 5000));
         return new PlaceAnalysisRequest(locationName, radiusMeters);
+    }
+
+    private NavigationRequest parseNavigationRequest(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile(
+                "^(?:\u8BF7|\u5E2E\u6211)?(?:\u5C06\u5730\u56FE)?"
+                        + "(?:\u98DE\u5230|\u98DE\u5F80|\u5B9A\u4F4D\u5230|"
+                        + "\u5BFC\u822A\u5230|\u524D\u5F80|\u53BB)\\s*(.+?)\\s*$"
+        ).matcher(userMessage.trim());
+        if (!matcher.matches()) {
+            return null;
+        }
+        String locationName = matcher.group(1).replaceAll("[\u3002\uFF01!\uFF1F?]+$", "").trim();
+        return locationName.isBlank() ? null : new NavigationRequest(locationName);
     }
 
     private boolean matchesCityHint(String cityHint, double lon, double lat) {
@@ -744,13 +887,6 @@ public class AgentLoopService {
         }
 
         if ("analyzeArea".equals(action)) {
-            JSONObject wider = new JSONObject(params);
-            double radius = getDouble(wider, "radius", 500);
-            wider.put("radius", radius + 500 * (round + 1));
-            Map<String, Object> widerResult = asMap(invokeTool("analyzeArea", wider));
-            if (widerResult != null && !isFailed(widerResult)) {
-                return widerResult;
-            }
             return asMap(invokeTool("getScreenBuildings", new JSONObject()));
         }
 
@@ -1181,4 +1317,5 @@ public class AgentLoopService {
     ) {}
 
     private record PlaceAnalysisRequest(String locationName, int radiusMeters) {}
+    private record NavigationRequest(String locationName) {}
 }

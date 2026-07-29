@@ -159,6 +159,9 @@ public class pyGisTools {
     public Map<String, Object> getCityEngineJob(String jobId) {
         return getForMap("/cityengine/jobs/" + jobId);
     }
+    public Map<String, Object> publishCityEngineJob(String jobId) {
+        return postForMap("/cityengine/jobs/" + jobId + "/publish", Map.of());
+    }
     @Tool("gisRuntimeStatus")
     public Map<String, Object> gisRuntimeStatus() {
         return getForMap("/runtime");

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cityengine_bridge import read_job as read_cityengine_job
+from cityengine_bridge import cancel_job as cancel_cityengine_bridge_job
 from cityengine_bridge import runtime_status as cityengine_runtime_status
 from geoscene_publisher import publishing_status
 
@@ -134,7 +135,8 @@ async def get_cityengine_runtime():
 @app.get("/analysis/cityengine/jobs/{job_id}")
 async def get_cityengine_job(job_id: str):
     try:
-        return adapter.ensure_cityengine_published(job_id, read_cityengine_job(job_id))
+        # Polling must be side-effect free. Publishing is explicit via POST.
+        return read_cityengine_job(job_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -161,6 +163,14 @@ async def retry_cityengine_publication(job_id: str):
     return adapter._start_cityengine_publication(job_id, result)
 
 
+@app.post("/analysis/cityengine/jobs/{job_id}/cancel")
+async def cancel_cityengine_job(job_id: str):
+    try:
+        return cancel_cityengine_bridge_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/analysis/cityengine/jobs/{job_id}/wait")
 async def wait_cityengine_job(job_id: str, timeout: int = 180):
     try:
@@ -170,14 +180,10 @@ async def wait_cityengine_job(job_id: str, timeout: int = 180):
     deadline = time.time() + max(1, min(timeout, 600))
     while time.time() < deadline:
         result = read_cityengine_job(job_id)
-        if result.get("status") == "completed":
-            result = adapter.ensure_cityengine_published(job_id, result)
         if _cityengine_pipeline_terminal(result):
             return result
         await asyncio.sleep(2)
     result = read_cityengine_job(job_id)
-    if result.get("status") == "completed":
-        result = adapter.ensure_cityengine_published(job_id, result)
     result["waitTimedOut"] = True
     return result
 
@@ -283,7 +289,9 @@ async def analyze_area(payload: AnalyzeAreaRequest):
         data = payload.model_dump()
         explicit_aoi = data.get("aoi")
         radius = float(data.get("radius", 500) or 500)
-        radii = [radius] if explicit_aoi else [radius, radius * 1.5, radius * 2]
+        # The requested radius is a user constraint. Do not silently enlarge
+        # the AOI when a footprint provider is unavailable.
+        radii = [radius]
         last_fetch = None
 
         for attempt, current_radius in enumerate(radii, start=1):
