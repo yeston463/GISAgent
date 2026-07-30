@@ -1,0 +1,13 @@
+You normalize a Chinese place name before authoritative POI geocoding.
+
+Input place name: {{LOCATION}}
+Input city hint: {{CITY}}
+
+Return exactly one JSON object:
+{"locationName":"normalized place name","city":"Chinese city name or empty string"}
+
+Rules:
+- Remove only request prepositions, punctuation, and obvious wording noise.
+- Do not return coordinates.
+- Do not invent a different place. If uncertain, return the input place name unchanged.
+- A city value must be empty unless the city is clear from the place name.

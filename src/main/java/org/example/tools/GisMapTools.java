@@ -115,6 +115,16 @@ public class GisMapTools {
             if ("success".equalsIgnoreCase(poiRoot.path("status").asText())) {
                 return poiResult;
             }
+            LocationReview review = reviewLocationName(locationName, city);
+            if (review != null) {
+                String reviewedPoiResult = searchPoi(review.locationName(), review.city());
+                JsonNode reviewedPoiRoot = objectMapper.readTree(reviewedPoiResult);
+                if ("success".equalsIgnoreCase(reviewedPoiRoot.path("status").asText())) {
+                    System.out.println("✅ [AI地点复核] " + locationName + " → "
+                            + review.locationName() + " (" + review.city() + ")");
+                    return reviewedPoiResult;
+                }
+            }
             // An unqualified address geocode can return an unrelated same-name
             // settlement. Only permit this weaker fallback once a city is known.
             if (city == null || city.isBlank()) {
@@ -150,6 +160,36 @@ public class GisMapTools {
             return "{\"status\": \"error\", \"message\": \"找不到该地点\"}";
         } catch (Exception e) {
             return "{\"status\": \"error\", \"message\": \"" + e.getMessage() + "\"}";
+        }
+    }
+
+    private LocationReview reviewLocationName(String locationName, String city) {
+        try {
+            String prompt = promptResources.render("prompts/geocode-review.txt", Map.of(
+                    "LOCATION", locationName,
+                    "CITY", city == null ? "" : city
+            ));
+            String response = chatLanguageModel.generate(prompt).trim();
+            String fence = String.valueOf((char) 96).repeat(3);
+            if (response.startsWith(fence)) {
+                int lineBreak = response.indexOf('\n');
+                response = lineBreak >= 0 ? response.substring(lineBreak + 1).trim() : "";
+            }
+            if (response.endsWith(fence)) {
+                response = response.substring(0, response.length() - fence.length()).trim();
+            }
+            JsonNode root = objectMapper.readTree(response);
+            String reviewedName = root.path("locationName").asText("").trim();
+            String reviewedCity = root.path("city").asText("").trim();
+            if (reviewedName.isBlank()
+                    || reviewedName.length() > 120
+                    || reviewedName.equals(locationName)
+                    && reviewedCity.equals(city == null ? "" : city)) {
+                return null;
+            }
+            return new LocationReview(reviewedName, reviewedCity);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -248,6 +288,8 @@ public class GisMapTools {
             return "consistent";
         }
     }
+
+    private record LocationReview(String locationName, String city) {}
 
 
     @Tool("getHistoryDisaster")

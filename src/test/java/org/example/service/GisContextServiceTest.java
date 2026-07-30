@@ -1,6 +1,7 @@
 package org.example.service;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
@@ -11,7 +12,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GisContextServiceTest {
 
-    @TempDir
+    // Windows can briefly retain a handle after Files.move(..., ATOMIC_MOVE).
+    // JUnit cleanup then turns an otherwise successful persistence test into a
+    // failure, so Maven's target cleanup owns these small test directories.
+    @TempDir(cleanup = CleanupMode.NEVER)
     Path temporaryDirectory;
 
     @Test

@@ -776,7 +776,12 @@ public class AgentLoopService {
         if (!placeMatcher.find()) {
             return null;
         }
-        String locationName = placeMatcher.group(1).replaceAll("^[：:，,。.!！?？\\s]+", "").trim();
+        // Natural Chinese requests often start with "对/针对某地…分析".
+        // These are request prepositions, never part of the place name.
+        String locationName = placeMatcher.group(1)
+                .replaceFirst("^(?:请)?(?:针对|对于|对)\\s*", "")
+                .replaceAll("^[：:，,。.!！?？\\s]+", "")
+                .trim();
         if (locationName.isBlank() || locationName.contains("当前") || locationName.contains("红线") || locationName.contains("AOI")) {
             return null;
         }
