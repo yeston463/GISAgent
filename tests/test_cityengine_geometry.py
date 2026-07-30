@@ -103,6 +103,18 @@ def test_only_approximate_footprints_can_generate_slpk():
     assert summary["approximatedCount"] == 1
 
 
+def test_cityengine_rejects_aoi_edge_sliver_instead_of_exporting_it():
+    sliver = _feature(
+        "sliver-01",
+        geometry={
+            "type": "Polygon",
+            "coordinates": [[[116.4337355, 39.8866564], [116.4333479, 39.8866451], [116.4337350, 39.8866663], [116.4337355, 39.8866564]]],
+        },
+    )
+    with pytest.raises(ValueError, match="没有可用于 CityEngine"):
+        _prepare([sliver])
+
+
 def test_explicit_setback_is_the_only_reported_footprint_change():
     prepared, actions, summary = _prepare([_feature()], setback=3, problem_ids=("L-01",))
 
@@ -138,6 +150,24 @@ def test_cityengine_uses_metrics_vertical_profile_for_missing_input_height():
     assert prepared["features"][0]["properties"]["ce_floors"] == 7
     assert prepared["features"][0]["properties"]["vert_est"] == 1
     assert summary["decisions"][0]["heightSource"] == "building_type_estimated"
+
+
+def test_geometry_summary_reports_height_provenance():
+    prepared, _actions, summary = _prepare([_feature("mesh-01", height=18.4)])
+    assert len(prepared["features"]) == 1
+    assert summary["trustedHeightCount"] == 1
+    assert summary["estimatedHeightCount"] == 0
+    assert summary["heightSourceCounts"]["input_height"] == 1
+
+
+def test_cityengine_default_input_limit_covers_large_hand_drawn_aoi(monkeypatch):
+    # Do not silently crop a legitimate city-scale redline such as the 994
+    # buildings in the Forbidden City test AOI.
+    monkeypatch.setattr(bridge, "CITYENGINE_MAX_INPUT_BUILDINGS", 1200)
+    features = [_feature(f"building-{index}") for index in range(994)]
+    prepared, _actions, summary = _prepare(features)
+    assert len(prepared["features"]) == 994
+    assert summary["inputCount"] == 994
 
 
 def test_shapefile_round_trip_keeps_l_shaped_geometry(tmp_path):

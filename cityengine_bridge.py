@@ -7,9 +7,12 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import Counter
 from configparser import ConfigParser
 from datetime import datetime, timezone
 from pathlib import Path
+
+from gis import model as gis_model
 
 CITYENGINE_EXE = Path(os.environ.get("CITYENGINE_EXE", r"C:\Program Files\ArcGIS\CityEngine2025.1\CityEngine.exe"))
 ROOT = Path(__file__).resolve().parent
@@ -61,7 +64,10 @@ JOB_TIMEOUT_SECONDS = max(
     CITYENGINE_BOOT_TIMEOUT_SECONDS + CITYENGINE_AUTOMATION_TIMEOUT_SECONDS,
     _positive_int_env("CITYENGINE_JOB_TIMEOUT_SECONDS", 900, 60),
 )
-CITYENGINE_MAX_INPUT_BUILDINGS = _positive_int_env("CITYENGINE_MAX_INPUT_BUILDINGS", 300, 1)
+# A city-scale hand-drawn AOI can legitimately contain about one thousand
+# buildings. Keep it intact by default; callers may lower this via the
+# environment when running on constrained hardware.
+CITYENGINE_MAX_INPUT_BUILDINGS = _positive_int_env("CITYENGINE_MAX_INPUT_BUILDINGS", 1200, 1)
 KEEP_RUNTIME_CACHE = os.environ.get("CITYENGINE_KEEP_RUNTIME_CACHE", "false").lower() in {
     "1", "true", "yes",
 }
@@ -308,7 +314,8 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
     if len(input_features) > CITYENGINE_MAX_INPUT_BUILDINGS:
         raise ValueError(
             f"CityEngine input has {len(input_features)} buildings; the safe limit is "
-            f"{CITYENGINE_MAX_INPUT_BUILDINGS}. Reduce the AOI or raise CITYENGINE_MAX_INPUT_BUILDINGS explicitly."
+            f"{CITYENGINE_MAX_INPUT_BUILDINGS}. The AOI has not been clipped; reduce it or raise "
+            "CITYENGINE_MAX_INPUT_BUILDINGS explicitly."
         )
     for index, feature in enumerate(input_features):
         props = dict(feature.get("properties") or {})
@@ -325,6 +332,19 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
                 "geometrySource": source,
                 "geometryChanged": False,
                 "reason": f"{invalid_reason}；已跳过且未生成替代矩形。",
+            })
+            continue
+
+        quality_valid, quality_reason, footprint_area_sqm = gis_model._footprint_quality(geometry and {"geometry": geometry})
+        if not quality_valid:
+            decisions.append({
+                "buildingId": building_id,
+                "name": props.get("name"),
+                "decision": "skip_unreliable_footprint",
+                "geometrySource": source,
+                "geometryChanged": False,
+                "footprintAreaSqm": round(footprint_area_sqm, 2),
+                "reason": f"{quality_reason}；已跳过，避免将 AOI 边缘碎片导出为 SLPK 建筑。",
             })
             continue
 
@@ -405,6 +425,14 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
     skipped = [item for item in decisions if item["decision"].startswith("skip_")]
     changed = [item for item in decisions if item["geometryChanged"]]
     approximated = [item for item in decisions if item.get("geometryApproximation")]
+    height_source_counts = Counter(
+        str(item.get("heightSource") or "unknown") for item in decisions
+        if not item["decision"].startswith("skip_")
+    )
+    estimated_height_count = sum(
+        bool(item.get("heightEstimated")) for item in decisions
+        if not item["decision"].startswith("skip_")
+    )
     summary = {
         "policy": "prefer_exact_footprint_allow_extent_approximation",
         "inputCount": len(input_features),
@@ -412,6 +440,9 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
         "changedGeometryCount": len(changed),
         "approximatedCount": len(approximated),
         "skippedCount": len(skipped),
+        "trustedHeightCount": sum(height_source_counts.values()) - estimated_height_count,
+        "estimatedHeightCount": estimated_height_count,
+        "heightSourceCounts": dict(height_source_counts),
         "message": "优先保留真实建筑轮廓；仅在没有真实轮廓时，将前端可展示建筑的 extent 外包矩形作为明确标注的近似体导出 SLPK。",
         "decisions": decisions,
     }

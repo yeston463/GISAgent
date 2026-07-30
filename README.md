@@ -54,6 +54,7 @@
 | `CITYENGINE_BOOT_TIMEOUT_SECONDS` | CityEngine 冷启动、Python 支持文件重建预算 | 300 |
 | `CITYENGINE_AUTOMATION_TIMEOUT_SECONDS` | 启动钩子安装后的自动化启动预算 | 120 |
 | `CITYENGINE_JOB_TIMEOUT_SECONDS` | 单任务总超时 | 900 |
+| `CITYENGINE_MAX_INPUT_BUILDINGS` | 单个 CityEngine 作业的完整建筑输入上限 | 1200 |
 | `GEOSCENE_*` | GeoScene Enterprise 发布凭据 | — |
 | `DYNAMIC_EXECUTION_ENABLED` | 动态代码执行总开关 | `false` |
 | `DYNAMIC_EXECUTION_AUTH_MODE` | `token`（独立令牌）或 `local`（仅回环） | `local` |

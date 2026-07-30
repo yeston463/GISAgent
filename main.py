@@ -21,6 +21,8 @@ from gis.model import (
     _ring_area,
     _overpass_query,
     _elements_to_features,
+    _footprint_quality,
+    _filter_usable_building_footprints,
     _create_buffer_feature_approx,
     _parse_number,
     _safe_float,

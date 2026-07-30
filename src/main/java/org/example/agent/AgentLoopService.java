@@ -107,6 +107,14 @@ public class AgentLoopService {
             return directPlaceResult;
         }
 
+        // The frontend uses this fixed instruction immediately after a
+        // hand-drawn AOI has been synchronized.  It is deterministic GIS
+        // work, not a planning decision: do not let a malformed LLM JSON
+        // response prevent the already-uploaded redline from being analysed.
+        if (isCurrentContextMetricsRequest(userMessage)) {
+            return executeCurrentContextMetrics(userMessage, userId, trace, traceListener);
+        }
+
         List<Map<String, Object>> messages = new ArrayList<>();
         String systemPrompt = promptResources.load("system.txt")
                 + "\n\n当前运行时工具清单：\n"
@@ -258,6 +266,47 @@ public class AgentLoopService {
                 || lower.contains("slpk")
                 || lower.contains("publish")
                 || lower.contains("generate"));
+    }
+
+    private boolean isCurrentContextMetricsRequest(String userMessage) {
+        if (userMessage == null) {
+            return false;
+        }
+        String lower = userMessage.toLowerCase();
+        return lower.contains("analyzecurrentview")
+                || (userMessage.contains("当前已上传红线")
+                && (userMessage.contains("容积率") || userMessage.contains("建筑指标")));
+    }
+
+    private AgentResult executeCurrentContextMetrics(
+            String userMessage,
+            String userId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        addTrace(trace, traceListener, 1, "decision", "识别当前红线指标请求",
+                "直接使用已同步的 AOI 与建筑上下文，不依赖模型工具 JSON", "running");
+        Map<String, Object> result = asMap(invokeTool("analyzeCurrentView", new JSONObject()));
+        if (result == null || isFailed(result) || !isValidMetrics(result)) {
+            String detail = result == null
+                    ? "GIS 分析工具未返回结果"
+                    : String.valueOf(result.getOrDefault("message", "未取得有效建筑指标"));
+            addTrace(trace, traceListener, 1, "error", "当前红线分析未完成", detail, "error");
+            return new AgentResult("当前红线未能完成指标计算：" + detail,
+                    List.of("检查 AOI 内是否有完整建筑轮廓", "调整红线后重新分析"),
+                    null, false, null, List.of(), trace);
+        }
+
+        Map<String, Object> metrics = validationLayer.validateMetrics(result);
+        List<Map<String, Object>> commands = new ArrayList<>();
+        collectCommands(result, commands);
+        addTrace(trace, traceListener, 1, "observation", "获得空间分析结果",
+                formatTraceDetail(metrics), "success");
+        addTrace(trace, traceListener, 2, "complete", "当前红线分析完成",
+                "已返回容积率和建筑指标", "success");
+        saveAnalysis(userId, userMessage, metrics);
+        memoryStore.cleanupExpired();
+        return new AgentResult(buildMetricReply(metrics), suggestionEngine.generateSuggestions(metrics),
+                null, false, metrics, dedupeCommands(commands), trace);
     }
 
     private TaskPlan createTaskPlan(String message) {

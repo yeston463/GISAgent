@@ -115,12 +115,30 @@ def fetch_buildings_for_aoi(aoi_geojson):
             "fallback_errors": fallback_errors,
         }
 
-    buildings_geojson = model._feature_collection(clipped_features)
+    usable_features, rejected_footprints = model._filter_usable_building_footprints(clipped_features)
+    if not usable_features:
+        return {
+            "status": "NoData",
+            "stage": "fetch_buildings",
+            "building_count": 0,
+            "message": "AOI only intersects degenerate or very small building fragments; no unreliable footprint will be used for metrics or CityEngine.",
+            "raw_count": len(raw_features),
+            "clipped_count": len(clipped_features),
+            "rejected_footprint_count": len(rejected_footprints),
+            "rejected_footprints": rejected_footprints[:10],
+            "query_bbox": bbox,
+            "gis_backend": clip_backend or adapter._preferred_backend(),
+            "fallback_errors": fallback_errors,
+        }
+
+    buildings_geojson = model._feature_collection(usable_features)
     result = {
         "status": "Success",
         "stage": "fetch_buildings",
-        "building_count": int(len(clipped_features)),
+        "building_count": int(len(usable_features)),
         "raw_count": int(len(raw_features)),
+        "clipped_count": int(len(clipped_features)),
+        "rejected_footprint_count": int(len(rejected_footprints)),
         "buildings": buildings_geojson,
         "aoi": aoi_geojson,
         "source": "openstreetmap_overpass",

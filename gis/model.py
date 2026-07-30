@@ -14,6 +14,7 @@ from collections import Counter
 
 MAX_BUILDINGS = 3000
 DEFAULT_STOREY_HEIGHT_M = 3.2
+MIN_USABLE_FOOTPRINT_AREA_SQM = 25.0
 
 try:
     from shapely.geometry import Point, Polygon, mapping, shape
@@ -302,6 +303,71 @@ def _elements_to_features(elements):
     return features
 
 
+def _ring_area_sqm(coords):
+    """Approximate a WGS84 ring area in square metres without a GIS backend."""
+    if not isinstance(coords, list) or len(coords) < 4:
+        return 0.0
+    try:
+        lat0 = sum(float(point[1]) for point in coords) / len(coords)
+        x_scale = 111320.0 * math.cos(math.radians(lat0))
+        y_scale = 110540.0
+        projected = [(float(point[0]) * x_scale, float(point[1]) * y_scale) for point in coords]
+    except (IndexError, TypeError, ValueError):
+        return 0.0
+    return abs(_ring_area(projected))
+
+
+def _footprint_quality(feature, minimum_area_sqm=MIN_USABLE_FOOTPRINT_AREA_SQM):
+    """Validate exported building footprints before metrics or CityEngine use.
+
+    Spatial clipping can turn a real building crossing an AOI edge into a tiny
+    triangle.  Such a sliver is not a meaningful building for FAR or a 3D
+    product, even though it remains a technically valid GeoJSON Polygon.
+    """
+    geometry = _normalize_geometry((feature or {}).get("geometry"))
+    if not geometry or geometry.get("type") not in {"Polygon", "MultiPolygon"}:
+        return False, "geometry is not a Polygon/MultiPolygon", 0.0
+
+    polygons = [geometry.get("coordinates") or []] if geometry["type"] == "Polygon" else geometry.get("coordinates") or []
+    total_area = 0.0
+    usable_parts = 0
+    for polygon in polygons:
+        if not polygon or not isinstance(polygon[0], list):
+            continue
+        exterior = polygon[0]
+        if len(exterior) < 4 or exterior[0] != exterior[-1]:
+            continue
+        try:
+            vertices = {(float(point[0]), float(point[1])) for point in exterior[:-1]}
+        except (IndexError, TypeError, ValueError):
+            continue
+        if len(vertices) < 3:
+            continue
+        area = _ring_area_sqm(exterior)
+        if area <= 0:
+            continue
+        total_area += area
+        usable_parts += 1
+
+    if usable_parts == 0:
+        return False, "polygon ring is open, degenerate, or has no measurable area", total_area
+    if total_area < float(minimum_area_sqm):
+        return False, f"footprint area {total_area:.2f} sqm is below the {minimum_area_sqm:g} sqm reliability threshold", total_area
+    return True, "", total_area
+
+
+def _filter_usable_building_footprints(features, minimum_area_sqm=MIN_USABLE_FOOTPRINT_AREA_SQM):
+    usable = []
+    rejected = []
+    for feature in features or []:
+        valid, reason, area_sqm = _footprint_quality(feature, minimum_area_sqm)
+        if valid:
+            usable.append(feature)
+        else:
+            rejected.append({"reason": reason, "area_sqm": round(area_sqm, 2)})
+    return usable, rejected
+
+
 # --------------------------------------------------------------------------- #
 # Urban metrics (pure aggregation)
 # --------------------------------------------------------------------------- #
@@ -343,7 +409,8 @@ def _floor_for_record(props, footprint_area):
     for field in ("floors", "building:levels", "levels"):
         value = _parse_number(props.get(field))
         if value is not None and value > 0:
-            return min(max(value, 1), 80), field
+            source = str(props.get("floorSource") or field)
+            return min(max(value, 1), 80), source
 
     for field in ("height", "render_height", "HEIGHT", "H_AVG"):
         height = _parse_number(props.get(field))
@@ -367,12 +434,13 @@ def _vertical_for_record(props, footprint_area):
     for field in ("height", "render_height", "HEIGHT", "H_AVG"):
         height = _parse_number(props.get(field))
         if height is not None and height > 0:
+            source = str(props.get("heightSource") or field)
             return {
                 "floors": int(floors),
                 "floor_source": floor_source,
                 "height_m": round(min(height, 300.0), 1),
-                "height_source": field,
-                "estimated": False,
+                "height_source": source,
+                "estimated": bool(props.get("heightEstimated", False)),
             }
 
     inferred_from_levels = floor_source != "estimated"
@@ -395,7 +463,9 @@ def _height_stats(verticals):
         return {}
     heights = [item["height_m"] for item in verticals]
     source_counts = Counter(item["height_source"] for item in verticals)
-    measured_count = sum(int(source_counts.get(field, 0)) for field in ("height", "render_height", "HEIGHT", "H_AVG"))
+    measured_count = sum(int(source_counts.get(field, 0)) for field in (
+        "height", "render_height", "HEIGHT", "H_AVG", "scene_mesh_z_range", "scene_attribute_height"
+    ))
     levels_count = int(source_counts.get("levels_inferred", 0))
     estimated_count = int(source_counts.get("building_type_estimated", 0))
     count = len(verticals)
@@ -470,7 +540,9 @@ def _build_metrics_result(records, site_area, buffer_area, backend, metric_crs=N
 
     source_counts = Counter(floor_sources)
     measured_count = sum(int(source_counts.get(field, 0)) for field in ("floors", "building:levels", "levels"))
-    height_count = sum(int(source_counts.get(field, 0)) for field in ("height", "render_height", "HEIGHT", "H_AVG"))
+    height_count = sum(int(source_counts.get(field, 0)) for field in (
+        "height", "render_height", "HEIGHT", "H_AVG", "scene_mesh_z_range", "scene_attribute_height"
+    ))
     estimated_count = int(source_counts.get("estimated", 0))
     measured_ratio = measured_count / building_count if building_count else 0
     height_ratio = height_count / building_count if building_count else 0

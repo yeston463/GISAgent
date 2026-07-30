@@ -20,7 +20,7 @@ import urllib.error
 import pytest
 
 import main
-from gis import adapter
+from gis import adapter, model
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +169,37 @@ def test_elements_to_features_lock():
     assert feats[0]["properties"]["osm_id"] == 1
 
 
+def test_footprint_quality_rejects_tiny_aoi_edge_sliver():
+    # A clipped building can be valid GeoJSON while still being only a tiny
+    # triangle at the edge of a hand-drawn AOI.  It must not become a FAR or
+    # CityEngine input building.
+    sliver = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[116.4337355, 39.8866564], [116.4333479, 39.8866451], [116.4337350, 39.8866663], [116.4337355, 39.8866564]]],
+        },
+        "properties": {},
+    }
+    valid, reason, area_sqm = main._footprint_quality(sliver)
+    assert not valid
+    assert "reliability threshold" in reason
+    assert 0 < area_sqm < 25
+
+
+def test_footprint_quality_accepts_normal_closed_building():
+    building = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[116.43, 39.88], [116.4303, 39.88], [116.4303, 39.8802], [116.43, 39.8802], [116.43, 39.88]]],
+        },
+        "properties": {},
+    }
+    valid, reason, area_sqm = main._footprint_quality(building)
+    assert valid and not reason and area_sqm > 25
+
+
 def test_create_buffer_feature_approx_lock():
     f = main._create_buffer_feature_approx(121.47, 31.23, 500)
     assert f["properties"]["backend"] == "standard_library_approx"
@@ -230,6 +261,20 @@ def test_floor_for_record_lock():
     assert floor == 10 and src == "height"  # 35 / 3.5 == 10
     floor, src = main._floor_for_record({}, 100.0)
     assert src == "estimated"
+
+
+def test_mesh_height_source_is_preserved_in_vertical_profile():
+    vertical = model._vertical_for_record({
+        "height": 18.4,
+        "floors": 6,
+        "heightSource": "scene_mesh_z_range",
+        "floorSource": "mesh_height_inferred",
+        "heightEstimated": False,
+    }, 100.0)
+    assert vertical["height_m"] == 18.4
+    assert vertical["height_source"] == "scene_mesh_z_range"
+    assert vertical["floor_source"] == "mesh_height_inferred"
+    assert vertical["estimated"] is False
 
 
 def test_evaluate_rule_lock():
