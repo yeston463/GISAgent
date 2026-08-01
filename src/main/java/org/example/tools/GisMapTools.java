@@ -13,6 +13,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 import org.example.service.PromptResourceService;
 
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 
@@ -105,6 +106,12 @@ public class GisMapTools {
     }
 
     private String geocodeInternal(String locationName, String city) {
+        String originalLocationName = locationName == null ? "" : locationName.trim();
+        locationName = normalizeLocationName(originalLocationName);
+        city = normalizeCity(city);
+        if (city.isBlank()) {
+            city = defaultCityFor(locationName);
+        }
         System.out.println("🔍 [高德地名查找] 正在检索: " + locationName + (city.isEmpty() ? "" : " (限定城市: " + city + ")"));
         try {
             if (amapKey == null || amapKey.isBlank()) {
@@ -115,9 +122,14 @@ public class GisMapTools {
             if ("success".equalsIgnoreCase(poiRoot.path("status").asText())) {
                 return poiResult;
             }
-            LocationReview review = reviewLocationName(locationName, city);
+            LocationReview review = reviewLocationName(originalLocationName, city);
             if (review != null) {
-                String reviewedPoiResult = searchPoi(review.locationName(), review.city());
+                String reviewedName = normalizeLocationName(review.locationName());
+                String reviewedCity = normalizeCity(review.city());
+                if (reviewedCity.isBlank()) {
+                    reviewedCity = defaultCityFor(reviewedName);
+                }
+                String reviewedPoiResult = searchPoi(reviewedName, reviewedCity);
                 JsonNode reviewedPoiRoot = objectMapper.readTree(reviewedPoiResult);
                 if ("success".equalsIgnoreCase(reviewedPoiRoot.path("status").asText())) {
                     System.out.println("✅ [AI地点复核] " + locationName + " → "
@@ -161,6 +173,79 @@ public class GisMapTools {
         } catch (Exception e) {
             return "{\"status\": \"error\", \"message\": \"" + e.getMessage() + "\"}";
         }
+    }
+
+    /**
+     * Turn common human shorthand into the institution name used by POI
+     * providers.  This is deliberately conservative: only known aliases are
+     * rewritten, while the original user text is still used in responses.
+     */
+    private String normalizeLocationName(String locationName) {
+        String value = locationName == null ? "" : locationName
+                .replaceAll("\\s+", "")
+                .replace('（', '(')
+                .replace('）', ')')
+                .trim();
+        if (value.equals("中国地质大学北京") || value.equals("中国地质大学(北京)")) {
+            return "中国地质大学（北京）";
+        }
+        if (value.equals("中国地质大学北") || value.equals("中地大北京") || value.equals("地大北京")) {
+            return "中国地质大学（北京）";
+        }
+        if (value.equals("中国地质大学武汉") || value.equals("中国地质大学(武汉)")) {
+            return "中国地质大学（武汉）";
+        }
+        if (value.equals("中地大武汉") || value.equals("地大武汉")) {
+            return "中国地质大学（武汉）";
+        }
+        if (value.equals("武大")) {
+            return "武汉大学";
+        }
+        if (value.equals("武汉大学武汉") || value.equals("武汉大学(武汉)")) {
+            return "武汉大学";
+        }
+        return value;
+    }
+
+    private String normalizeCity(String city) {
+        String value = city == null ? "" : city.replaceAll("\\s+", "").trim();
+        if (value.equals("北京") || value.equals("北京市")) return "北京市";
+        if (value.equals("武汉") || value.equals("武汉市")) return "武汉市";
+        return value;
+    }
+
+    private String defaultCityFor(String locationName) {
+        String normalized = normalizeLocationName(locationName);
+        if (normalized.equals("中国地质大学（北京）")) return "北京市";
+        if (normalized.equals("中国地质大学（武汉）") || normalized.equals("武汉大学")) return "武汉市";
+        return "";
+    }
+
+    private String normalizePoiText(String text) {
+        return normalizeLocationName(text)
+                .replaceAll("[()（）·,，。\\-—]", "")
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private boolean isNearPoiMatch(String query, String name) {
+        if (query.length() < 4 || name.length() < 4) return false;
+        int maxDistance = Math.max(1, Math.min(2, query.length() / 6));
+        return levenshteinDistance(query, name) <= maxDistance;
+    }
+
+    private int levenshteinDistance(String left, String right) {
+        int[] previous = new int[right.length() + 1];
+        for (int j = 0; j <= right.length(); j++) previous[j] = j;
+        for (int i = 1; i <= left.length(); i++) {
+            int[] current = new int[right.length() + 1];
+            current[0] = i;
+            for (int j = 1; j <= right.length(); j++) {
+                int substitution = previous[j - 1] + (left.charAt(i - 1) == right.charAt(j - 1) ? 0 : 1);
+                current[j] = Math.min(Math.min(previous[j] + 1, current[j - 1] + 1), substitution);
+            }
+            previous = current;
+        }
+        return previous[right.length()];
     }
 
     private LocationReview reviewLocationName(String locationName, String city) {
@@ -210,16 +295,24 @@ public class GisMapTools {
             return "{\"status\": \"error\", \"message\": \"POI search returned no result\"}";
         }
 
-        String normalizedQuery = locationName.replaceAll("\\s+", "");
+        String normalizedQuery = normalizePoiText(locationName);
         List<JsonNode> exactMatches = new ArrayList<>();
         List<JsonNode> prefixMatches = new ArrayList<>();
         for (JsonNode poi : pois) {
-            String name = poi.path("name").asText("").replaceAll("\\s+", "");
+            String name = normalizePoiText(poi.path("name").asText(""));
             if (normalizedQuery.equals(name)) {
                 exactMatches.add(poi);
             } else if (!normalizedQuery.isBlank() && name.startsWith(normalizedQuery)) {
                 // POI often names a campus or gate as "<institution><campus>".
                 // It is a valid fallback only when all candidates belong to one city.
+                prefixMatches.add(poi);
+            } else if (!normalizedQuery.isBlank()
+                    && (name.contains(normalizedQuery) || normalizedQuery.contains(name))) {
+                // AMap may omit campus punctuation or append a gate/campus
+                // suffix. Accept the best lexical match, subject to the same
+                // city-ambiguity guard below.
+                prefixMatches.add(poi);
+            } else if (isNearPoiMatch(normalizedQuery, name)) {
                 prefixMatches.add(poi);
             }
         }

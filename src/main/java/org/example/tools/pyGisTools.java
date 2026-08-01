@@ -167,6 +167,24 @@ public class pyGisTools {
         return getForMap("/runtime");
     }
 
+    @Tool("executeSpatialAnalysis")
+    public Map<String, Object> executeSpatialAnalysis(
+            @P("operation") String operation,
+            @P("paramsJson") String paramsJson) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("operation", operation);
+        try {
+            payload.put("params", paramsJson == null || paramsJson.isBlank()
+                    ? Map.of() : JSON.parseObject(paramsJson));
+        } catch (Exception e) {
+            return Map.of("status", "Error", "stage", "spatial_plan",
+                    "message", "paramsJson must be valid JSON: " + e.getMessage());
+        }
+        Map<String, Object> result = postForMap("/execute", payload);
+        saveContextFromResult(result);
+        return result;
+    }
+
     @Tool("analyzeCurrentView")
     public Map<String, Object> analyzeCurrentView() {
         String geoJson = contextService.getGeoJson();

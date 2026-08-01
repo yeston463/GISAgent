@@ -9,6 +9,7 @@ import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import jakarta.annotation.PostConstruct;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -67,6 +68,9 @@ public class DynamicCodeGenerator {
     @Autowired
     private DynamicExecutionConfig config;
 
+    @Autowired
+    private DynamicToolStore toolStore;
+
     // 执行线程池与并发信号灯，首次使用时惰性初始化（兼容无参构造的反射测试）。
     private volatile ExecutorService executor;
     private volatile Semaphore concurrency;
@@ -80,6 +84,48 @@ public class DynamicCodeGenerator {
     /** 测试专用：注入指定配置（如缩短超时做快速超时测试）。 */
     DynamicCodeGenerator(DynamicExecutionConfig config) {
         this.config = config;
+    }
+
+    @PostConstruct
+    void restorePersistedTools() {
+        if (toolStore == null || toolRegistry == null || isDisabled()) return;
+        for (Map<String, Object> row : toolStore.load()) {
+            String name = String.valueOf(row.getOrDefault("name", ""));
+            String code = String.valueOf(row.getOrDefault("code", ""));
+            if (!name.matches("[a-z][a-zA-Z0-9_]{2,63}") || validateCode(code) != null) continue;
+            JSONObject context = row.get("context") instanceof JSONObject json ? json : new JSONObject();
+            String description = String.valueOf(row.getOrDefault("description", "恢复的动态工具"));
+            try {
+                toolRegistry.registerDynamicTool(name, description,
+                        runtimeParams -> executeCode(code, context, runtimeParams));
+            } catch (Exception ignored) {
+                // Invalid/stale records must not prevent application startup.
+            }
+        }
+    }
+
+    public Map<String, Object> rollbackDynamicTool(String name, long version) {
+        if (toolStore == null || toolRegistry == null) {
+            return Map.of("status", "Error", "message", "动态工具存储未初始化");
+        }
+        Map<String, Object> row = toolStore.rollback(name, version);
+        if (row == null) {
+            return Map.of("status", "NotFound", "tool", name, "version", version);
+        }
+        String code = String.valueOf(row.getOrDefault("code", ""));
+        String violation = validateCode(code);
+        if (violation != null) {
+            return Map.of("status", "Error", "tool", name, "message", violation);
+        }
+        JSONObject context = row.get("context") instanceof JSONObject json ? json : new JSONObject();
+        String description = String.valueOf(row.getOrDefault("description", "恢复的动态工具"));
+        toolRegistry.registerDynamicTool(name, description,
+                runtimeParams -> executeCode(code, context, runtimeParams));
+        return Map.of("status", "Success", "tool", name, "version", version);
+    }
+
+    public void forgetDynamicTool(String name) {
+        if (toolStore != null) toolStore.remove(name);
     }
 
     public CodeExecutionResult generateAndExecute(String requirement, JSONObject context) {
@@ -120,6 +166,9 @@ public class DynamicCodeGenerator {
             Object sampleResult = executeCode(code, registrationContext, registrationContext);
             toolRegistry.registerDynamicTool(name, description, runtimeParams ->
                     executeCode(code, registrationContext, runtimeParams));
+            if (toolStore != null) {
+                toolStore.upsert(name, description, code, registrationContext);
+            }
             return new CodeExecutionResult(
                     sampleResult,
                     "Success",

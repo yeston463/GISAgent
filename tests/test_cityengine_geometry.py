@@ -5,7 +5,12 @@ from copy import deepcopy
 import pytest
 
 import cityengine_bridge as bridge
-from cityengine_bridge import _prepare_buildings, _write_shapefile, normalize_requirements
+from cityengine_bridge import (
+    _prepare_buildings,
+    _write_shapefile,
+    normalize_requirements,
+)
+from gis import model
 
 
 L_SHAPED_GEOMETRY = {
@@ -50,6 +55,27 @@ def _prepare(features, *, setback=0, problem_ids=()):
         problems,
         requirements,
     )
+
+
+def test_result_manifest_retries_transient_windows_file_lock(tmp_path, monkeypatch):
+    result_path = tmp_path / "ce-test.json"
+    original_replace = bridge.os.replace
+    attempts = {"count": 0}
+
+    def locked_then_replace(source, destination):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError("result manifest is temporarily locked")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(bridge.os, "replace", locked_then_replace)
+    monkeypatch.setattr(bridge.time, "sleep", lambda _seconds: None)
+
+    bridge._atomic_write_json(result_path, {"status": "completed"})
+
+    assert attempts["count"] == 3
+    assert json.loads(result_path.read_text(encoding="utf-8")) == {"status": "completed"}
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_l_shaped_footprint_is_preserved_and_height_reason_is_reported():
@@ -113,6 +139,62 @@ def test_cityengine_rejects_aoi_edge_sliver_instead_of_exporting_it():
     )
     with pytest.raises(ValueError, match="没有可用于 CityEngine"):
         _prepare([sliver])
+
+
+def test_cityengine_keeps_small_measured_scene_mesh_buildings():
+    small_mesh = _feature(
+        "mesh-small-01",
+        geometry={
+            "type": "Polygon",
+            "coordinates": [[
+                [116.393900, 39.916200], [116.393930, 39.916200],
+                [116.393930, 39.916220], [116.393900, 39.916220],
+                [116.393900, 39.916200],
+            ]],
+        },
+        geometrySource="arcgis_scene_mesh_roof_projection",
+        geometryApproximation=False,
+    )
+
+    prepared, _actions, summary = _prepare([small_mesh])
+
+    assert len(prepared["features"]) == 1
+    assert summary["skippedCount"] == 0
+
+
+def test_missing_vertical_fields_still_generates_a_visible_one_story_building():
+    feature = _feature("missing-vertical")
+    feature["properties"].pop("height")
+    feature["properties"].pop("floors", None)
+
+    prepared, _actions, summary = _prepare([feature])
+    properties = prepared["features"][0]["properties"]
+
+    assert properties["ce_height"] == 3.0
+    assert properties["ce_floors"] == 1
+    assert properties["vert_src"] == "default_display_height"
+    assert properties["vert_est"] == 1
+    assert summary["estimatedHeightCount"] == 1
+
+
+def test_single_mesh_roof_triangle_is_not_extruded_as_a_wedge():
+    feature = _feature(
+        "mesh-roof-triangle",
+        geometry={
+            "type": "Polygon",
+            "coordinates": [[[116.38, 39.90], [116.381, 39.90], [116.38, 39.901], [116.38, 39.90]]],
+        },
+        geometrySource="arcgis_scene_mesh_roof_projection",
+    )
+    prepared, _actions, summary = _prepare([feature])
+    output = prepared["features"][0]
+
+    assert output["geometry"]["coordinates"][0] == [
+        [116.38, 39.90], [116.381, 39.90], [116.381, 39.901],
+        [116.38, 39.901], [116.38, 39.90],
+    ]
+    assert output["properties"]["geom_aprx"] == 1
+    assert summary["approximatedCount"] == 1
 
 
 def test_explicit_setback_is_the_only_reported_footprint_change():

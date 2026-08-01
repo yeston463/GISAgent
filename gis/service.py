@@ -21,6 +21,52 @@ pd = adapter.pd
 gpd = adapter.gpd
 
 
+# Public operation registry for dynamic analysis plans. The plan may select an
+# operation and provide JSON parameters, but never supplies executable code.
+SPATIAL_OPERATIONS = {
+    "buffer": "buffer",
+    "fetch_buildings": "fetch_buildings",
+    "urban_metrics": "urban_metrics",
+    "skyline": "skyline",
+    "sunlight": "sunlight",
+}
+
+
+def execute_spatial_plan(payload):
+    """Execute one validated spatial operation from a declarative plan."""
+    payload = payload or {}
+    operation = str(payload.get("operation") or "").strip().lower()
+    if operation not in SPATIAL_OPERATIONS:
+        return {
+            "status": "Error",
+            "stage": "spatial_plan",
+            "message": f"Unsupported spatial operation: {operation}",
+            "allowed_operations": sorted(SPATIAL_OPERATIONS),
+        }
+    args = payload.get("params") if isinstance(payload.get("params"), dict) else payload
+    try:
+        if operation == "buffer":
+            feature = create_buffer_feature(args.get("lon"), args.get("lat"), args.get("radius", 500))
+            return {
+                "status": "Success", "analysis_type": "buffer",
+                "geojson": model._feature_collection([feature]),
+                "commands": [{"action": "renderAnalysisResult", "params": {
+                    "geoJson": model._feature_collection([feature]),
+                }}],
+            }
+        if operation == "fetch_buildings":
+            return fetch_buildings_for_aoi(args.get("aoi"))
+        if operation == "urban_metrics":
+            return calculate_metrics(args)
+        if operation == "skyline":
+            return calculate_skyline(args)
+        if operation == "sunlight":
+            return calculate_sunlight(args)
+    except Exception as exc:
+        return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
+    return {"status": "Error", "stage": "spatial_plan", "message": "Operation did not produce a result"}
+
+
 # --------------------------------------------------------------------------- #
 # Buffer creation (backend selection)
 # --------------------------------------------------------------------------- #

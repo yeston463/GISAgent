@@ -5,6 +5,7 @@ import com.alibaba.fastjson.JSONObject;
 import org.example.agent.AgentLoopService;
 import org.example.agent.DynamicCodeGenerator;
 import org.example.agent.DynamicExecutionGuard;
+import org.example.agent.CommandProtocol;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
 import jakarta.servlet.http.HttpServletRequest;
@@ -128,7 +129,7 @@ public class AgentController {
 
     @GetMapping("/tools")
     public Map<String, Object> tools() {
-        return Map.of("tools", toolRegistry.getToolDescriptions());
+        return Map.of("tools", toolRegistry.getToolDescriptors());
     }
 
     @DeleteMapping("/tools/{name}")
@@ -142,7 +143,26 @@ public class AgentController {
                     .body(Map.of("status", "Forbidden", "message", "动态工具删除未授权：缺少有效令牌或本机来源"));
         }
         boolean removed = toolRegistry.removeDynamicTool(name);
+        if (removed) {
+            codeGenerator.forgetDynamicTool(name);
+        }
         return ResponseEntity.ok(Map.of("status", removed ? "Success" : "NotFound", "tool", name));
+    }
+
+    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
+    @PostMapping("/tools/{name}/rollback")
+    public ResponseEntity<Map<String, Object>> rollbackDynamicTool(
+            @PathVariable String name, @RequestParam long version, HttpServletRequest httpRequest) {
+        if (!executionGuard.isEnabled()) {
+            return ResponseEntity.status(404).body(Map.of("status", "Disabled"));
+        }
+        if (!executionGuard.authorize(httpRequest)) {
+            return ResponseEntity.status(403).body(Map.of("status", "Forbidden"));
+        }
+        Map<String, Object> result = codeGenerator.rollbackDynamicTool(name, version);
+        return "Success".equals(result.get("status"))
+                ? ResponseEntity.ok(result)
+                : ResponseEntity.status(404).body(result);
     }
 
     public record ChatRequest(String message, String memoryId) {}
@@ -153,6 +173,16 @@ public class AgentController {
 
     private Map<String, Object> buildResponse(AgentLoopService.AgentResult result, String memoryId) {
         Map<String, Object> response = new LinkedHashMap<>();
+        response.put("protocolVersion", CommandProtocol.VERSION);
+        Map<String, Object> outcome = result.outcome() == null || result.outcome().isEmpty()
+                ? Map.of("status", result.needsClarification() ? "NeedsClarification" : "Success")
+                : result.outcome();
+        response.put("outcome", outcome);
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("schemaVersion", CommandProtocol.VERSION);
+        envelope.put("status", outcome.getOrDefault("status", "Success"));
+        envelope.put("analysis", Map.of("id", memoryId));
+        List<Map<String, Object>> outputs = new java.util.ArrayList<>();
         if (result.needsClarification()) {
             response.put("reply", result.clarification());
             response.put("needClarification", true);
@@ -169,10 +199,19 @@ public class AgentController {
             response.put("commands", commands);
             response.put("suggestions", result.suggestions());
             response.put("needClarification", false);
+            outputs.add(Map.of("kind", "commands", "data", commands));
         }
         if (result.metrics() != null) {
             response.put("metrics", result.metrics());
+            outputs.add(Map.of("kind", "metric", "data", result.metrics()));
         }
+        envelope.put("outputs", outputs);
+        envelope.put("warnings", List.of());
+        boolean failed = "Error".equals(outcome.get("status")) || "Failed".equals(outcome.get("status"));
+        envelope.put("errors", failed ? List.of(outcome) : List.of());
+        envelope.put("capability", "CapabilityPending".equals(outcome.get("status")) ? outcome : Map.of());
+        envelope.put("commands", response.getOrDefault("commands", new JSONArray()));
+        response.put("resultEnvelope", envelope);
         response.put("trace", result.trace() == null ? List.of() : result.trace());
         response.put("memoryId", memoryId);
         return response;
@@ -198,7 +237,7 @@ public class AgentController {
         if (agentCommands == null) {
             return;
         }
-        for (Map<String, Object> cmd : agentCommands) {
+        for (Map<String, Object> cmd : CommandProtocol.normalize(agentCommands)) {
             JSONObject jsonCmd = new JSONObject(cmd);
             if (isInvalidFlyTo(jsonCmd)) {
                 continue;
@@ -210,7 +249,9 @@ public class AgentController {
     private void appendMetricCommands(JSONArray commands, JSONArray metricCommands) {
         for (int i = 0; i < metricCommands.size(); i++) {
             JSONObject metricCommand = metricCommands.getJSONObject(i);
-            if (!hasCommand(commands, metricCommand.getString("action"))) {
+            if (!hasEquivalentCommand(commands, metricCommand)) {
+                metricCommand.putIfAbsent("protocolVersion", CommandProtocol.VERSION);
+                metricCommand.putIfAbsent("commandId", "metric-" + i + "-" + metricCommand.getString("action"));
                 commands.add(metricCommand);
             }
         }
@@ -219,6 +260,16 @@ public class AgentController {
     private boolean hasCommand(JSONArray commands, String action) {
         for (int i = 0; i < commands.size(); i++) {
             if (action.equals(commands.getJSONObject(i).getString("action"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasEquivalentCommand(JSONArray commands, JSONObject candidate) {
+        String candidateKey = CommandProtocol.dedupeKey(candidate.getInnerMap());
+        for (int i = 0; i < commands.size(); i++) {
+            if (candidateKey.equals(CommandProtocol.dedupeKey(commands.getJSONObject(i).getInnerMap()))) {
                 return true;
             }
         }

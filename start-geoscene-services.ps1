@@ -1,5 +1,10 @@
 param(
-    [switch]$Elevated
+    [switch]$Elevated,
+    [switch]$RestartServer,
+    [switch]$RestartDataStore,
+    [switch]$RestartPortal,
+    [switch]$PinLocalHostname,
+    [switch]$AllowServerWhileDataStoreRecovering
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,10 +13,15 @@ $TomcatRoot = 'C:\apache-tomcat-9.0.119'
 $TomcatStartup = Join-Path $TomcatRoot 'bin\startup.bat'
 $TomcatHttpsPort = 443
 $TomcatServiceName = 'GeoSceneTomcatAutostart'
+$DataStoreDescribeTool = 'C:\Program Files\GeoScene\DataStore\tools\describedatastore.bat'
+$DataStoreOzoneLog = 'C:\geoscenedatastore\logs\PRODUCT.GEOSCENEENTERPRISE.CN\ozone\ozone.log'
+$DataStoreOzoneConfig = 'C:\geoscenedatastore\ozonedata\etc\hadoop\ozone-site.xml'
+$PortalEnvFile = Join-Path $PSScriptRoot '.env'
 $PortalHealthUrl = 'http://127.0.0.1:7080/geoscene/portaladmin/healthCheck?f=json'
 $WebAdaptorHost = 'product.geosceneenterprise.cn'
 $WebAdaptorHealthUrl = 'https://127.0.0.1/geoscene/sharing/rest?f=json'
 $ServerWebAdaptorHealthUrl = 'https://127.0.0.1/server/rest/services?f=json'
+$ServerAdminBaseUrl = 'https://product.geosceneenterprise.cn:6443/geoscene/admin'
 $MinimumSystemDriveFreeGB = 12
 $MinimumCommitHeadroomGB = 3
 $MinimumAvailableMemoryGB = 1.5
@@ -19,6 +29,13 @@ $PortalWarmupGraceSeconds = 300
 $PortalColdStartWaitSeconds = 180
 $PortalFailureProbeCount = 3
 $PortalFailureProbeIntervalSeconds = 5
+$DataStoreWarmupSeconds = 360
+$DataStoreProbeIntervalSeconds = 15
+$DataStoreOzoneQuietSeconds = 60
+$DataStoreOzoneQuietTimeoutSeconds = 360
+$ObjectStoreValidateTimeoutSeconds = 180
+$ObjectStoreValidateIntervalSeconds = 15
+$GeoSceneHostname = 'product.geosceneenterprise.cn'
 $ServiceNames = @(
     'GeoScene Data Store',
     'GeoScene Portal',
@@ -223,6 +240,215 @@ function Test-ConsecutiveHealth {
     return $false
 }
 
+function Get-DotEnvValue {
+    param([string]$Name)
+
+    $processValue = [Environment]::GetEnvironmentVariable($Name, 'Process')
+    if (-not [string]::IsNullOrWhiteSpace($processValue)) {
+        return $processValue
+    }
+
+    if (-not (Test-Path -LiteralPath $PortalEnvFile -PathType Leaf)) {
+        return $null
+    }
+
+    foreach ($line in (Get-Content -LiteralPath $PortalEnvFile -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*' + [regex]::Escape($Name) + '\s*=\s*(?<value>.*)\s*$') {
+            return $Matches['value'].Trim().Trim('"').Trim("'")
+        }
+    }
+    return $null
+}
+
+function Get-OzoneConfigDiagnosis {
+    if (-not (Test-Path -LiteralPath $DataStoreOzoneConfig -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        [xml]$document = Get-Content -LiteralPath $DataStoreOzoneConfig -Raw -ErrorAction Stop
+    } catch {
+        throw ('Could not read Ozone config {0}: {1}' -f $DataStoreOzoneConfig, $_.Exception.Message)
+    }
+
+    $properties = @{}
+    foreach ($property in @($document.configuration.property)) {
+        $name = [string]$property.name
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+        $properties[$name.Trim()] = ([string]$property.value).Trim()
+    }
+
+    $policy = $properties['ozone.http.policy']
+    $issues = [System.Collections.Generic.List[string]]::new()
+    if ($policy -eq 'HTTPS_ONLY') {
+        foreach ($flagName in @(
+            'hdds.datanode.http.enabled',
+            'ozone.scm.http.enabled',
+            'ozone.om.http.enabled'
+        )) {
+            $flagValue = ''
+            if ($properties.ContainsKey($flagName)) {
+                $flagValue = $properties[$flagName]
+            }
+            if ($flagValue.ToLowerInvariant() -ne 'true') {
+                $issues.Add(('{0}={1}' -f $flagName, $(if ($flagValue) { $flagValue } else { '<missing>' })))
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path = $DataStoreOzoneConfig
+        Policy = $policy
+        Issues = $issues.ToArray()
+        IsValid = $issues.Count -eq 0
+    }
+}
+
+function Assert-OzoneConfigReady {
+    $diagnosis = Get-OzoneConfigDiagnosis
+    if ($null -eq $diagnosis) {
+        Write-Log ('Ozone config file not found; skip config validation: {0}' -f $DataStoreOzoneConfig)
+        return
+    }
+    if ($diagnosis.IsValid) {
+        return
+    }
+
+    $issueSummary = $diagnosis.Issues -join ', '
+    throw ((
+        'GeoScene Data Store Ozone config is inconsistent: ozone.http.policy={0} but {1}. ' +
+        'Fix {2} and retry (set the affected *.http.enabled flags to true before restarting Data Store).'
+    ) -f $diagnosis.Policy, $issueSummary, $diagnosis.Path)
+}
+
+function Get-ObjectStoreDescriptor {
+    $objectStoreId = Get-DotEnvValue -Name 'GEOSCENE_OBJECT_STORE_ID'
+    $objectStoreMachine = Get-DotEnvValue -Name 'GEOSCENE_OBJECT_STORE_MACHINE'
+    if (-not [string]::IsNullOrWhiteSpace($objectStoreId) -and `
+        -not [string]::IsNullOrWhiteSpace($objectStoreMachine)) {
+        return [PSCustomObject]@{
+            Id = $objectStoreId
+            Machine = $objectStoreMachine
+        }
+    }
+
+    $description = Invoke-DataStoreDescription
+    $objectStoreMatch = [regex]::Match(
+        $description,
+        '(?im)object store\s+(?<id>[A-Za-z0-9_]+)\b'
+    )
+    if (-not $objectStoreMatch.Success) {
+        $objectStoreMatch = [regex]::Match(
+            $description,
+            '(?im)object-store\s+(?<id>[A-Za-z0-9_]+)\b'
+        )
+    }
+    $machineMatches = [regex]::Matches(
+        $description,
+        '(?im)Registered machines\.+\s+(?<machine>[A-Za-z0-9_.-]+)\b'
+    )
+    if (-not $objectStoreMatch.Success) {
+        throw 'describedatastore did not expose object-store id.'
+    }
+    $machineName = if ($machineMatches.Count -gt 0) {
+        $machineMatches[$machineMatches.Count - 1].Groups['machine'].Value
+    } elseif (-not [string]::IsNullOrWhiteSpace($objectStoreMachine)) {
+        $objectStoreMachine
+    } else {
+        $GeoSceneHostname
+    }
+    return [PSCustomObject]@{
+        Id = $objectStoreMatch.Groups['id'].Value
+        Machine = $machineName
+    }
+}
+
+function Invoke-ObjectStoreValidate {
+    $portalUrl = Get-DotEnvValue -Name 'GEOSCENE_PORTAL_URL'
+    $username = Get-DotEnvValue -Name 'GEOSCENE_PORTAL_USERNAME'
+    $password = Get-DotEnvValue -Name 'GEOSCENE_PORTAL_PASSWORD'
+    $serverAdminUrl = Get-DotEnvValue -Name 'GEOSCENE_SERVER_ADMIN_URL'
+    if ([string]::IsNullOrWhiteSpace($serverAdminUrl)) {
+        $serverAdminUrl = $script:ServerAdminBaseUrl
+    }
+    if ([string]::IsNullOrWhiteSpace($portalUrl) -or `
+        [string]::IsNullOrWhiteSpace($username) -or `
+        [string]::IsNullOrWhiteSpace($password)) {
+        throw 'GeoScene Portal credentials are missing from process environment or .env.'
+    }
+
+    $tokenRaw = & curl.exe -k -sS --connect-timeout 8 --max-time 20 `
+        -X POST `
+        --data-urlencode ('username={0}' -f $username) `
+        --data-urlencode ('password={0}' -f $password) `
+        --data-urlencode 'client=referer' `
+        --data-urlencode ('referer={0}' -f $portalUrl) `
+        --data-urlencode 'f=json' `
+        ('{0}/sharing/rest/generateToken' -f $portalUrl) 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ('Portal token request failed with curl exit code {0}.' -f $LASTEXITCODE)
+    }
+    $tokenResponse = ($tokenRaw -join "`n") | ConvertFrom-Json
+    if ($tokenResponse.error -or [string]::IsNullOrWhiteSpace($tokenResponse.token)) {
+        throw ('Portal token request failed: {0}' -f (($tokenRaw -join ' ') -replace "`r?`n", ' '))
+    }
+
+    $descriptor = Get-ObjectStoreDescriptor
+    $validatePath = 'data/items/cloudStores/AGSDataStore_objectstore_{0}/machines/{1}/validate' -f `
+        $descriptor.Id, $descriptor.Machine
+    $validateRaw = & curl.exe -k -sS --connect-timeout 8 --max-time 45 `
+        -X POST `
+        --data-urlencode 'f=json' `
+        --data-urlencode ('token={0}' -f $tokenResponse.token) `
+        ('{0}/{1}' -f $serverAdminUrl, $validatePath) 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ('Object-store validate request failed with curl exit code {0}.' -f $LASTEXITCODE)
+    }
+    return (($validateRaw -join "`n") | ConvertFrom-Json)
+}
+
+function Wait-ObjectStoreHealthy {
+    param([int]$TimeoutSeconds = $ObjectStoreValidateTimeoutSeconds)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $validation = Invoke-ObjectStoreValidate
+            $machine = @($validation.machines)[0]
+            $healthy = $validation.status -eq 'success' -and `
+                $validation.'datastore.overallhealth' -eq 'Healthy' -and `
+                $machine.'machine.overallhealth' -eq 'Healthy' -and `
+                $machine.status -eq 'Started' -and `
+                $machine.isSCMHealthy -eq $true -and `
+                $machine.isOMHealthy -eq $true -and `
+                $machine.isDataNodeHealthy -eq $true -and `
+                $machine.s3gStatus.isS3GHealthy -eq $true
+            if ($healthy) {
+                Write-Host '[OK]    GeoScene object store official validate is Healthy.' -ForegroundColor Green
+                Write-Log ('Object store validate healthy: id={0}, machine={1}, overallhealth={2}, SCM={3}, OM={4}, DataNode={5}, S3G={6}' -f `
+                    (Get-ObjectStoreDescriptor).Id,
+                    $machine.name,
+                    $validation.'datastore.overallhealth',
+                    $machine.isSCMHealthy,
+                    $machine.isOMHealthy,
+                    $machine.isDataNodeHealthy,
+                    $machine.s3gStatus.isS3GHealthy)
+                return $true
+            }
+            Write-Host '[WAIT] Object store official validate is not healthy yet.' -ForegroundColor Yellow
+            Write-Log ('Object store validate pending: status={0}, overallhealth={1}' -f `
+                $validation.status, $validation.'datastore.overallhealth')
+        } catch {
+            Write-Host ('[WAIT] Object store validate pending: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
+            Write-Log ('Object store validate pending: {0}' -f $_.Exception.Message)
+        }
+        Start-Sleep -Seconds $ObjectStoreValidateIntervalSeconds
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
 function Wait-WebAdaptors {
     param([int]$TimeoutSeconds = 90)
 
@@ -240,6 +466,168 @@ function Wait-WebAdaptors {
 
     Write-Log ('Web Adaptor wait timed out: Portal={0}, Server={1}' -f $portalHealthy, $serverHealthy)
     return $false
+}
+
+function Invoke-DataStoreDescription {
+    if (-not (Test-Path -LiteralPath $DataStoreDescribeTool -PathType Leaf)) {
+        throw "Data Store describe tool not found: $DataStoreDescribeTool"
+    }
+
+    $command = '/d /s /c ""{0}""' -f $DataStoreDescribeTool
+    $captureId = [Guid]::NewGuid().ToString('N')
+    $stdoutPath = Join-Path $env:TEMP ("geoscene-describe-{0}.out" -f $captureId)
+    $stderrPath = Join-Path $env:TEMP ("geoscene-describe-{0}.err" -f $captureId)
+    try {
+        $process = Start-Process `
+            -FilePath 'cmd.exe' `
+            -ArgumentList $command `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+        if (-not $process.WaitForExit(60000)) {
+            try {
+                $process.Kill()
+            } catch {
+                Write-Log ('Could not kill timed-out Data Store describe process: {0}' -f $_.Exception.Message)
+            }
+            throw 'describedatastore timed out after 60 seconds.'
+        }
+        # Complete redirected stream reads before inspecting ExitCode/output.
+        $process.WaitForExit()
+        $process.Refresh()
+        $exitCode = $process.ExitCode
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) {
+            Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        } else { '' }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        } else { '' }
+        $output = @($stdout, $stderr) -join [Environment]::NewLine
+        $flattenedOutput = $output.Trim() -replace "`r?`n", ' | '
+        Write-Log ('Data Store describe exit code {0}: {1}' -f $exitCode, $flattenedOutput)
+        if ([string]::IsNullOrWhiteSpace($output)) {
+            throw ('describedatastore exited with code {0} and produced no output.' -f $exitCode)
+        }
+        if ($exitCode -ne 0) {
+            # When GeoScene Server is intentionally stopped, describedatastore
+            # still reports valid local READWRITE modes but exits non-zero
+            # because it cannot contact the owning site. Let the caller parse
+            # those local modes; official Server Admin validate is the health gate.
+            Write-Log ('Data Store describe returned non-zero; local store modes will still be evaluated.')
+        }
+        return $output
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-DataStoreReadWrite {
+    try {
+        $description = Invoke-DataStoreDescription
+        $hasRelational = $description -match 'Relational Data Store'
+        $hasObjectStore = $description -match 'Object Store'
+        $readWriteCount = ([regex]::Matches($description, 'Data store mode\.+READWRITE')).Count
+        $ready = $hasRelational -and $hasObjectStore -and $readWriteCount -ge 2
+        if (-not $ready) {
+            Write-Log ('Data Store describe did not prove relational/object READWRITE: relational={0}, object={1}, readwriteCount={2}' -f `
+                $hasRelational, $hasObjectStore, $readWriteCount)
+        }
+        return $ready
+    } catch {
+        Write-Log ('Data Store readiness probe failed: {0}' -f $_.Exception.Message)
+        return $false
+    }
+}
+
+function Wait-DataStoreReadWrite {
+    param([int]$TimeoutSeconds = $DataStoreWarmupSeconds)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-DataStoreReadWrite) {
+            Write-Host '[OK]    GeoScene Data Store relational/object stores are READWRITE.' -ForegroundColor Green
+            Write-Log 'Data Store relational/object stores are READWRITE.'
+            return $true
+        }
+        Write-Host ('[WAIT] Data Store relational/object stores not ready ({0}s remaining).' -f `
+            [Math]::Max(0, [Math]::Round(($deadline - (Get-Date)).TotalSeconds))) -ForegroundColor Yellow
+        Start-Sleep -Seconds $DataStoreProbeIntervalSeconds
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
+function Get-OzoneRecentErrorTime {
+    param([datetime]$Since)
+
+    if (-not (Test-Path -LiteralPath $DataStoreOzoneLog -PathType Leaf)) {
+        return $null
+    }
+
+    $currentTimestamp = $null
+    $lastErrorTimestamp = $null
+    $errorPattern = 'ServerNotReadyException|AlreadyClosedException|RaftRetryFailureException|Failed to flush|current state is STARTING'
+    foreach ($line in (Get-Content -LiteralPath $DataStoreOzoneLog -Tail 800 -ErrorAction SilentlyContinue)) {
+        if ($line -match '^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),') {
+            try {
+                $currentTimestamp = [datetime]::ParseExact(
+                    $Matches['ts'],
+                    'yyyy-MM-dd HH:mm:ss',
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+            } catch {
+                $currentTimestamp = $null
+            }
+        }
+        if ($currentTimestamp -and $currentTimestamp -gt $Since -and $line -match $errorPattern) {
+            $lastErrorTimestamp = $currentTimestamp
+        }
+    }
+    return $lastErrorTimestamp
+}
+
+function Wait-DataStoreOzoneQuiet {
+    param(
+        [datetime]$Since,
+        [int]$TimeoutSeconds = $DataStoreOzoneQuietTimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $quietWindowStart = Get-Date
+    do {
+        $now = Get-Date
+        $lastError = Get-OzoneRecentErrorTime -Since $Since
+        if ($lastError -and $lastError -gt $quietWindowStart) {
+            $quietWindowStart = $lastError
+        }
+        $quietForSeconds = [Math]::Max(0, [Math]::Round(($now - $quietWindowStart).TotalSeconds))
+        if ($quietForSeconds -ge $DataStoreOzoneQuietSeconds) {
+            Write-Host '[OK]    GeoScene Data Store Ozone/Ratis log is quiet.' -ForegroundColor Green
+            Write-Log ('Data Store Ozone/Ratis log is quiet for {0} seconds.' -f $quietForSeconds)
+            return $true
+        }
+        $lastErrorText = if ($lastError) { $lastError.ToString('HH:mm:ss') } else { 'none in this window' }
+        Write-Host ('[WAIT] Data Store Ozone/Ratis quiet window {0}/{1}s; last error: {2}.' -f `
+            $quietForSeconds, $DataStoreOzoneQuietSeconds, $lastErrorText) -ForegroundColor Yellow
+        Start-Sleep -Seconds 10
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
+function Assert-DataStoreReady {
+    param([datetime]$Since)
+
+    Assert-OzoneConfigReady
+    if (-not (Wait-DataStoreReadWrite)) {
+        throw ('Data Store relational/object stores did not become READWRITE within {0} seconds.' -f $DataStoreWarmupSeconds)
+    }
+    if (-not (Wait-DataStoreOzoneQuiet -Since $Since)) {
+        throw ('Data Store Ozone/Ratis log did not stay quiet for {0} seconds within {1} seconds.' -f `
+            $DataStoreOzoneQuietSeconds, $DataStoreOzoneQuietTimeoutSeconds)
+    }
+    return $true
 }
 
 function Get-ResourceSnapshot {
@@ -309,6 +697,21 @@ if (-not (Test-Administrator)) {
         '-File', ('"{0}"' -f $PSCommandPath),
         '-Elevated'
     )
+    if ($RestartServer) {
+        $arguments += '-RestartServer'
+    }
+    if ($RestartDataStore) {
+        $arguments += '-RestartDataStore'
+    }
+    if ($RestartPortal) {
+        $arguments += '-RestartPortal'
+    }
+    if ($PinLocalHostname) {
+        $arguments += '-PinLocalHostname'
+    }
+    if ($AllowServerWhileDataStoreRecovering) {
+        $arguments += '-AllowServerWhileDataStoreRecovering'
+    }
 
     try {
         $process = Start-Process `
@@ -328,6 +731,19 @@ if (-not (Test-Administrator)) {
 }
 
 Write-Log 'Administrator process started.'
+
+if ($PinLocalHostname) {
+    $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    $hostsLines = @(Get-Content -LiteralPath $hostsPath -ErrorAction Stop)
+    $hostPattern = '(?i)^\s*[^#].*\b' + [regex]::Escape($GeoSceneHostname) + '\b'
+    $hostsLines = @($hostsLines | Where-Object { $_ -notmatch $hostPattern })
+    $hostsLines += ('127.0.0.1 {0}' -f $GeoSceneHostname)
+    Set-Content -LiteralPath $hostsPath -Value $hostsLines -Encoding ASCII -ErrorAction Stop
+    Clear-DnsClientCache -ErrorAction SilentlyContinue
+    Write-Host ('[OK]    Pinned {0} to 127.0.0.1.' -f $GeoSceneHostname) -ForegroundColor Green
+    Write-Log ('Pinned local GeoScene hostname to loopback: {0}' -f $GeoSceneHostname)
+}
+
 Write-Host ''
 Write-Host 'Starting GeoScene services ...' -ForegroundColor Cyan
 Write-Host ('Log: {0}' -f $LogFile)
@@ -336,19 +752,72 @@ $null = Write-ResourceStatus
 
 $failed = 0
 $serviceStartedThisRun = @{}
+$serverStoppedForDataStoreRestart = $false
+$dataStoreReady = $false
+
+if ($RestartDataStore) {
+    try {
+        $serverService = Get-Service -Name 'GeoScene Server' -ErrorAction Stop
+        if ($serverService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running) {
+            Write-Host '[STOP]  GeoScene Server before Data Store restart ...' -ForegroundColor Yellow
+            Write-Log 'Stopping GeoScene Server before Data Store restart to avoid object-store writes during warmup.'
+            Stop-ManagedService -Name 'GeoScene Server' -TimeoutSeconds 60
+            $serverStoppedForDataStoreRestart = $true
+        }
+    } catch {
+        $failed++
+        Write-Host ('[ERROR] GeoScene Server pre-stop: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        Write-Log ('Failed: GeoScene Server pre-stop before Data Store restart: {0}' -f $_.Exception.Message)
+    }
+}
+
 foreach ($serviceName in $ServiceNames) {
     try {
         $service = Get-Service -Name $serviceName -ErrorAction Stop
         $serviceStartedThisRun[$serviceName] = $false
+        if ($serviceName -eq 'GeoScene Server' -and -not $dataStoreReady) {
+            throw 'GeoScene Server start skipped because Data Store object store is not stable.'
+        }
+        $explicitRestart =
+            ($RestartServer -and $serviceName -eq 'GeoScene Server') -or
+            ($RestartDataStore -and $serviceName -eq 'GeoScene Data Store') -or
+            ($RestartPortal -and $serviceName -eq 'GeoScene Portal')
+
+        if ($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and $explicitRestart) {
+            Write-Host ('[RESTART] {0} requested explicitly ...' -f $serviceName) -ForegroundColor Yellow
+            Write-Log ('Explicit restart requested: {0}' -f $serviceName)
+            $serviceStabilitySince = Get-Date
+            Restart-ManagedService -Name $serviceName
+            $service.Refresh()
+            if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+                throw ('{0} did not return to RUNNING after explicit restart.' -f $serviceName)
+            }
+            Write-Host ('[OK]    {0} restarted.' -f $serviceName) -ForegroundColor Green
+            Write-Log ('Restarted successfully: {0}' -f $serviceName)
+            $serviceStartedThisRun[$serviceName] = $true
+            if ($serviceName -eq 'GeoScene Data Store') {
+                Assert-DataStoreReady -Since $serviceStabilitySince
+                $dataStoreReady = $true
+            }
+            continue
+        }
+
         if ($service.Status -eq [ServiceProcess.ServiceControllerStatus]::Running) {
             Write-Host ('[OK]    {0} is already running.' -f $serviceName) -ForegroundColor Green
             Write-Log ('Already running: {0}' -f $serviceName)
+            if ($serviceName -eq 'GeoScene Data Store') {
+                Assert-DataStoreReady -Since (Get-Date)
+                $dataStoreReady = $true
+            }
             continue
         }
 
         Write-Host ('[START] {0} ...' -f $serviceName) -ForegroundColor Yellow
         Write-Log ('Starting: {0}' -f $serviceName)
-        Assert-StartupResources -Operation ('starting {0}' -f $serviceName)
+        $serviceCommitHeadroomGB = if ($serviceName -eq 'GeoScene Server') { 1.5 } else { $MinimumCommitHeadroomGB }
+        Assert-StartupResources -Operation ('starting {0}' -f $serviceName) `
+            -RequiredCommitHeadroomGB $serviceCommitHeadroomGB
+        $serviceStabilitySince = Get-Date
         Start-Service -Name $serviceName -ErrorAction Stop
         $service.WaitForStatus(
             [ServiceProcess.ServiceControllerStatus]::Running,
@@ -363,6 +832,10 @@ foreach ($serviceName in $ServiceNames) {
         Write-Host ('[OK]    {0} is running.' -f $serviceName) -ForegroundColor Green
         Write-Log ('Running: {0}' -f $serviceName)
         $serviceStartedThisRun[$serviceName] = $true
+        if ($serviceName -eq 'GeoScene Data Store') {
+            Assert-DataStoreReady -Since $serviceStabilitySince
+            $dataStoreReady = $true
+        }
     } catch {
         $failed++
         Write-Host ('[ERROR] {0}: {1}' -f $serviceName, $_.Exception.Message) -ForegroundColor Red
@@ -370,6 +843,24 @@ foreach ($serviceName in $ServiceNames) {
         $details = & sc.exe queryex $serviceName 2>&1 | Out-String
         Add-Content -LiteralPath $LogFile -Encoding UTF8 -Value $details.TrimEnd()
     }
+}
+
+$objectStoreHealthy = $false
+try {
+    $serverService = Get-Service -Name 'GeoScene Server' -ErrorAction Stop
+    if ($dataStoreReady -and $serverService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running) {
+        $objectStoreHealthy = Wait-ObjectStoreHealthy
+        if (-not $objectStoreHealthy) {
+            throw ('GeoScene object store official validate did not become Healthy within {0} seconds.' -f `
+                $ObjectStoreValidateTimeoutSeconds)
+        }
+    } else {
+        Write-Log 'Skipped object-store official validate because Data Store or GeoScene Server is not ready.'
+    }
+} catch {
+    $failed++
+    Write-Host ('[ERROR] GeoScene object store validate: {0}' -f $_.Exception.Message) -ForegroundColor Red
+    Write-Log ('Failed: GeoScene object store validate: {0}' -f $_.Exception.Message)
 }
 
 $portalReady = $false
@@ -411,9 +902,23 @@ try {
     Write-Log ('Failed: GeoScene Portal health: {0}' -f $_.Exception.Message)
 }
 
+$serverReadyForWebAdaptor = $false
+try {
+    $serverReadyForWebAdaptor = (Get-Service -Name 'GeoScene Server' -ErrorAction Stop).Status -eq `
+        [ServiceProcess.ServiceControllerStatus]::Running
+} catch {
+    Write-Log ('Could not determine GeoScene Server status for Web Adaptor check: {0}' -f $_.Exception.Message)
+}
+
 if (-not $portalReady) {
     Write-Host '[SKIP]  Tomcat/Web Adaptor left unchanged because Portal is still warming up.' -ForegroundColor Yellow
     Write-Log 'Skipped Tomcat/Web Adaptor changes because Portal is not ready.'
+} elseif (-not $serverReadyForWebAdaptor) {
+    Write-Host '[SKIP]  Tomcat/Web Adaptor left unchanged because GeoScene Server is not running.' -ForegroundColor Yellow
+    Write-Log 'Skipped Tomcat/Web Adaptor changes because GeoScene Server is not running.'
+} elseif (-not $objectStoreHealthy) {
+    Write-Host '[SKIP]  Tomcat/Web Adaptor left unchanged because object-store official validate is not Healthy.' -ForegroundColor Yellow
+    Write-Log 'Skipped Tomcat/Web Adaptor changes because object-store official validate is not Healthy.'
 } else {
   try {
     if (-not (Test-Path -LiteralPath $TomcatStartup -PathType Leaf)) {

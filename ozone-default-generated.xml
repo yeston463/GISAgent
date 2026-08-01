@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<configuration>
+  <property>
+    <name>ozone.scm.update.client.crl.check.interval</name>
+    <value>600s</value>
+    <description>The interval that the scm update service client use tocheck its pending CRLs.</description>
+    <tag>SCM, OZONE, SECURITY</tag>
+  </property>
+  <property>
+    <name>ozone.scm.update.service.port</name>
+    <value>9893</value>
+    <description>Port used for the SCM grpc update service for CRL.</description>
+    <tag>SECURITY</tag>
+  </property>
+  <property>
+    <name>hadoop.hdds.db.rocksdb.logging.enabled</name>
+    <value>false</value>
+    <description>Enable/Disable RocksDB logging for OM.</description>
+    <tag>OM, SCM, DATANODE</tag>
+  </property>
+  <property>
+    <name>hadoop.hdds.db.rocksdb.logging.level</name>
+    <value>INFO</value>
+    <description>OM RocksDB logging level (INFO/DEBUG/WARN/ERROR/FATAL)</description>
+    <tag>OM, SCM, DATANODE</tag>
+  </property>
+  <property>
+    <name>hadoop.hdds.db.rocksdb.writeoption.sync</name>
+    <value>false</value>
+    <description>Enable/Disable Sync option. If true write will be considered complete, once flushed to persistent storage. If false, writes are flushed asynchronously.</description>
+    <tag>OM, SCM, DATANODE</tag>
+  </property>
+  <property>
+    <name>hadoop.hdds.db.rocksdb.WAL_ttl_seconds</name>
+    <value>1200</value>
+    <description>The lifetime of WAL log files. Default 1200 seconds.</description>
+    <tag>OM, SCM, DATANODE</tag>
+  </property>
+  <property>
+    <name>hadoop.hdds.db.rocksdb.WAL_size_limit_MB</name>
+    <value>0MB</value>
+    <description>The total size limit of WAL log files. Once the total log file size exceeds this limit, the earliest files will be deleted.Default 0 means no limit.</description>
+    <tag>OM, SCM, DATANODE</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.grpc.flow.control.window</name>
+    <value>5MB</value>
+    <description>This parameter tells how much data grpc client can send to grpc server with out receiving any ack(WINDOW_UPDATE) packet from server. This parameter should be set in accordance with chunk size. Example: If Chunk size is 4MB, considering some header size in to consideration, this can be set 5MB or greater. Tune this parameter accordingly, as when it is set with a value lesser than chunk size it degrades the ozone client performance.</description>
+    <tag>OZONE, CLIENT, PERFORMANCE</tag>
+  </property>
+  <property>
+    <name>hdds.scmclient.rpc.timeout</name>
+    <value>15m</value>
+    <description>RpcClient timeout on waiting for the response from SCM. The default value is set to 15 minutes. If ipc.client.ping is set to true and this rpc-timeout is greater than the value of ipc.ping.interval, the effective value of the rpc-timeout is rounded up to multiple of ipc.ping.interval.</description>
+    <tag>OZONE, SCM, CLIENT</tag>
+  </property>
+  <property>
+    <name>hdds.scmclient.max.retry.timeout</name>
+    <value>10m</value>
+    <description>Max retry timeout for SCM Client</description>
+    <tag>OZONE, SCM, CLIENT</tag>
+  </property>
+  <property>
+    <name>hdds.scmclient.failover.max.retry</name>
+    <value>15</value>
+    <description>Max retry count for SCM Client when failover happens.</description>
+    <tag>OZONE, SCM, CLIENT</tag>
+  </property>
+  <property>
+    <name>hdds.scmclient.failover.retry.interval</name>
+    <value>2s</value>
+    <description>SCM Client timeout on waiting for the next connection retry to other SCM IP. The default value is set to 2 seconds. </description>
+    <tag>OZONE, SCM, CLIENT</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.rpc.request.timeout</name>
+    <value>60s</value>
+    <description>The timeout duration of the ratis write request on Ratis Server.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.watch.timeout</name>
+    <value>180s</value>
+    <description>The timeout duration for watch request on Ratis Server. Timeout for the watch request in Ratis server to acknowledge a particular request is replayed to all servers.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.notification.no-leader.timeout</name>
+    <value>300s</value>
+    <description>Time out duration after which StateMachine gets notified that leader has not been elected for a long time and leader changes its role to Candidate.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.rpc.slowness.timeout</name>
+    <value>300s</value>
+    <description>Timeout duration after which stateMachine will be notified that follower is slow. StateMachine will close down the pipeline.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.write.element-limit</name>
+    <value>1024</value>
+    <description>Maximum number of pending requests after which the leader starts rejecting requests from client.</description>
+    <tag>OZONE, DATANODE, RATIS, PERFORMANCE</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.datastream.request.threads</name>
+    <value>20</value>
+    <description>Maximum number of threads in the thread pool for datastream request.</description>
+    <tag>OZONE, DATANODE, RATIS, DATASTREAM</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.datastream.client.pool.size</name>
+    <value>10</value>
+    <description>Maximum number of client proxy in NettyServerStreamRpc for datastream write.</description>
+    <tag>OZONE, DATANODE, RATIS, DATASTREAM</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.delete.ratis.log.directory</name>
+    <value>true</value>
+    <description>Flag to indicate whether ratis log directory will becleaned up during pipeline remove.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.leaderelection.pre-vote</name>
+    <value>true</value>
+    <description>Flag to enable/disable ratis election pre-vote.</description>
+    <tag>OZONE, DATANODE, RATIS</tag>
+  </property>
+  <property>
+    <name>hdds.ratis.raft.server.log.appender.wait-time.min</name>
+    <value>0us</value>
+    <description>The minimum wait time between two appendEntries calls. In some error conditions, the leader may keep retrying appendEntries. If it happens, increasing this value to, say, 5us (microseconds) can help avoid the leader being too busy retrying.</description>
+    <tag>OZONE, DATANODE, RATIS, PERFORMANCE</tag>
+  </property>
+</configuration>

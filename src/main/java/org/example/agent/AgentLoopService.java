@@ -10,6 +10,7 @@ import org.example.agent.DynamicExecutionConfig;
 import org.example.service.KnowledgeService;
 import org.example.service.PromptResourceService;
 import org.example.service.GisContextService;
+import org.example.service.PendingAnalysisIntentService;
 import org.example.tools.pyGisTools;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -64,6 +65,11 @@ public class AgentLoopService {
     @Autowired
     private GisContextService gisContextService;
 
+    @Autowired
+    private PendingAnalysisIntentService pendingAnalysisIntentService;
+
+    private final AgentDecisionParser decisionParser = new AgentDecisionParser();
+
     @Value("${agent.max-rounds:8}")
     private int maxRounds;
 
@@ -78,6 +84,13 @@ public class AgentLoopService {
             Consumer<ExecutionTrace> traceListener) {
         gisContextService.activateSession(memoryId);
         List<ExecutionTrace> trace = new ArrayList<>();
+        String advancedIntent = detectAdvancedIntent(userMessage);
+        if (advancedIntent == null && isCurrentRangeReply(userMessage)) {
+            advancedIntent = pendingAnalysisIntentService.consume(memoryId);
+        }
+        if (advancedIntent != null) {
+            return executeAdvancedIntent(advancedIntent, memoryId, trace, traceListener);
+        }
         NavigationRequest navigationRequest = parseNavigationRequest(userMessage);
         if (navigationRequest != null) {
             return executeNavigation(navigationRequest, trace, traceListener);
@@ -88,6 +101,10 @@ public class AgentLoopService {
         }
         if (isPlanningDemoRequest(userMessage)) {
             return executePlanningDemo(userMessage, userId, taskPlan, trace, traceListener);
+        }
+
+        if (isFloodAnalysisRequest(userMessage)) {
+            return executeFloodAnalysisRequest(trace, traceListener);
         }
 
         if (shouldAskClarification(userMessage)) {
@@ -118,7 +135,7 @@ public class AgentLoopService {
         List<Map<String, Object>> messages = new ArrayList<>();
         String systemPrompt = promptResources.load("system.txt")
                 + "\n\n当前运行时工具清单：\n"
-                + JSON.toJSONString(toolRegistry.getToolDescriptions());
+                + JSON.toJSONString(toolRegistry.getToolDescriptors());
         messages.add(Map.of("role", "system", "content", systemPrompt));
 
         String memoryContext = buildMemoryContext(userId, userMessage);
@@ -131,6 +148,7 @@ public class AgentLoopService {
         String finalReply = null;
         List<String> finalSuggestions = null;
         List<Map<String, Object>> pendingCommands = new ArrayList<>();
+        String terminalFailure = null;
 
         int rounds = Math.max(1, maxRounds);
         int lastRound = 0;
@@ -139,6 +157,7 @@ public class AgentLoopService {
             JSONObject decision = askModelForDecision(messages);
             if (decision == null) {
                 addTrace(trace, traceListener, round, "error", "无法解析模型决策", "本轮没有得到有效 JSON", "error");
+                terminalFailure = "planner_invalid_json";
                 break;
             }
 
@@ -146,6 +165,7 @@ public class AgentLoopService {
             String summary = decision.getString("summary");
             if (action == null || action.isBlank()) {
                 addTrace(trace, traceListener, round, "error", "决策缺少动作", "模型返回了空 action", "error");
+                terminalFailure = "planner_missing_action";
                 break;
             }
 
@@ -177,6 +197,7 @@ public class AgentLoopService {
             Map<String, Object> observedMap = resultMap;
             String observation = formatObservation(action, rawResult);
             boolean observationFailed = resultMap != null && isFailed(resultMap);
+            boolean capabilityPending = resultMap != null && isCapabilityPending(resultMap);
 
             if (resultMap != null) {
                 collectCommands(resultMap, pendingCommands);
@@ -213,7 +234,14 @@ public class AgentLoopService {
 
             addTrace(trace, traceListener, round, "observation", "获得工具结果",
                     formatTraceDetail(observedMap == null ? rawResult : observedMap),
-                    observationFailed ? "error" : "success");
+                    observationFailed ? "error" : capabilityPending ? "waiting" : "success");
+            if (capabilityPending) {
+                String detail = String.valueOf(resultMap.getOrDefault("message", "当前系统尚未配置该分析能力。"));
+                addTrace(trace, traceListener, round, "wait", "分析能力待配置", detail, "waiting");
+                finalReply = detail;
+                finalSuggestions = List.of("保留当前 AOI", "补充该分析所需数据", "查看当前可用分析能力");
+                break;
+            }
             messages.add(Map.of("role", "assistant", "content",
                     safe(summary, "选择 " + action)));
             messages.add(Map.of("role", "user", "content",
@@ -221,7 +249,9 @@ public class AgentLoopService {
         }
 
         if (finalReply == null) {
-            if (finalMetrics != null && isAdvancedAnalysis(finalMetrics)) {
+            if (terminalFailure != null) {
+                finalReply = "Agent 未能生成可执行的工具决策，未执行空间分析。请重试；若问题持续存在，请检查模型 JSON 输出配置。";
+            } else if (finalMetrics != null && isAdvancedAnalysis(finalMetrics)) {
                 finalReply = buildAdvancedReply(finalMetrics);
             } else {
                 finalReply = finalMetrics != null
@@ -236,10 +266,16 @@ public class AgentLoopService {
 
         saveAnalysis(userId, userMessage, finalMetrics);
         memoryStore.cleanupExpired();
-        addTrace(trace, traceListener, Math.max(1, lastRound), "complete", "任务结束", "已返回结果和可执行地图命令", "success");
+        addTrace(trace, traceListener, Math.max(1, lastRound),
+                terminalFailure == null ? "complete" : "error",
+                terminalFailure == null ? "任务结束" : "任务失败",
+                terminalFailure == null ? "已返回结果和可执行地图命令" : "模型决策协议错误: " + terminalFailure,
+                terminalFailure == null ? "success" : "error");
 
         return new AgentResult(finalReply, finalSuggestions, null, false,
-                finalMetrics, dedupeCommands(pendingCommands), trace);
+                finalMetrics, dedupeCommands(pendingCommands), trace,
+                terminalFailure == null ? Map.of("status", "Success")
+                        : Map.of("status", "Error", "code", terminalFailure));
     }
 
     private boolean isPlanningDemoRequest(String userMessage) {
@@ -266,6 +302,114 @@ public class AgentLoopService {
                 || lower.contains("slpk")
                 || lower.contains("publish")
                 || lower.contains("generate"));
+    }
+
+    private boolean isFloodAnalysisRequest(String userMessage) {
+        if (userMessage == null) return false;
+        String lower = userMessage.toLowerCase();
+        return userMessage.contains("洪水") || userMessage.contains("内涝") || userMessage.contains("淹没")
+                || lower.contains("flood") || lower.contains("inundation");
+    }
+
+    private String detectAdvancedIntent(String userMessage) {
+        if (userMessage == null) return null;
+        String lower = userMessage.toLowerCase();
+        if (userMessage.contains("\u5929\u9645\u7ebf") || lower.contains("skyline")) return "skyline";
+        if (userMessage.contains("\u65e5\u7167") || userMessage.contains("\u9634\u5f71")
+                || lower.contains("sunlight") || lower.contains("shadow")) return "sunlight";
+        return null;
+    }
+
+    private boolean isCurrentRangeReply(String userMessage) {
+        if (userMessage == null) return false;
+        String lower = userMessage.toLowerCase();
+        return userMessage.contains("\u5f53\u524d") || userMessage.contains("\u8fd9\u4e2a\u8303\u56f4")
+                || userMessage.contains("\u8be5\u8303\u56f4") || lower.contains("current")
+                || lower.contains("this range") || lower.contains("aoi") || lower.contains("redline");
+    }
+
+    private boolean hasCurrentAoi() {
+        try {
+            JSONObject context = JSON.parseObject(gisContextService.getGeoJson());
+            return context != null && context.containsKey("aoi");
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private AgentResult executeAdvancedIntent(
+            String intent,
+            String memoryId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        String title = "skyline".equals(intent) ? "\u5929\u9645\u7ebf\u5206\u6790" : "\u65e5\u7167\u4e0e\u9634\u5f71\u7b5b\u67e5";
+        if (!hasCurrentAoi()) {
+            pendingAnalysisIntentService.remember(memoryId, intent);
+            String question = "\u8bf7\u7ed8\u5236\u3001\u4e0a\u4f20\u6216\u9009\u62e9\u5206\u6790\u8303\u56f4\uff08AOI\uff09\uff0c\u518d\u6267\u884c" + title + "\u3002";
+            addTrace(trace, traceListener, 1, "ask", title + "\u7f3a\u5c11\u8303\u56f4", question, "waiting");
+            return new AgentResult(null, null, question, true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_aoi_required", "analysisType", intent));
+        }
+
+        pendingAnalysisIntentService.clear(memoryId);
+        String tool = "skyline".equals(intent) ? "skylineAnalysis" : "sunlightAnalysis";
+        addTrace(trace, traceListener, 1, "decision", "\u8bc6\u522b" + title + "\u8bf7\u6c42",
+                "\u76f4\u63a5\u4f7f\u7528\u5f53\u524d AOI \u4e0e\u5efa\u7b51\u4e0a\u4e0b\u6587\uff0c\u4e0d\u4f9d\u8d56\u6a21\u578b\u51b3\u7b56 JSON\u3002", "running");
+        Map<String, Object> result = asMap(invokeTool(tool, new JSONObject()));
+        if (result == null || isFailed(result) || !isAdvancedAnalysis(result)) {
+            String detail = result == null ? "\u5206\u6790\u5de5\u5177\u672a\u8fd4\u56de\u7ed3\u679c"
+                    : String.valueOf(result.getOrDefault("message", "\u5f53\u524d AOI \u7f3a\u5c11\u53ef\u7528\u5efa\u7b51\u6570\u636e"));
+            if (detail.isBlank() || detail.contains("object of type") || detail.contains("Exception")) {
+                detail = "\u5f53\u524d AOI \u5c1a\u672a\u540c\u6b65\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff0c\u8bf7\u5148\u5b8c\u6210\u5efa\u7b51\u8f6e\u5ed3\u63d0\u53d6\u6216\u4e0a\u4f20 GeoJSON\u3002";
+            }
+            pendingAnalysisIntentService.remember(memoryId, intent);
+            addTrace(trace, traceListener, 2, "ask", title + "\u7b49\u5f85\u6570\u636e", detail, "waiting");
+            return new AgentResult(null, null,
+                    "\u5df2\u8bc6\u522b" + title + "\u8bf7\u6c42\uff0c\u4f46\u5f53\u524d AOI \u8fd8\u7f3a\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff1a" + detail,
+                    true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_data_required", "analysisType", intent));
+        }
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        collectCommands(result, commands);
+        addTrace(trace, traceListener, 2, "observation", "\u83b7\u5f97" + title + "\u7ed3\u679c",
+                formatTraceDetail(result), "success");
+        addTrace(trace, traceListener, 3, "complete", title + "\u5b8c\u6210",
+                "\u5df2\u8fd4\u56de\u5206\u6790\u9762\u677f\u4e0e\u5730\u56fe\u547d\u4ee4\u3002", "success");
+        return new AgentResult(buildAdvancedReply(result), List.of("\u67e5\u770b\u5f53\u524d AOI \u5efa\u7b51\u6307\u6807", "\u5207\u6362\u4e3a\u53e6\u4e00\u9879\u9ad8\u7ea7\u5206\u6790"),
+                null, false, result, dedupeCommands(commands), trace,
+                Map.of("status", "Success", "analysisType", intent));
+    }
+
+    private AgentResult executeFloodAnalysisRequest(
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        JSONObject context;
+        try {
+            context = JSON.parseObject(gisContextService.getGeoJson());
+        } catch (Exception ignored) {
+            context = null;
+        }
+        if (context == null || !context.containsKey("aoi")) {
+            String question = "请先绘制或上传洪水分析范围（AOI），再提交洪水分析请求。";
+            addTrace(trace, traceListener, 1, "ask", "洪水分析缺少范围", question, "waiting");
+            return new AgentResult(null, null, question, true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "flood_aoi_required"));
+        }
+
+        addTrace(trace, traceListener, 1, "decision", "识别洪水分析请求",
+                "当前 AOI 已有效，跳过自由格式模型决策。", "success");
+        String message = "当前 AOI 已有效，但系统尚未配置洪水分析模型，未执行洪水模拟。"
+                + "需要接入 DEM、降雨/重现期情景、河网或排水设施数据后才能输出淹没范围和水深。";
+        addTrace(trace, traceListener, 2, "wait", "洪水分析能力待配置", message, "waiting");
+        Map<String, Object> outcome = Map.of(
+                "status", "CapabilityPending",
+                "code", "flood_analysis_configuration_required",
+                "analysisType", "flood",
+                "requiredInputs", List.of("DEM", "rainfall_scenario", "drainage_or_river_network"));
+        return new AgentResult(message,
+                List.of("查看当前 AOI 建筑指标", "执行天际线分析", "执行日照与阴影筛查"),
+                null, false, null, List.of(), trace, outcome);
     }
 
     private boolean isCurrentContextMetricsRequest(String userMessage) {
@@ -392,8 +536,14 @@ public class AgentLoopService {
             String message = result == null
                     ? "CityEngine 任务没有返回有效结果。"
                     : String.valueOf(result.getOrDefault("message", "CityEngine 任务提交失败。"));
+            String failedJobId = result == null
+                    ? "未创建"
+                    : String.valueOf(result.getOrDefault("jobId", "未创建"));
+            String review = reviewExecutionFailure(userMessage, "CityEngine 任务提交", failedJobId, message);
             addTrace(trace, traceListener, 2, "error", "规划任务提交失败", message, "error");
-            return new AgentResult(message, List.of("检查 Python GIS 服务与 CityEngine 2025.1"),
+            addTrace(trace, traceListener, 2, "review", "AI 失败复核", review, "success");
+            return new AgentResult(message + "\n\nAI 复核：" + review,
+                    List.of("检查 Python GIS 服务与 CityEngine 2025.1", "按 AI 复核建议处理后重试"),
                     null, false, null, dedupeCommands(planningCommands), trace);
         }
 
@@ -439,8 +589,11 @@ public class AgentLoopService {
             suggestions = List.of("下载并检查 SLPK", "将 SLPK 加载到 ArcGIS Scene", "根据效果继续调整规划参数");
         } else if ("failed".equalsIgnoreCase(status)) {
             String error = String.valueOf(completed.getOrDefault("message", "CityEngine 执行失败"));
-            reply = "CityEngine 作业执行失败。\n\n- 作业：" + jobId + "\n- 错误：" + error;
-            suggestions = List.of("检查生成脚本与 CGA 规则", "检查 CityEngine 日志", "调整规划参数后重新生成");
+            String review = reviewExecutionFailure(userMessage, "CityEngine 模型生成", jobId, error);
+            addTrace(trace, traceListener, 3, "review", "AI 失败复核", review, "success");
+            reply = "CityEngine 作业执行失败。\n\n- 作业：" + jobId + "\n- 错误：" + error
+                    + "\n- AI 复核：" + review;
+            suggestions = List.of("检查生成脚本与 CGA 规则", "检查 CityEngine 日志", "按 AI 复核建议处理后重新生成");
         } else {
             reply = "RAG 与 LLM 已生成规划要求和 CityEngine 自动化脚本，作业仍在执行。"
                     + "\n\n- CityEngine 作业：" + jobId
@@ -453,6 +606,16 @@ public class AgentLoopService {
                 && asMap(completed.get("publicationProgress")) != null
                 && "error".equalsIgnoreCase(String.valueOf(
                         asMap(completed.get("publicationProgress")).get("status")));
+        if (pipelineFailed) {
+            Map<String, Object> publicationProgress = asMap(completed.get("publicationProgress"));
+            String error = String.valueOf(publicationProgress.getOrDefault("message", "GeoScene 发布失败"));
+            String review = reviewExecutionFailure(userMessage, "GeoScene 发布", jobId, error);
+            addTrace(trace, traceListener, 6, "review", "AI 失败复核", review, "success");
+            reply += "\n- AI 发布失败复核：" + review;
+            List<String> reviewedSuggestions = new ArrayList<>(suggestions);
+            reviewedSuggestions.add("按 AI 复核建议修复 GeoScene 后重新发布");
+            suggestions = reviewedSuggestions;
+        }
         addTrace(trace, traceListener, 8, pipelineFailed ? "error" : "complete", "规划成果流水线状态",
                 pipelineComplete ? "CityEngine、GeoScene 发布与前端加载准备已完成" : "当前状态：" + status,
                 pipelineComplete ? "success" : pipelineFailed ? "error" : "waiting");
@@ -637,6 +800,24 @@ public class AgentLoopService {
         }
     }
 
+    private String reviewExecutionFailure(String userRequest, String stage, String jobId, String error) {
+        try {
+            String prompt = promptResources.render("prompts/execution-failure-review.txt", Map.of(
+                    "USER_REQUEST", userRequest == null ? "" : userRequest,
+                    "STAGE", stage == null ? "unknown" : stage,
+                    "JOB_ID", jobId == null ? "unknown" : jobId,
+                    "ERROR", error == null ? "unknown" : error
+            ));
+            String review = chatLanguageModel.generate(prompt);
+            return review == null || review.isBlank()
+                    ? "AI 未返回复核结论；请保留作业日志并检查服务状态。"
+                    : review.trim();
+        } catch (Exception ex) {
+            return "AI 复核调用失败：" + ex.getClass().getSimpleName()
+                    + "；请检查作业日志、CityEngine 和 GeoScene Data Store。";
+        }
+    }
+
     private boolean shouldAskClarification(String userMessage) {
         if (userMessage == null || userMessage.isBlank()) {
             return true;
@@ -818,7 +999,10 @@ public class AgentLoopService {
         if (userMessage == null || userMessage.isBlank()) {
             return null;
         }
-        String normalizedMessage = userMessage.trim().replaceFirst("^(?:基于)?当前", "");
+        // “基于武汉大学 500m 缓冲区” means Wuhan University is the address;
+        // 基于/当前 are request prefixes, never part of a geocoding query.
+        String normalizedMessage = userMessage.trim().replaceFirst(
+                "^(?:(?:请|帮我|发|建立|创建|生成|构建)\\s*)?(?:(?:基于|当前)\\s*)+", "");
         Matcher placeMatcher = Pattern.compile(
                 "(?:分析|查询|查看|评估|统计|计算)?\\s*(.+?)(?:周边|附近|周围|半径|(?=\\d+(?:\\.\\d+)?\\s*(?:公里|千米|km|米|m))|范围)"
         ).matcher(normalizedMessage);
@@ -895,7 +1079,7 @@ public class AgentLoopService {
     private JSONObject askModelForDecision(List<Map<String, Object>> messages) {
         try {
             String llmResponse = chatLanguageModel.generate(buildPrompt(messages));
-            return JSON.parseObject(extractJson(llmResponse));
+            return decisionParser.parse(llmResponse);
         } catch (Exception e) {
             return null;
         }
@@ -925,6 +1109,9 @@ public class AgentLoopService {
                 return response;
             }
             return toolRegistry.invoke(action, params);
+        } catch (IllegalArgumentException e) {
+            return Map.of("status", "CapabilityPending", "code", "tool_not_available",
+                    "tool", action, "message", "当前系统尚未配置该分析能力，已保留当前空间上下文。");
         } catch (Exception e) {
             return Map.of("status", "Error", "message", e.getMessage(), "tool", action);
         }
@@ -1004,6 +1191,10 @@ public class AgentLoopService {
                 || "Success".equalsIgnoreCase(status)
                 || "success".equalsIgnoreCase(status)
                 || "ok".equalsIgnoreCase(status);
+    }
+
+    private boolean isCapabilityPending(Map<String, Object> result) {
+        return "CapabilityPending".equalsIgnoreCase(String.valueOf(result.getOrDefault("status", "")));
     }
 
     private boolean isValidMetrics(Map<String, Object> result) {
@@ -1235,12 +1426,13 @@ public class AgentLoopService {
         List<Map<String, Object>> deduped = new ArrayList<>();
         Set<String> seenActions = new HashSet<>();
         for (int i = commands.size() - 1; i >= 0; i--) {
-            String action = String.valueOf(commands.get(i).get("action"));
-            if (seenActions.add(action)) {
-                deduped.add(0, commands.get(i));
+            Map<String, Object> command = commands.get(i);
+            String key = CommandProtocol.dedupeKey(command);
+            if (seenActions.add(key)) {
+                deduped.add(0, command);
             }
         }
-        return deduped;
+        return CommandProtocol.normalize(deduped);
     }
 
     private String buildPrompt(List<Map<String, Object>> messages) {
@@ -1359,8 +1551,21 @@ public class AgentLoopService {
             boolean needsClarification,
             Map<String, Object> metrics,
             List<Map<String, Object>> commands,
-            List<ExecutionTrace> trace
-    ) {}
+            List<ExecutionTrace> trace,
+            Map<String, Object> outcome
+    ) {
+        public AgentResult(
+                String reply,
+                List<String> suggestions,
+                String clarification,
+                boolean needsClarification,
+                Map<String, Object> metrics,
+                List<Map<String, Object>> commands,
+                List<ExecutionTrace> trace) {
+            this(reply, suggestions, clarification, needsClarification, metrics, commands, trace,
+                    Map.of("status", needsClarification ? "NeedsClarification" : "Success"));
+        }
+    }
 
     public record ExecutionTrace(
             int round,

@@ -27,6 +27,7 @@ public class DynamicToolRegistry {
     // 动态工具：运行时注册的脚本/逻辑
     private final Map<String, ToolInvoker> dynamicTools = new ConcurrentHashMap<>();
     private final Map<String, String> toolDescriptions = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, Object>> toolSchemas = new ConcurrentHashMap<>();
 
     @Autowired
     public DynamicToolRegistry(
@@ -57,6 +58,7 @@ public class DynamicToolRegistry {
             if (annotation != null) {
                 String name = annotation.value().length == 0 ? method.getName() : annotation.value()[0];
                 toolDescriptions.putIfAbsent(name, "后端 GIS 工具");
+                toolSchemas.putIfAbsent(name, schemaFor(method));
                 staticTools.put(name, params -> {
                     try {
                         Object[] args = extractParams(method, params);
@@ -87,8 +89,17 @@ public class DynamicToolRegistry {
             throw new IllegalArgumentException("动态工具执行器不能为空");
         }
         dynamicTools.put(name, invoker);
+        toolSchemas.putIfAbsent(name, defaultSchema());
         toolDescriptions.put(name, description == null || description.isBlank() ? "运行时动态工具" : description);
         System.out.println("注册动态工具: " + name + " - " + description);
+    }
+
+    public void registerDynamicTool(String name, String description,
+                                    Map<String, Object> schema, ToolInvoker invoker) {
+        registerDynamicTool(name, description, invoker);
+        if (schema != null && !schema.isEmpty()) {
+            toolSchemas.put(name, new LinkedHashMap<>(schema));
+        }
     }
 
     public boolean removeDynamicTool(String name) {
@@ -98,6 +109,7 @@ public class DynamicToolRegistry {
         boolean removed = dynamicTools.remove(name) != null;
         if (removed) {
             toolDescriptions.remove(name);
+            toolSchemas.remove(name);
         }
         return removed;
     }
@@ -138,6 +150,45 @@ public class DynamicToolRegistry {
     /**
      * 从 JSONObject 中提取方法参数
      */
+    public List<Map<String, Object>> getToolDescriptors() {
+        List<Map<String, Object>> descriptors = new ArrayList<>();
+        staticTools.forEach((name, invoker) -> descriptors.add(descriptor(name, "static")));
+        dynamicTools.forEach((name, invoker) -> descriptors.add(descriptor(name, "dynamic")));
+        return descriptors;
+    }
+
+    private Map<String, Object> descriptor(String name, String type) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name", name);
+        result.put("type", type);
+        result.put("description", toolDescriptions.getOrDefault(name, "GIS tool"));
+        result.put("schema", toolSchemas.getOrDefault(name, defaultSchema()));
+        return result;
+    }
+
+    private Map<String, Object> schemaFor(Method method) {
+        List<Map<String, Object>> parameters = new ArrayList<>();
+        for (Parameter parameter : method.getParameters()) {
+            P annotation = parameter.getAnnotation(P.class);
+            String name = annotation != null && !annotation.value().isBlank()
+                    ? annotation.value() : parameter.getName();
+            parameters.add(Map.of("name", name,
+                    "type", parameter.getType().getSimpleName(),
+                    "required", !parameter.getType().isPrimitive()));
+        }
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("input", Map.of("type", "object", "parameters", parameters));
+        schema.put("output", Map.of("type", "object"));
+        schema.put("display", Map.of("kinds", List.of("metric", "vector", "table", "chart")));
+        return schema;
+    }
+
+    private Map<String, Object> defaultSchema() {
+        return Map.of("input", Map.of("type", "object"),
+                "output", Map.of("type", "object"),
+                "display", Map.of("kinds", List.of("metric", "vector", "table", "chart")));
+    }
+
     private Object[] extractParams(Method method, JSONObject params) {
         if (params == null) {
             params = new JSONObject();

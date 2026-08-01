@@ -12,7 +12,7 @@ rem
 rem Usage: scripts\build-frontend.bat
 rem ---------------------------------------------------------------------------
 
-set "ROOT=%~dp0.."
+for %%R in ("%~dp0..") do set "ROOT=%%~fR"
 set "STATIC=%ROOT%\src\main\resources\static"
 set "FRONTEND="
 
@@ -21,12 +21,12 @@ for /d %%S in ("%ROOT%\share\*") do (
 )
 
 if not defined FRONTEND (
-    echo [ERROR] frontend-arcgis1 not found under %ROOT%\share
+    echo [ERROR] frontend-arcgis1 not found under "!ROOT!\share"
     exit /b 1
 )
 
-echo Using frontend source: %FRONTEND%
-pushd "%FRONTEND%"
+echo Using frontend source: "!FRONTEND!"
+pushd "!FRONTEND!"
 
 if not exist node_modules (
     echo Installing frontend dependencies ...
@@ -37,12 +37,16 @@ echo Building frontend ...
 call npm run build || (popd & echo [ERROR] Frontend build failed. & exit /b 1)
 popd
 
-if not exist "%FRONTEND%\dist" (
-    echo [ERROR] Build output missing: %FRONTEND%\dist
+if not exist "!FRONTEND!\dist" (
+    echo [ERROR] Build output missing: "!FRONTEND!\dist"
     exit /b 1
 )
 
-echo Syncing dist -^> %STATIC%
-robocopy "%FRONTEND%\dist" "%STATIC%" /E /PURGE /NFL /NDL /NJS
-echo [OK] Frontend built and synced to %STATIC%
+echo Syncing dist -^> "!STATIC!"
+robocopy "!FRONTEND!\dist" "!STATIC!" /E /PURGE /NFL /NDL /NJS
+if %ERRORLEVEL% GEQ 8 (
+    echo [ERROR] robocopy failed with exit code %ERRORLEVEL%.
+    exit /b %ERRORLEVEL%
+)
+echo [OK] Frontend built and synced to "!STATIC!"
 exit /b 0

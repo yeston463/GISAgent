@@ -32,6 +32,12 @@ _running_processes = {}
 _queue_lock = threading.Lock()
 _job_queue = []
 _queue_worker = None
+# CityEngine monitoring and GeoScene publishing run in separate threads but
+# persist progress into the same result manifest. Windows does not allow an
+# atomic replacement while another thread/process has a transient file handle.
+_result_write_lock = threading.RLock()
+RESULT_WRITE_RETRY_COUNT = 6
+RESULT_WRITE_RETRY_DELAY_SECONDS = 0.05
 
 
 def _is_ascii_path(path):
@@ -68,6 +74,12 @@ JOB_TIMEOUT_SECONDS = max(
 # buildings. Keep it intact by default; callers may lower this via the
 # environment when running on constrained hardware.
 CITYENGINE_MAX_INPUT_BUILDINGS = _positive_int_env("CITYENGINE_MAX_INPUT_BUILDINGS", 1200, 1)
+# SceneLayer meshes can include genuine small outbuildings. Keep those when
+# their measured mesh footprint is the only source, but retain the stricter
+# default for ordinary AOI-edge polygon slivers.
+CITYENGINE_MIN_MESH_FOOTPRINT_AREA_SQM = _positive_int_env(
+    "CITYENGINE_MIN_MESH_FOOTPRINT_AREA_SQM", 1, 1
+)
 KEEP_RUNTIME_CACHE = os.environ.get("CITYENGINE_KEEP_RUNTIME_CACHE", "false").lower() in {
     "1", "true", "yes",
 }
@@ -128,8 +140,24 @@ def normalize_requirements(requirements, rule_set):
 def _atomic_write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary_path.replace(path)
+    with _result_write_lock:
+        try:
+            temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            for attempt in range(RESULT_WRITE_RETRY_COUNT):
+                try:
+                    os.replace(temporary_path, path)
+                    return
+                except PermissionError:
+                    if attempt == RESULT_WRITE_RETRY_COUNT - 1:
+                        raise
+                    time.sleep(RESULT_WRITE_RETRY_DELAY_SECONDS * (2 ** attempt))
+        finally:
+            # The temp name is unique to this process/thread. Leave no stale
+            # artifacts if a persistent external lock eventually causes a fail.
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _read_json(path):
@@ -288,12 +316,48 @@ def _footprint_vertex_count(geometry):
     return sum(max(0, len(ring) - 1) for polygon in polygons for ring in polygon)
 
 
+def _footprint_bbox_geometry(geometry):
+    coordinates = geometry["coordinates"]
+    polygons = [coordinates] if geometry["type"] == "Polygon" else coordinates
+    points = [point for polygon in polygons for ring in polygon for point in ring]
+    min_x = min(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    max_x = max(point[0] for point in points)
+    max_y = max(point[1] for point in points)
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [min_x, min_y], [max_x, min_y], [max_x, max_y],
+            [min_x, max_y], [min_x, min_y],
+        ]],
+    }
+
+
 def _is_approximate_geometry(properties):
     value = properties.get("geometryApproximation", False)
     if isinstance(value, str):
         value = value.strip().lower() in {"1", "true", "yes", "extent", "bounding_box"}
     source = str(properties.get("geometrySource", "")).strip().lower()
     return bool(value) or source in {"extent", "extent_bbox", "bounding_box", "envelope"}
+
+
+def _minimum_footprint_area(properties):
+    """Lower threshold only for measured SceneLayer mesh footprints."""
+    source = str((properties or {}).get("geometrySource") or "").strip().lower()
+    if source.startswith("arcgis_scene_mesh_"):
+        return float(CITYENGINE_MIN_MESH_FOOTPRINT_AREA_SQM)
+    return float(gis_model.MIN_USABLE_FOOTPRINT_AREA_SQM)
+
+
+def _positive_number_or_none(value, minimum=0.0, maximum=300.0):
+    """Return a finite positive field value without silently inventing one."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= minimum:
+        return None
+    return min(number, maximum)
 
 
 def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, vertical_profile=None):
@@ -335,7 +399,21 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
             })
             continue
 
-        quality_valid, quality_reason, footprint_area_sqm = gis_model._footprint_quality(geometry and {"geometry": geometry})
+        vertex_count = _footprint_vertex_count(geometry)
+        # A three-vertex roof projection is a mesh tile, not a building
+        # footprint. Never feed it to CityEngine as an exact triangle: the
+        # resulting extrude is a visibly incorrect wedge. Use a stable bbox
+        # fallback when an older frontend sends this malformed recovery.
+        if source == "arcgis_scene_mesh_roof_projection" and vertex_count <= 3:
+            geometry = _footprint_bbox_geometry(geometry)
+            source = "arcgis_scene_mesh_roof_projection_bbox"
+            geometry_approximation = True
+            props["geometryChangeReason"] = "Mesh 仅返回单个屋顶三角面，已改用其外包矩形，避免生成三角楔体。"
+
+        quality_valid, quality_reason, footprint_area_sqm = gis_model._footprint_quality(
+            geometry and {"geometry": geometry},
+            minimum_area_sqm=_minimum_footprint_area(props),
+        )
         if not quality_valid:
             decisions.append({
                 "buildingId": building_id,
@@ -350,10 +428,27 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
 
         vertex_count = _footprint_vertex_count(geometry)
         vertical = vertical_by_id.get(building_id) or vertical_by_id.get(str(props.get("osm_id"))) or {}
-        current_height = _number(vertical.get("height_m"), _number(props.get("height"), 3.0, 3, 300), 3, 300)
-        floor_count = int(_number(vertical.get("floors"), _number(props.get("floors"), 0.0, 0, 80), 0, 80))
-        height_source = str(vertical.get("height_source") or "input_height")
-        height_estimated = bool(vertical.get("estimated", False))
+        vertical_height = _positive_number_or_none(vertical.get("height_m"), 0.0, 300.0)
+        input_height = _positive_number_or_none(props.get("height"), 0.0, 300.0)
+        vertical_floors = _positive_number_or_none(vertical.get("floors"), 0.0, 80.0)
+        input_floors = _positive_number_or_none(props.get("floors"), 0.0, 80.0)
+        if vertical_height is not None:
+            current_height = _number(vertical_height, 3.0, 3, 300)
+            height_source = str(vertical.get("height_source") or props.get("heightSource") or "vertical_profile")
+            height_estimated = bool(vertical.get("estimated", props.get("heightEstimated", False)))
+        elif input_height is not None:
+            current_height = _number(input_height, 3.0, 3, 300)
+            height_source = str(props.get("heightSource") or "input_height")
+            height_estimated = bool(props.get("heightEstimated", False))
+        else:
+            # A valid footprint must remain visible even when its provider
+            # omitted all vertical attributes.
+            current_height = 3.0
+            height_source = "default_display_height"
+            height_estimated = True
+        floor_count = max(1, int(round(vertical_floors if vertical_floors is not None else (
+            input_floors if input_floors is not None else 1
+        ))))
         should_modify = building_id in problem_ids
         target_height = min(current_height, rule_height) if should_modify else current_height
         target_setback = requirements["setback"] if should_modify else 0.0
@@ -452,9 +547,19 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
 def _write_shapefile(buildings, shp_path):
     import geopandas as gpd
     from shapely.geometry import shape
+    # Shapefile field names are limited to ten characters. Detailed provenance
+    # remains in the job manifest; only CGA/CityEngine attributes are exported.
+    allowed_fields = {
+        "id", "name", "ce_height", "ce_floors", "vert_src", "vert_est",
+        "ce_modify", "ce_setback", "ce_color", "geom_src", "geom_aprx",
+        "orig_vtx", "geom_note",
+    }
     rows = []
     for feature in buildings.get("features", []):
-        props = dict(feature.get("properties") or {})
+        props = {
+            key: value for key, value in dict(feature.get("properties") or {}).items()
+            if key in allowed_fields
+        }
         geometry = shape(feature["geometry"])
         if geometry.geom_type not in {"Polygon", "MultiPolygon"} or geometry.is_empty or not geometry.is_valid:
             building_id = props.get("id", "unknown")

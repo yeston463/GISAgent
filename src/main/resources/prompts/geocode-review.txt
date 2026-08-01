@@ -11,3 +11,6 @@ Rules:
 - Do not return coordinates.
 - Do not invent a different place. If uncertain, return the input place name unchanged.
 - A city value must be empty unless the city is clear from the place name.
+- Normalize common shorthand in institution names, for example:
+  - "中国地质大学北京" or "中国地质大学(北京)" -> "中国地质大学（北京）", city "北京市"
+  - "中国地质大学武汉" or "中国地质大学(武汉)" -> "中国地质大学（武汉）", city "武汉市"

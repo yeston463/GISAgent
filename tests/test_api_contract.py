@@ -60,6 +60,25 @@ def test_fetch_buildings_requires_aoi_or_coords_422(client):
     assert resp.status_code == 422
 
 
+def test_spatial_execute_rejects_unknown_operation(client):
+    resp = client.post("/analysis/execute", json={"operation": "run_python", "params": {}})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "Error"
+    assert "urban_metrics" in body["allowed_operations"]
+
+
+def test_spatial_execute_dispatches_whitelisted_operation(client, monkeypatch):
+    expected = {"status": "Success", "analysis_type": "skyline", "commands": []}
+    monkeypatch.setattr("gis.router.service.calculate_skyline", lambda payload: expected)
+    resp = client.post("/analysis/execute", json={
+        "operation": "skyline",
+        "params": {"buildings": {"type": "FeatureCollection", "features": []}},
+    })
+    assert resp.status_code == 200
+    assert resp.json() == expected
+
+
 # --- Task G: route-level E2E with mocked GIS backends ------------------------
 def test_fetch_buildings_with_aoi_e2e(client, monkeypatch):
     fake = {

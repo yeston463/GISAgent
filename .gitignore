@@ -49,3 +49,5 @@ python-gis-service.log.*
 /cityengine-home/
 /cityengine-project/
 /cityengine-workspace/
+/geoscene-upload-temp/
+/work-logs/

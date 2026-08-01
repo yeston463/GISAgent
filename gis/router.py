@@ -88,6 +88,11 @@ class AnalyzeAreaRequest(_AoiOrCoordsRequest):
     pass
 
 
+class SpatialExecuteRequest(_BaseRequest):
+    operation: str
+    params: Optional[dict] = None
+
+
 app = FastAPI(title="Esri Cup Professional GIS Engine")
 
 
@@ -261,6 +266,16 @@ async def execute_buffer(payload: BufferRequest):
     except Exception as exc:
         print(f"buffer failed: {traceback.format_exc()}")
         return {"status": "Error", "stage": "buffer", "message": str(exc)}
+
+
+@app.post("/analysis/execute")
+async def execute_spatial_plan(payload: SpatialExecuteRequest):
+    """Run a declarative, whitelist-only spatial analysis plan."""
+    try:
+        return service.execute_spatial_plan(payload.model_dump())
+    except Exception as exc:
+        print(f"spatial plan failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
 
 
 @app.post("/analysis/fetch_buildings")
