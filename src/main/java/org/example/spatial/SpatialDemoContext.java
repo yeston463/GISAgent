@@ -29,14 +29,14 @@ public class SpatialDemoContext {
                 "type", "FeatureCollection",
                 "features", List.of(
                         elevationSample("dem-1", 121.47015, 31.23015, 6.8),
-                        elevationSample("dem-2", 121.47065, 31.23015, 6.2),
-                        elevationSample("dem-3", 121.47105, 31.23015, 5.7),
+                        elevationSample("dem-2", 121.47055, 31.23015, 6.2),
+                        elevationSample("dem-3", 121.47095, 31.23015, 5.7),
                         elevationSample("dem-4", 121.47015, 31.23055, 6.4),
-                        elevationSample("dem-5", 121.47065, 31.23055, 4.9),
-                        elevationSample("dem-6", 121.47105, 31.23055, 5.5),
-                        elevationSample("dem-7", 121.47015, 31.23090, 6.1),
-                        elevationSample("dem-8", 121.47065, 31.23090, 5.3),
-                        elevationSample("dem-9", 121.47105, 31.23090, 5.8)
+                        elevationSample("dem-5", 121.47055, 31.23055, 4.9),
+                        elevationSample("dem-6", 121.47095, 31.23055, 5.5),
+                        elevationSample("dem-7", 121.47015, 31.23095, 6.1),
+                        elevationSample("dem-8", 121.47055, 31.23095, 5.3),
+                        elevationSample("dem-9", 121.47095, 31.23095, 5.8)
                 )
         ));
         payload.put("rainfall_scenario", Map.of(

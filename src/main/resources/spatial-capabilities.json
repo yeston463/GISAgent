@@ -1,5 +1,5 @@
 {
-  "version": "1.2",
+  "version": "1.3",
   "capabilities": [
     {
       "id": "urban_metrics",
@@ -50,6 +50,22 @@
       "tool": "sunlightAnalysis",
       "outputs": ["vector", "chart", "metric"],
       "rendererKinds": ["vector", "chart", "metric"]
+    },
+    {
+      "id": "site_selection",
+      "aliases": ["选址", "站点选址", "设施选址", "适宜性评价", "site selection", "suitability"],
+      "enabled": true,
+      "requires": ["candidates"],
+      "optional": ["facilities", "constraints", "weights"],
+      "operations": ["candidate_ranking", "facility_proximity", "constraint_avoidance", "weighted_overlay"],
+      "tool": "siteSelection",
+      "outputs": ["vector", "metric", "table"],
+      "rendererKinds": ["vector", "metric", "table"],
+      "knowledge": {
+        "purpose": "按候选地块与设施、约束要素的直线距离进行透明的多准则选址筛查和排序。",
+        "qualityGates": ["候选地块必须为点或面 GeoJSON。", "设施与约束应来自可追溯的权威数据源。", "权重必须由业务目标明确给定或确认。"],
+        "limitations": "结果仅为直线距离筛查，不包含路网时间、产权、法定用地条件、地形、容量或审批约束；不得作为最终选址结论。"
+      }
     },
     {
       "id": "flood_analysis",

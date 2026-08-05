@@ -69,6 +69,17 @@ class FloodRequest(_BaseRequest):
     returnPeriodYears: int = Field(default=20, ge=1, le=1000)
 
 
+class SiteSelectionRequest(_BaseRequest):
+    """Multi-criteria site-screening inputs, supplied as GeoJSON features."""
+    candidates: Optional[Any] = None
+    facilities: Optional[Any] = None
+    constraints: Optional[Any] = None
+    aoi: Optional[dict] = None
+    weights: Optional[dict] = None
+    facilityInfluenceM: float = Field(default=1500, gt=0, le=50000)
+    exclusionDistanceM: float = Field(default=200, ge=0, le=50000)
+
+
 class BufferRequest(_BaseRequest):
     lon: float = Field(..., ge=-180, le=180)
     lat: float = Field(..., ge=-90, le=90)
@@ -99,6 +110,16 @@ class AnalyzeAreaRequest(_AoiOrCoordsRequest):
 class SpatialExecuteRequest(_BaseRequest):
     operation: str
     params: Optional[dict] = None
+
+
+class SpatialFileInspectRequest(_BaseRequest):
+    path: str
+    extension: str
+    sourceCrs: str = ""
+
+
+class PublicDemRequest(_BaseRequest):
+    aoi: dict
 
 
 app = FastAPI(title="Esri Cup Professional GIS Engine")
@@ -275,6 +296,20 @@ async def execute_flood_analysis(payload: FloodRequest):
         return {"status": "Error", "stage": "flood_analysis", "analysis_type": "flood", "message": str(exc)}
 
 
+@app.post("/analysis/site-selection")
+async def execute_site_selection(payload: SiteSelectionRequest):
+    try:
+        return service.calculate_site_selection(payload.model_dump())
+    except Exception as exc:
+        print(f"site selection failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "site_selection", "analysis_type": "site_selection", "message": str(exc)}
+
+
+@app.post("/analysis/dem/public-raster")
+async def fetch_public_dem(payload: PublicDemRequest):
+    return service.fetch_public_dem_raster(payload.aoi)
+
+
 @app.post("/analysis/buffer")
 async def execute_buffer(payload: BufferRequest):
     try:
@@ -293,6 +328,18 @@ async def execute_spatial_plan(payload: SpatialExecuteRequest):
     except Exception as exc:
         print(f"spatial plan failed: {traceback.format_exc()}")
         return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
+
+
+@app.post("/analysis/data/inspect")
+async def inspect_spatial_file(payload: SpatialFileInspectRequest):
+    """Inspect a managed upload and return normalized metadata/data only."""
+    try:
+        return service.inspect_spatial_file(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"spatial file inspection failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Spatial file inspection failed") from exc
 
 
 @app.post("/analysis/fetch_buildings")

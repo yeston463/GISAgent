@@ -39,7 +39,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .codex/
-.codex-temp-*/
+ .codex-temp-*/
 .agents/
 /share/*.zip
 geoscene-services.log
@@ -51,3 +51,28 @@ python-gis-service.log.*
 /cityengine-workspace/
 /geoscene-upload-temp/
 /work-logs/
+
+### Frontend build artifacts (do not commit; serve via Vite dev or build on deploy) ###
+/src/main/resources/static/
+/frontend/test-results/
+/frontend/dist/
+/frontend/playwright-report/
+/frontend/.vite/
+/frontend/vite-dev.log
+/frontend/vite-dev.err.log
+/frontend/build-frontend.err.log
+/frontend/build-frontend.out.log
+
+### Root workspace junk (generated logs, temp dirs, IDE leftovers) ###
+*.log
+*.err.log
+*.out.log
+META-INF/
+powershell/
+work/
+logs/
+geoscene-services.log
+geoscene-services.log.*
+.pytest_cache/
+.ozone-default-generated.xml
+geoscene-upload-temp/

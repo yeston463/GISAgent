@@ -3,6 +3,7 @@ package org.example.controller;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.example.agent.AgentLoopService;
+import org.example.agent.AgentTaskService;
 import org.example.agent.DynamicCodeGenerator;
 import org.example.agent.DynamicExecutionGuard;
 import org.example.agent.CommandProtocol;
@@ -14,6 +15,7 @@ import org.example.spatial.SpatialPlanService;
 import org.example.spatial.KnowledgeGraphRevisionService;
 import org.example.spatial.KnowledgeGraphAdminGuard;
 import org.example.spatial.AnalysisPlanCompiler;
+import org.example.spatial.SpatialRoutingTelemetry;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
 import jakarta.servlet.http.HttpServletRequest;
@@ -49,6 +51,9 @@ public class AgentController {
     private AgentLoopService agentLoopService;
 
     @Autowired
+    private AgentTaskService agentTaskService;
+
+    @Autowired
     private PgVectorMemoryStore memoryStore;
 
     @Autowired
@@ -78,7 +83,9 @@ public class AgentController {
     @Autowired
     private AnalysisPlanCompiler analysisPlanCompiler;
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
+    @Autowired
+    private SpatialRoutingTelemetry spatialRoutingTelemetry;
+
     @PostMapping("/chat/agentic")
     public ResponseEntity<Map<String, Object>> agenticChat(@RequestBody ChatRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
@@ -87,7 +94,39 @@ public class AgentController {
         return ResponseEntity.ok(buildResponse(result, memoryId));
     }
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
+    @PostMapping("/chat/jobs")
+    public ResponseEntity<Map<String, Object>> submitAgentJob(@RequestBody ChatRequest request) {
+        String memoryId = resolveMemoryId(request.memoryId());
+        try {
+            String jobId = agentTaskService.submit(request.message(), memoryId,
+                    () -> agentLoopService.execute(request.message(), userId(memoryId), memoryId));
+            return ResponseEntity.accepted().body(Map.of("jobId", jobId, "status", "queued", "memoryId", memoryId));
+        } catch (AgentTaskService.CapacityExceededException error) {
+            return ResponseEntity.status(503).body(Map.of("status", "Unavailable", "code", "agent_job_capacity_exhausted"));
+        }
+    }
+
+    @GetMapping("/chat/jobs/{jobId}")
+    public ResponseEntity<Map<String, Object>> agentJobStatus(@PathVariable String jobId) {
+        Map<String, Object> task = new LinkedHashMap<>(agentTaskService.status(jobId));
+        if ("NotFound".equals(task.get("status"))) return ResponseEntity.notFound().build();
+        AgentLoopService.AgentResult result = agentTaskService.result(jobId);
+        if (result != null) task.put("result", buildResponse(result, String.valueOf(task.get("memoryId"))));
+        return ResponseEntity.ok(task);
+    }
+
+    @DeleteMapping("/chat/jobs/{jobId}")
+    public ResponseEntity<Map<String, Object>> cancelAgentJob(@PathVariable String jobId) {
+        Map<String, Object> task = agentTaskService.cancel(jobId);
+        return "NotFound".equals(task.get("status")) ? ResponseEntity.notFound().build() : ResponseEntity.ok(task);
+    }
+
+    @PostMapping("/chat/jobs/{jobId}/retry")
+    public ResponseEntity<Map<String, Object>> retryAgentJob(@PathVariable String jobId) {
+        Map<String, Object> task = agentTaskService.retry(jobId);
+        return "NotFound".equals(task.get("status")) ? ResponseEntity.notFound().build() : ResponseEntity.accepted().body(task);
+    }
+
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter agenticChatStream(@RequestBody ChatRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
@@ -113,7 +152,6 @@ public class AgentController {
         return emitter;
     }
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/preference")
     public Map<String, Object> savePreference(@RequestBody PreferenceRequest request) {
         String userId = request.userId != null ? request.userId : "default";
@@ -121,14 +159,12 @@ public class AgentController {
         return Map.of("status", "ok");
     }
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @GetMapping("/history")
     public Map<String, Object> getHistory(@RequestParam(defaultValue = "default") String userId) {
         List<Map<String, Object>> history = memoryStore.getRecentAnalyses(userId, 20);
         return Map.of("history", history);
     }
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/execute")
     public ResponseEntity<Map<String, Object>> executeDynamic(@RequestBody ExecuteRequest request, HttpServletRequest httpRequest) {
         if (!executionGuard.isEnabled()) {
@@ -236,6 +272,11 @@ public class AgentController {
         return Map.of("runs", analysisProvenanceService.recent(Math.max(1, Math.min(limit, 200))));
     }
 
+    @GetMapping("/routing/metrics")
+    public Map<String, Object> routingMetrics() {
+        return spatialRoutingTelemetry.snapshot();
+    }
+
     @PostMapping("/plans/validate")
     public ResponseEntity<Map<String, Object>> validatePlan(@RequestBody PlanRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
@@ -275,7 +316,6 @@ public class AgentController {
         return ResponseEntity.ok(Map.of("status", removed ? "Success" : "NotFound", "tool", name));
     }
 
-    @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/tools/{name}/rollback")
     public ResponseEntity<Map<String, Object>> rollbackDynamicTool(
             @PathVariable String name, @RequestParam long version, HttpServletRequest httpRequest) {

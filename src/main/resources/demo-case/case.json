@@ -1,0 +1,33 @@
+{
+  "caseId": "urban-renewal-demo-01",
+  "name": "上海某城中村更新规划演示地块",
+  "city": "上海市",
+  "landUse": "R2",
+  "landUseName": "二类居住用地",
+  "description": "内嵌于程序资源的离线演示案例，用于在不依赖 OSM 等在线地图服务时，验证前端加载与指标分析流程。",
+  "aoi": {
+    "type": "Feature",
+    "properties": {"name": "演示地块范围"},
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [[[121.4720,31.2300],[121.4760,31.2300],[121.4760,31.2330],[121.4720,31.2330],[121.4720,31.2300]]]
+    }
+  },
+  "buildings": {
+    "type": "FeatureCollection",
+    "features": [
+      {"type":"Feature","properties":{"id":"B01","name":"1号住宅楼","building:levels":22,"height":66,"use":"residential"},"geometry":{"type":"Polygon","coordinates":[[[121.47235,31.23035],[121.47305,31.23035],[121.47305,31.23085],[121.47235,31.23085],[121.47235,31.23035]]]}},
+      {"type":"Feature","properties":{"id":"B02","name":"2号住宅楼","building:levels":20,"height":60,"use":"residential"},"geometry":{"type":"Polygon","coordinates":[[[121.47335,31.23035],[121.47405,31.23035],[121.47405,31.23085],[121.47335,31.23085],[121.47335,31.23035]]]}},
+      {"type":"Feature","properties":{"id":"B03","name":"3号住宅楼","building:levels":18,"height":54,"use":"residential"},"geometry":{"type":"Polygon","coordinates":[[[121.47435,31.23035],[121.47505,31.23035],[121.47505,31.23085],[121.47435,31.23085],[121.47435,31.23035]]]}},
+      {"type":"Feature","properties":{"id":"B04","name":"4号住宅楼","building:levels":16,"height":48,"use":"residential"},"geometry":{"type":"Polygon","coordinates":[[[121.47235,31.23125],[121.47305,31.23125],[121.47305,31.23175],[121.47235,31.23175],[121.47235,31.23125]]]}},
+      {"type":"Feature","properties":{"id":"B05","name":"5号住宅楼","building:levels":15,"height":45,"use":"residential"},"geometry":{"type":"Polygon","coordinates":[[[121.47335,31.23125],[121.47405,31.23125],[121.47405,31.23175],[121.47335,31.23175],[121.47335,31.23125]]]}},
+      {"type":"Feature","properties":{"id":"B06","name":"社区服务用房","building:levels":4,"height":16,"use":"community"},"geometry":{"type":"Polygon","coordinates":[[[121.47435,31.23125],[121.47530,31.23125],[121.47530,31.23185],[121.47435,31.23185],[121.47435,31.23125]]]}}
+    ]
+  },
+  "greenSpaces": {
+    "type": "FeatureCollection",
+    "features": [
+      {"type":"Feature","properties":{"id":"G01","name":"现状保留绿地"},"geometry":{"type":"Polygon","coordinates":[[[121.47230,31.23215],[121.47335,31.23215],[121.47335,31.23270],[121.47230,31.23270],[121.47230,31.23215]]]}}
+    ]
+  }
+}

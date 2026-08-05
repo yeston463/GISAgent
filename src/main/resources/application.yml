@@ -27,6 +27,9 @@ ai:
     model-name: qwen3.7-flash-2026-07-15
     # OpenAI-compatible DashScope endpoint; override when deploying in another region.
     base-url: ${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+  deepseek:
+    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+    router-model-name: ${DEEPSEEK_ROUTER_MODEL:deepseek-v4-flash}
 spatial:
   atlas-mcp:
     # Optional Atlas GIS MCP Streamable-HTTP endpoint. Empty means local source guidance only.
@@ -52,6 +55,11 @@ server:
 gis:
   python-service-url: ${GIS_PYTHON_SERVICE_URL:http://127.0.0.1:8000/analysis}
   amap-key: ${AMAP_KEY:}
+
+# Backend no longer hosts the built frontend. Hitting the backend root redirects
+# to the Vite dev server (override FRONTEND_URL when deploying elsewhere).
+frontend:
+  url: ${FRONTEND_URL:http://127.0.0.1:5173}
 
 # RAG 知识库配置
 rag:

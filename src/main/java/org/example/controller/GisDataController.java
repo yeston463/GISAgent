@@ -36,11 +36,11 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/gis")
 public class GisDataController {
-    private static final Set<String> VECTOR_EXTENSIONS = Set.of("geojson", "json");
+    private static final Set<String> VECTOR_EXTENSIONS = Set.of("geojson", "json", "gpkg", "zip", "shp");
     private static final Set<String> RASTER_EXTENSIONS = Set.of("asc", "tif", "tiff");
     private static final Set<String> CONTEXT_DATASETS = Set.of(
             "aoi", "buildings", "dem", "drainage_network", "river_network");
-    private static final long MAX_VECTOR_BYTES = 20L * 1024 * 1024;
+    private static final long MAX_VECTOR_BYTES = 100L * 1024 * 1024;
     private static final long MAX_RASTER_BYTES = 100L * 1024 * 1024;
 
     @Autowired
@@ -56,6 +56,9 @@ public class GisDataController {
 
     @Value("${spatial.demo.enabled:false}")
     private boolean spatialDemoEnabled;
+
+    @Value("${gis.python-service-url:http://127.0.0.1:8000/analysis}")
+    private String gisPythonServiceUrl;
 
     @GetMapping("/context")
     public Map<String, Object> contextStatus(@RequestParam(defaultValue = "default") String memoryId) {
@@ -139,11 +142,7 @@ public class GisDataController {
             return ResponseEntity.ok(response);
         }
 
-        String result = restTemplate.postForObject(
-                "http://127.0.0.1:8000/analysis/urban_metrics",
-                body,
-                String.class
-        );
+        String result = restTemplate.postForObject(pythonUrl("/urban_metrics"), body, String.class);
         Map<String, Object> response = JSON.parseObject(result);
         response.put("contextSaved", true);
         response.put("contextVersion", saved.contextVersion());
@@ -168,14 +167,14 @@ public class GisDataController {
         String fileName = file.getOriginalFilename() == null ? "spatial-data" : file.getOriginalFilename();
         String extension = extension(fileName);
         if (VECTOR_EXTENSIONS.contains(extension)) {
-            return storeVectorFile(file, normalizedDataset, memoryId, contextVersion, fileName, sourceCrs);
+            return storeVectorFile(file, normalizedDataset, memoryId, contextVersion, fileName, extension, sourceCrs);
         }
         if (RASTER_EXTENSIONS.contains(extension)) {
             return storeRasterFile(file, normalizedDataset, memoryId, contextVersion, fileName, extension, sourceCrs);
         }
         return ResponseEntity.badRequest().body(Map.of(
                 "status", "InvalidData", "code", "unsupported_spatial_format",
-                "supported", List.of(".geojson", ".json", ".asc", ".tif", ".tiff")));
+                "supported", List.of(".geojson", ".json", ".zip (Shapefile)", ".shp", ".gpkg", ".asc", ".tif", ".tiff")));
     }
 
     @PostMapping("/ground-dem")
@@ -196,6 +195,7 @@ public class GisDataController {
             Map<String, Object> elevationQuality = elevationQuality(prepared.geoJson());
             metadata.put("elevationQuality", elevationQuality);
             Map<String, Object> payload = contextPayload(memoryId, "dem", prepared.geoJson(), metadata);
+            if (body.get("aoi") != null) payload.put("aoi", body.get("aoi"));
             GisContextService.SaveResult saved = contextService.saveGeoJson(
                     memoryId, JSON.toJSONString(payload), contextVersion);
             if (saved.conflict()) return contextConflict(saved.contextVersion());
@@ -212,11 +212,50 @@ public class GisDataController {
         }
     }
 
+    @PostMapping("/public-dem")
+    public ResponseEntity<Map<String, Object>> fetchPublicDem(@RequestBody Map<String, Object> body) {
+        String memoryId = String.valueOf(body.getOrDefault("memoryId", "default"));
+        long contextVersion = parseVersion(body.get("contextVersion"));
+        if (body.get("aoi") == null) return ResponseEntity.badRequest().body(Map.of(
+                "status", "InvalidData", "code", "aoi_required", "message", "An AOI is required for public DEM retrieval."));
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> fetched = restTemplate.postForObject(
+                    gisPythonServiceUrl.replaceAll("/+$", "") + "/dem/public-raster",
+                    Map.of("aoi", body.get("aoi")), Map.class);
+            if (fetched == null || !"Success".equals(String.valueOf(fetched.get("status")))) {
+                return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
+                        "status", "Unavailable", "code", "public_dem_unavailable",
+                        "message", fetched == null ? "Public DEM service returned no response." : String.valueOf(fetched.getOrDefault("message", "Public DEM retrieval failed."))));
+            }
+            Map<String, Object> metadata = new LinkedHashMap<>(fetched);
+            String path = String.valueOf(metadata.remove("path"));
+            metadata.put("sourceFormat", "GeoTIFF");
+            metadata.put("metadataStatus", "ready");
+            Map<String, Object> raster = new LinkedHashMap<>();
+            raster.put("kind", "raster"); raster.put("path", path); raster.put("metadata", metadata);
+            Map<String, Object> payload = contextPayload(memoryId, "dem", raster, metadata);
+            payload.put("aoi", body.get("aoi"));
+            GisContextService.SaveResult saved = contextService.saveGeoJson(memoryId, JSON.toJSONString(payload), contextVersion);
+            if (saved.conflict()) return contextConflict(saved.contextVersion());
+            Map<String, Object> response = describeContext(memoryId, Map.of());
+            response.put("status", "Success"); response.put("dataset", "dem"); response.put("dataType", "raster");
+            response.put("metadata", metadata);
+            return ResponseEntity.ok(response);
+        } catch (Exception error) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
+                    "status", "Unavailable", "code", "public_dem_unavailable", "message", safeMessage(error)));
+        }
+    }
+
     private ResponseEntity<Map<String, Object>> storeVectorFile(
-            MultipartFile file, String dataset, String memoryId, long contextVersion, String fileName, String sourceCrs) {
+            MultipartFile file, String dataset, String memoryId, long contextVersion, String fileName, String extension, String sourceCrs) {
         if (file.getSize() > MAX_VECTOR_BYTES) {
             return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(Map.of(
                     "status", "InvalidData", "code", "vector_file_too_large", "maxBytes", MAX_VECTOR_BYTES));
+        }
+        if (!"geojson".equals(extension) && !"json".equals(extension)) {
+            return storeManagedVectorFile(file, dataset, memoryId, contextVersion, fileName, extension, sourceCrs);
         }
         try {
             JSONObject geoJson = JSON.parseObject(new String(file.getBytes(), StandardCharsets.UTF_8));
@@ -225,7 +264,10 @@ public class GisDataController {
                         "status", "InvalidData", "code", "invalid_geojson", "message", "The vector file must contain a GeoJSON object."));
             }
             SpatialDataPreprocessor.VectorData prepared = spatialDataPreprocessor.prepareVector(geoJson, sourceCrs);
-            Map<String, Object> payload = contextPayload(memoryId, dataset, prepared.geoJson(), prepared.metadata());
+            Map<String, Object> metadata = new LinkedHashMap<>(prepared.metadata());
+            metadata.put("sourceFormat", extension);
+            metadata.put("quality", dataQuality(metadata));
+            Map<String, Object> payload = contextPayload(memoryId, dataset, prepared.geoJson(), metadata);
             GisContextService.SaveResult saved = contextService.saveGeoJson(
                     memoryId, JSON.toJSONString(payload), contextVersion);
             if (saved.conflict()) return contextConflict(saved.contextVersion());
@@ -235,9 +277,51 @@ public class GisDataController {
             response.put("dataType", "vector");
             response.put("fileName", fileName);
             response.put("vectorData", prepared.geoJson());
-            response.put("metadata", prepared.metadata());
+            response.put("metadata", metadata);
+            response.put("quality", metadata.get("quality"));
             return ResponseEntity.ok(response);
         } catch (Exception error) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "InvalidData", "code", "vector_read_failed", "message", safeMessage(error)));
+        }
+    }
+
+    private ResponseEntity<Map<String, Object>> storeManagedVectorFile(
+            MultipartFile file, String dataset, String memoryId, long contextVersion, String fileName, String extension,
+            String sourceCrs) {
+        Path target = rasterRoot().resolve(safeSession(memoryId))
+                .resolve(UUID.randomUUID() + "." + extension).normalize();
+        try {
+            Files.createDirectories(target.getParent());
+            try (var input = file.getInputStream()) {
+                Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            Map<String, Object> inspected = inspectManagedSpatialFile(target, extension, sourceCrs);
+            JSONObject geoJson = JSON.parseObject(JSON.toJSONString(inspected.get("geoJson")));
+            if (geoJson == null || !isGeoJson(geoJson)) throw new IllegalArgumentException("Vector reader returned invalid GeoJSON");
+            Map<String, Object> metadata = new LinkedHashMap<>(inspected);
+            metadata.remove("geoJson");
+            metadata.put("fileName", fileName);
+            metadata.put("sizeBytes", file.getSize());
+            metadata.put("storedPath", target.toAbsolutePath().toString());
+            metadata.put("quality", dataQuality(metadata));
+            GisContextService.SaveResult saved = contextService.saveGeoJson(
+                    memoryId, JSON.toJSONString(contextPayload(memoryId, dataset, geoJson, metadata)), contextVersion);
+            if (saved.conflict()) {
+                Files.deleteIfExists(target);
+                return contextConflict(saved.contextVersion());
+            }
+            Map<String, Object> response = describeContext(memoryId, Map.of());
+            response.put("status", "Success");
+            response.put("dataset", dataset);
+            response.put("dataType", "vector");
+            response.put("fileName", fileName);
+            response.put("vectorData", geoJson);
+            response.put("metadata", metadata);
+            response.put("quality", metadata.get("quality"));
+            return ResponseEntity.ok(response);
+        } catch (Exception error) {
+            try { Files.deleteIfExists(target); } catch (IOException ignored) { }
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "InvalidData", "code", "vector_read_failed", "message", safeMessage(error)));
         }
@@ -267,7 +351,16 @@ public class GisDataController {
             raster.put("path", target.toAbsolutePath().toString());
             raster.put("name", fileName);
             raster.put("sizeBytes", file.getSize());
-            Map<String, Object> metadata = spatialDataPreprocessor.inspectRaster(target, extension, sourceCrs, file.getSize());
+            Map<String, Object> metadata;
+            try {
+                metadata = inspectManagedSpatialFile(target, extension, sourceCrs);
+            } catch (RuntimeException unavailable) {
+                metadata = spatialDataPreprocessor.inspectRaster(target, extension, sourceCrs, file.getSize());
+                metadata.put("inspectionWarning", "Python raster inspector unavailable: " + safeMessage(unavailable));
+            }
+            metadata.put("fileName", fileName);
+            metadata.put("storedPath", target.toAbsolutePath().toString());
+            metadata.put("quality", dataQuality(metadata));
             raster.put("metadata", metadata);
             GisContextService.SaveResult saved = contextService.saveGeoJson(
                     memoryId, JSON.toJSONString(contextPayload(memoryId, dataset, raster, metadata)), contextVersion);
@@ -283,12 +376,44 @@ public class GisDataController {
             response.put("format", extension);
             response.put("sizeBytes", file.getSize());
             response.put("metadata", metadata);
+            response.put("quality", metadata.get("quality"));
             return ResponseEntity.ok(response);
         } catch (IOException error) {
             try { Files.deleteIfExists(target); } catch (IOException ignored) { }
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
                     "status", "Error", "code", "raster_store_failed", "message", safeMessage(error)));
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> inspectManagedSpatialFile(Path target, String extension, String sourceCrs) {
+        String endpoint = pythonUrl("/data/inspect");
+        Map<String, Object> result = restTemplate.postForObject(endpoint,
+                Map.of("path", target.toAbsolutePath().toString(), "extension", extension, "sourceCrs", sourceCrs == null ? "" : sourceCrs),
+                Map.class);
+        if (result == null || result.isEmpty()) throw new IllegalArgumentException("Spatial file inspector returned no metadata");
+        return new LinkedHashMap<>(result);
+    }
+
+    private String pythonUrl(String path) {
+        return gisPythonServiceUrl.replaceAll("/+$", "") + path;
+    }
+
+    private Map<String, Object> dataQuality(Map<String, Object> metadata) {
+        Map<String, Object> quality = new LinkedHashMap<>();
+        List<String> warnings = new ArrayList<>();
+        quality.put("metadataStatus", metadata.getOrDefault("metadataStatus", "unknown"));
+        quality.put("normalizedCrs", metadata.getOrDefault("normalizedCrs", "unknown"));
+        if (!"EPSG:4326".equals(metadata.get("normalizedCrs"))) warnings.add("数据尚未标准化为 EPSG:4326。");
+        Object featureCount = metadata.get("featureCount");
+        if (featureCount instanceof Number count && count.intValue() == 0) warnings.add("数据不包含可用要素。");
+        Object width = metadata.get("width"); Object height = metadata.get("height");
+        if (width instanceof Number columns && height instanceof Number rows && (columns.intValue() < 3 || rows.intValue() < 3)) {
+            warnings.add("栅格尺寸小于 3×3，不能用于水文洪水筛查。");
+        }
+        quality.put("warnings", warnings);
+        quality.put("grade", warnings.isEmpty() && "ready".equals(metadata.get("metadataStatus")) ? "ready" : "review");
+        return quality;
     }
 
     private ResponseEntity<Map<String, Object>> contextConflict(long version) {

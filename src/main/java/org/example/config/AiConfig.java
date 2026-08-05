@@ -14,6 +14,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 @Configuration
 public class AiConfig {
@@ -27,6 +28,15 @@ public class AiConfig {
     @Value("${ai.qwen.base-url:https://dashscope.aliyuncs.com/compatible-mode/v1}")
     private String chatBaseUrl;
 
+    @Value("${DEEPSEEK_API_KEY:}")
+    private String deepSeekApiKey;
+
+    @Value("${ai.deepseek.router-model-name:deepseek-v4-flash}")
+    private String routerModelName;
+
+    @Value("${ai.deepseek.base-url:https://api.deepseek.com}")
+    private String routerBaseUrl;
+
     @Value("${rag.min-score:0.6}")
     private double minScore;
 
@@ -36,12 +46,28 @@ public class AiConfig {
     @Bean
     @Primary
     public ChatLanguageModel chatLanguageModel() {
-        // Current Qwen models expose function calling through the OpenAI-compatible
-        // DashScope endpoint. This is required by the GIS route selector.
+        if (deepSeekApiKey != null && !deepSeekApiKey.isBlank()) {
+            return OpenAiChatModel.builder()
+                    .apiKey(deepSeekApiKey)
+                    .baseUrl(routerBaseUrl)
+                    .modelName(routerModelName)
+                    .temperature(0.2)
+                    .build();
+        }
         return OpenAiChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(chatModelName)
                 .baseUrl(chatBaseUrl)
+                .temperature(0.0)
+                .build();
+    }
+
+    @Bean("spatialRouterModel")
+    public ChatLanguageModel spatialRouterModel() {
+        return OpenAiChatModel.builder()
+                .apiKey(apiKey)
+                .baseUrl(chatBaseUrl)
+                .modelName(chatModelName)
                 .temperature(0.0)
                 .build();
     }

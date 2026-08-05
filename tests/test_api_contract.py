@@ -106,6 +106,56 @@ def test_flood_route_returns_risk_layer(client):
     assert body["commands"][0]["params"]["layerId"] == "flood-risk-screening"
 
 
+def test_site_selection_ranks_candidates_and_excludes_near_constraint(client):
+    candidates = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"id": "near-facility"}, "geometry": {"type": "Point", "coordinates": [121.4705, 31.2305]}},
+        {"type": "Feature", "properties": {"id": "near-constraint"}, "geometry": {"type": "Point", "coordinates": [121.4800, 31.2305]}},
+    ]}
+    facilities = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [121.4706, 31.2305]}}
+    ]}
+    constraints = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [121.4801, 31.2305]}}
+    ]}
+    resp = client.post("/analysis/site-selection", json={
+        "candidates": candidates, "facilities": facilities, "constraints": constraints,
+        "facilityInfluenceM": 1000, "exclusionDistanceM": 100,
+    })
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["status"] == "Success"
+    assert body["eligible_count"] == 1
+    assert body["best_site"]["properties"]["id"] == "near-facility"
+    assert body["ranked_sites"]["features"][1]["properties"]["screeningStatus"] == "excluded"
+
+
+def test_site_selection_rejects_mixed_point_and_polygon_candidates(client):
+    candidates = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [121.47, 31.23]}},
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[121.471, 31.23], [121.472, 31.23], [121.472, 31.231], [121.471, 31.23]]]}},
+    ]}
+    resp = client.post("/analysis/site-selection", json={"candidates": candidates})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "InvalidData"
+
+
+def test_spatial_file_inspection_route_returns_ready_metadata(client, tmp_path, monkeypatch):
+    root = tmp_path / "gis-inputs"
+    path = root / "session" / "terrain.asc"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "ncols 3\nnrows 3\nxllcorner 121\nyllcorner 31\ncellsize 0.001\nNODATA_value -9999\n1 2 3\n4 5 6\n7 8 9\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIS_RASTER_ROOT", str(root))
+
+    resp = client.post("/analysis/data/inspect", json={"path": str(path), "extension": "asc"})
+
+    assert resp.status_code == 200
+    assert resp.json()["metadataStatus"] == "ready"
+    assert resp.json()["width"] == 3
+
+
 # --- Task G: route-level E2E with mocked GIS backends ------------------------
 def test_fetch_buildings_with_aoi_e2e(client, monkeypatch):
     fake = {

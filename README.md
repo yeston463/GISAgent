@@ -10,12 +10,13 @@
 |------|------|------|------|
 | **Java 后端** | Spring Boot | `:8080` | 主网关 / 智能体编排 / 动态代码执行安全层 |
 | **Python GIS 服务** | FastAPI | `:8000` | 空间分析（指标/天际线/日照/缓冲/取楼），Overpass 取楼 |
-| **Vue + ArcGIS 前端** | Vue 3 + Vite + @arcgis/core | `:5173`(dev) / 由 Java 托管(prod) | 交互式地图与成果展示 |
+| **Vue + ArcGIS 前端** | Vue 3 + Vite + @arcgis/core | `:5173`(dev) | 交互式地图与成果展示（独立 Vite 服务） |
 
 ```
-浏览器 ──▶ Java(:8080, 静态前端) ──▶ Python(:8000 /analysis/*)
-                │
-                └─▶ CityEngine / GeoScene（三维成果发布）
+浏览器 ──▶ Vite(:5173) ──┬─▶ /api/* 代理到 Java(:8080) ──▶ Python(:8000 /analysis/*)
+                        └─▶ /analysis/* 代理到 Python(:8080)
+                                │
+                                └─▶ CityEngine / GeoScene（三维成果发布）
 ```
 
 ## 快速开始
@@ -61,29 +62,31 @@
 | `GIS_AGENT_EXEC_TOKEN` | token 模式下的执行令牌（不复用 QWEN-APIKEY） | 空 |
 | `DYNAMIC_EXECUTION_TIMEOUT_MS` | 单次执行硬超时，超时强制终止 GraalJS | `3000` |
 | `SERVER_ADDRESS` | Java 实际绑定地址，local 鉴权仅允许该/回环地址 | `127.0.0.1` |
+| `FRONTEND_URL` | 后端根路径重定向目标（前端 Vite 地址） | `http://127.0.0.1:5173` |
+
+> 后端不再托管前端构建产物。访问 `http://127.0.0.1:8080/` 会自动重定向到 `FRONTEND_URL`。前端通过 Vite 代理（`/api` → :8080、`/analysis` → :8000）与后端通信。
 | `DYNAMIC_EXECUTION_MAX_*` | 输入/输出字节上限、并发、线程池大小 | 64KB / 4 |
 
 > 动态执行安全层默认**关闭**（`false`），对竞赛本地演示最稳；仅在需要时开启。
 
 ## 前端源码与构建链路（重要）
 
-前端**唯一源码真相源**位于：
+前端**唯一源码真相源**位于仓库根目录：
 
 ```
-share/<快照目录>/frontend-arcgis1/        # Vue 3 + Vite + @arcgis/core
+frontend/        # Vue 3 + Vite + @arcgis/core
 ```
 
-构建产物同步到 Spring Boot 静态目录 `src/main/resources/static/`（由 Java 直接托管）。
-**不要直接手改 `static/`**——它是构建产物。
+构建产物输出到 `frontend/dist/`，但不再同步进 Spring Boot 静态目录——后端不再托管前端，前端始终以独立 Vite 服务运行（生产环境可将 `frontend/dist/` 部署到任意静态托管）。
 
-一键构建并同步：
+一键构建并验证（仅构建，不同步）：
 
 ```bash
-scripts/build-frontend.bat        # Windows
+scripts\build-frontend.bat        # Windows
 bash scripts/build-frontend.sh    # Linux / CI
 ```
 
-脚本会自动定位 `frontend-arcgis1`、执行 `npm run build`，并把 `dist/` 同步进 `static/`。
+脚本会自动执行 `npm run build` 并验证产物存在。
 
 ## 测试
 
@@ -125,8 +128,19 @@ powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
 
 ```
 lc4j-1(1)/
-├── src/main/resources/static/   # 前端构建产物（不要手改）
-├── gis/                         # Python 服务四层拆分
+├── frontend/                    # Vue 3 前端源码真相源（唯一）
+│   ├── src/                      #   App.vue、组件、命令执行器
+│   │   └── components/           #   MapViewer / ChatAgent / AnalysisDashboard / ...
+│   └── vite.config.js            #   /api → :8080、/analysis → :8000 代理
+├── gis/                          # Python 服务四层拆分
+│   ├── router.py                 #   FastAPI 路由 + Pydantic 请求模型
+│   ├── service.py                #   编排：指标/天际线/日照/取楼
+│   ├── adapter.py                #   后端适配：CityEngine/GeoScene/arcpy/geopandas/Overpass
+│   └── model.py                  #   纯几何/JSON/太阳数学（无后端依赖）
+├── src/main/resources/
+│   ├── demo-case/                # 离线演示案例（AOI + 建筑 + 规则）
+│   └── static/                   # [已清空] 不再使用；前端由 Vite 托管
+├── main.py                       # Python GIS 服务入口
 │   ├── router.py                #   FastAPI 路由 + Pydantic 请求模型
 │   ├── service.py               #   编排：指标/天际线/日照/取楼
 │   ├── adapter.py               #   后端适配：CityEngine/GeoScene/arcpy/geopandas/Overpass
@@ -142,6 +156,8 @@ lc4j-1(1)/
 
 ## 已知限制 / 后续
 
-- 前端全局事件正逐步收敛到 `src/bus.js`（替代散落的 `window.dispatchEvent(new CustomEvent(...))`）；组件迁移可按 `bus.js` 顶部注释批量替换。
-- Java 侧建议补充 Controller 层 MockMvc 测试覆盖鉴权中间件（需 JDK 环境运行）。
+- **离线演示模式**：`spatial.demo.enabled=true` 时，前端自动加载内置案例（上海某城中村更新规划演示地块，6 栋建筑 + 绿地），分析链路完全不依赖 OSM/网络。后端提供 `/api/gis/offline-case` 接口下发案例数据。
+- **后端不再托管前端**：前端始终以独立 Vite 服务运行（`:5173`），后端根路径重定向到前端。构建脚本仅验证构建产物，不再同步到 `static/`。
+- 前端全局事件正逐步收敛到 `src/bus.js`（替代散落的 `window.dispatchEvent(new CustomEvent(...))`）。
+- 天际线/日照为**城市尺度快速筛查/辅助决策**模型，非高精度物理仿真，界面与报告均标注误差边界与数据来源。
 - 三维发布（CityEngine/GeoScene）依赖本地运行时与凭据，CI 中不跑。

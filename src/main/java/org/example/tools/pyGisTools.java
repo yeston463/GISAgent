@@ -240,6 +240,30 @@ public class pyGisTools {
         return postAdvancedAnalysis("/flood", payload);
     }
 
+    @Tool("siteSelection")
+    public Map<String, Object> siteSelection(
+            @P("candidatesGeoJson") String candidatesGeoJson,
+            @P("facilitiesGeoJson") String facilitiesGeoJson,
+            @P("constraintsGeoJson") String constraintsGeoJson,
+            @P("weightsJson") String weightsJson) {
+        try {
+            if (candidatesGeoJson == null || candidatesGeoJson.isBlank()) {
+                return Map.of("status", "NoData", "message", "candidatesGeoJson is required for site selection.");
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("candidates", JSON.parseObject(candidatesGeoJson));
+            if (facilitiesGeoJson != null && !facilitiesGeoJson.isBlank()) payload.put("facilities", JSON.parseObject(facilitiesGeoJson));
+            if (constraintsGeoJson != null && !constraintsGeoJson.isBlank()) payload.put("constraints", JSON.parseObject(constraintsGeoJson));
+            if (weightsJson != null && !weightsJson.isBlank()) payload.put("weights", JSON.parseObject(weightsJson));
+            Map<String, Object> result = postForMap("/site-selection", payload);
+            saveContextFromResult(result);
+            return result;
+        } catch (Exception error) {
+            return Map.of("status", "Error", "stage", "site_selection",
+                    "message", "Site-selection GeoJSON and weights must be valid JSON objects: " + error.getMessage());
+        }
+    }
+
     private Map<String, Object> postAdvancedAnalysis(String path, Map<String, Object> options) {
         String geoJson = contextService.getGeoJson();
         if (geoJson == null || geoJson.isBlank() || "{}".equals(geoJson)) {
@@ -261,12 +285,30 @@ public class pyGisTools {
 
     @Tool("urbanMetrics")
     public Map<String, Object> urbanMetrics(@P("aoiGeoJson") String aoiGeoJson) {
-        return analyzeCurrentView();
+        return analyzeAoi(aoiGeoJson);
     }
 
     @Tool("calculateUrbanMetrics")
     public Map<String, Object> calculateUrbanMetrics(@P("aoiGeoJson") String aoiGeoJson) {
-        return analyzeCurrentView();
+        return analyzeAoi(aoiGeoJson);
+    }
+
+    private Map<String, Object> analyzeAoi(String aoiGeoJson) {
+        if (aoiGeoJson == null || aoiGeoJson.isBlank()) {
+            return Map.of("status", "Error", "message", "aoiGeoJson is required.");
+        }
+        try {
+            JSONObject aoi = JSON.parseObject(aoiGeoJson);
+            if (aoi == null || !"Feature".equals(aoi.getString("type"))
+                    || aoi.getJSONObject("geometry") == null) {
+                return Map.of("status", "Error", "message", "aoiGeoJson must be a GeoJSON Feature with geometry.");
+            }
+            Map<String, Object> result = postForMap("/analyze_area", Map.of("aoi", aoi));
+            saveContextFromResult(result);
+            return result;
+        } catch (Exception error) {
+            return Map.of("status", "Error", "message", "aoiGeoJson must be valid JSON.");
+        }
     }
 
     @Tool("executeBufferAnalysis")
@@ -334,6 +376,14 @@ public class pyGisTools {
         }
 
         Map<String, Object> context = new HashMap<>();
+        try {
+            JSONObject existing = JSON.parseObject(contextService.getGeoJson());
+            if (existing != null) {
+                context.putAll(existing.getInnerMap());
+            }
+        } catch (Exception ignored) {
+            // The incoming data starts a fresh context when no valid prior state exists.
+        }
         if (result.containsKey("buildings")) {
             context.put("buildings", result.get("buildings"));
         }

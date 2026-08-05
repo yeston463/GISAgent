@@ -4,7 +4,7 @@ chcp 65001 >nul
 
 rem One-click development launcher for Java + Python GIS + Vue.
 set "ROOT=%~dp0"
-set "FRONTEND=%ROOT%share\gis-agent-source-share-20260616-1321\frontend-arcgis1"
+set "FRONTEND=%ROOT%frontend"
 
 if exist "!ROOT!.env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in ("!ROOT!.env") do (
@@ -156,6 +156,7 @@ if not exist "!ROOT!target\runtime-classpath.txt" (
 popd
 
 echo Starting Java backend on http://127.0.0.1:8080 ...
+set "SPATIAL_DEMO_ENABLED=true"
 start "GIS Agent - Java" /D "%ROOT%" powershell.exe -NoLogo -NoExit -ExecutionPolicy Bypass -File "%ROOT%start-java-backend.ps1" -SkipBuild
 
 echo Starting Python GIS service on http://127.0.0.1:8000 ...

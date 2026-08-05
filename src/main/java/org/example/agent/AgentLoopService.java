@@ -387,12 +387,43 @@ public class AgentLoopService {
         if ("discovery".equals(route.kind())) return executeDataDiscovery(route.datasets(), trace, listener);
         if ("import_osm".equals(route.kind())) return executeOsmImport(route.dataset(), trace, listener);
         if ("ground_dem".equals(route.kind())) {
-            addTrace(trace, listener, 2, "command", "请求前端底图 DEM", "当前 AOI 地形采样", "running");
-            return new AgentResult("已请求从当前 ArcGIS 底图采样 DEM。采样完成后会写入当前会话。", null, null, false, null,
+            if (route.location() != null) {
+                Map<String, Object> boundary = asMap(invokeTool("resolveAdministrativeBoundary",
+                        new JSONObject(Map.of("locationName", route.location()))));
+                Map<String, Object> aoi = boundary == null ? null : asMap(boundary.get("aoi"));
+                if (boundary == null || isFailed(boundary) || aoi == null || aoi.isEmpty()) {
+                    addTrace(trace, listener, 2, "clarification", "行政区边界不可用",
+                            "location=" + route.location() + "；" + formatTraceDetail(boundary), "waiting");
+                    return new AgentResult(null, null, "未能取得“" + route.location() + "”的可用行政区边界，因此不会用中心点或当前地图范围替代。请稍后重试或上传该区域边界。", true, null,
+                            List.of(), trace, Map.of("status", "NeedsClarification", "analysisType", "ground_dem_request", "targetLocation", route.location()));
+                }
+                addTrace(trace, listener, 2, "command", "获取行政区边界", "location=" + route.location() + "；source=" + getString(boundary, "source", "unknown"), "success");
+                List<Map<String, Object>> commands = List.of(
+                        Map.of("action", "setAoi", "params", Map.of("aoi", aoi, "title", route.location() + " 行政区范围")),
+                        Map.of("action", "requestPublicDem", "params", Map.of()));
+                return new AgentResult("已获取“" + route.location() + "”行政区边界，正在下载、拼接并裁剪覆盖该范围的公共 GeoTIFF DEM。", null, null, false, null,
+                        commands, trace, Map.of("status", "Success", "analysisType", "ground_dem_request", "targetLocation", route.location(), "source", getString(boundary, "source", "unknown")));
+            }
+            addTrace(trace, listener, 2, "command", "请求 ArcGIS World Elevation 高程", "当前 AOI 的规则网格采样", "running");
+            return new AgentResult("已请求从 ArcGIS World Elevation 对当前 AOI 采样高程点。采样完成后会写入当前会话；该数据用于初步地形筛查，不等同于原始 DEM 栅格。", null, null, false, null,
                     List.of(Map.of("action", "requestGroundDem", "params", Map.of())), trace,
                     Map.of("status", "Success", "analysisType", "ground_dem_request"));
         }
         if (!"analysis".equals(route.kind())) return null;
+        if (route.location() != null) {
+            Map<String, Object> boundary = asMap(invokeTool("resolveAdministrativeBoundary",
+                    new JSONObject(Map.of("locationName", route.location()))));
+            Map<String, Object> aoi = boundary == null ? null : asMap(boundary.get("aoi"));
+            if (boundary == null || isFailed(boundary) || aoi == null || aoi.isEmpty()) {
+                return new AgentResult(null, null, "未能获取“" + route.location() + "”的行政区边界，未沿用上一地区的数据。", true, null,
+                        List.of(), trace, Map.of("status", "NeedsClarification", "targetLocation", route.location()));
+            }
+            addTrace(trace, listener, 2, "command", "切换分析区域", "location=" + route.location(), "success");
+            return new AgentResult("已切换至“" + route.location() + "”，正在下载该区域 GeoTIFF DEM，完成后将复用当前降雨情景继续洪水分析。", null, null, false, null,
+                    List.of(Map.of("action", "setAoi", "params", Map.of("aoi", aoi, "title", route.location() + " 行政区范围")),
+                            Map.of("action", "requestPublicDem", "params", Map.of("resumeMessage", "洪水分析"))),
+                    trace, Map.of("status", "Success", "targetLocation", route.location(), "analysisType", "area_switch"));
+        }
         if (route.capabilityIds().size() > 1) {
             SpatialWorkflowService.WorkflowResult result = spatialWorkflowService.executeCapabilities(message, route.capabilityIds());
             if (result.needsClarification()) {
@@ -795,84 +826,12 @@ public class AgentLoopService {
                 + "。可选补充排水管网、河网和建筑物数据，以提高积水与暴露度筛查的解释性。";
     }
 
-    private String detectAdvancedIntent(String userMessage) {
-        if (userMessage == null) return null;
-        String lower = userMessage.toLowerCase();
-        if (userMessage.contains("\u5929\u9645\u7ebf") || lower.contains("skyline")) return "skyline";
-        if (userMessage.contains("\u65e5\u7167") || userMessage.contains("\u9634\u5f71")
-                || lower.contains("sunlight") || lower.contains("shadow")) return "sunlight";
-        return null;
-    }
-
     private boolean isCurrentRangeReply(String userMessage) {
         if (userMessage == null) return false;
         String lower = userMessage.toLowerCase();
         return userMessage.contains("\u5f53\u524d") || userMessage.contains("\u8fd9\u4e2a\u8303\u56f4")
                 || userMessage.contains("\u8be5\u8303\u56f4") || lower.contains("current")
                 || lower.contains("this range") || lower.contains("aoi") || lower.contains("redline");
-    }
-
-    private boolean hasCurrentAoi() {
-        try {
-            JSONObject context = JSON.parseObject(gisContextService.getGeoJson());
-            return context != null && context.containsKey("aoi");
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private AgentResult executeAdvancedIntent(
-        String intent,
-            String memoryId,
-            List<ExecutionTrace> trace,
-            Consumer<ExecutionTrace> traceListener) {
-        String title = "skyline".equals(intent) ? "\u5929\u9645\u7ebf\u5206\u6790" : "\u65e5\u7167\u4e0e\u9634\u5f71\u7b5b\u67e5";
-        String capabilityId = "skyline".equals(intent) ? "skyline_analysis" : "sunlight_analysis";
-        SpatialPlanService.PreparedPlan prepared = spatialPlanService.prepare(capabilityId, Map.of());
-        if (!prepared.validation().canExecute()) {
-            pendingAnalysisIntentService.remember(memoryId, intent);
-            List<String> missing = prepared.validation().missingData();
-            String question = missing.contains("aoi")
-                    ? "\u8bf7\u7ed8\u5236\u3001\u4e0a\u4f20\u6216\u9009\u62e9\u5206\u6790\u8303\u56f4\uff08AOI\uff09\uff0c\u518d\u6267\u884c" + title + "\u3002"
-                    : "\u5f53\u524d AOI \u5c1a\u672a\u540c\u6b65\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff0c\u8bf7\u5148\u5b8c\u6210\u5efa\u7b51\u8f6e\u5ed3\u63d0\u53d6\u6216\u4e0a\u4f20 GeoJSON\u3002";
-            Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
-            addTrace(trace, traceListener, 1, "ask", title + "\u7b49\u5f85\u6570\u636e", question, "waiting");
-            return new AgentResult(null, null, question, true, null, List.of(), trace,
-                    Map.of("status", prepared.validation().status(), "code", prepared.validation().code(),
-                            "analysisType", intent, "missingData", missing, "provenance", provenance));
-        }
-
-        pendingAnalysisIntentService.clear(memoryId);
-        String tool = prepared.plan().tool();
-        addTrace(trace, traceListener, 1, "decision", "\u8bc6\u522b" + title + "\u8bf7\u6c42",
-                "\u76f4\u63a5\u4f7f\u7528\u5f53\u524d AOI \u4e0e\u5efa\u7b51\u4e0a\u4e0b\u6587\uff0c\u4e0d\u4f9d\u8d56\u6a21\u578b\u51b3\u7b56 JSON\u3002", "running");
-        Map<String, Object> result = asMap(invokeTool(tool, new JSONObject()));
-        if (result == null || isFailed(result) || !isAdvancedAnalysis(result)) {
-            String detail = result == null ? "\u5206\u6790\u5de5\u5177\u672a\u8fd4\u56de\u7ed3\u679c"
-                    : String.valueOf(result.getOrDefault("message", "\u5f53\u524d AOI \u7f3a\u5c11\u53ef\u7528\u5efa\u7b51\u6570\u636e"));
-            if (detail.isBlank() || detail.contains("object of type") || detail.contains("Exception")) {
-                detail = "\u5f53\u524d AOI \u5c1a\u672a\u540c\u6b65\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff0c\u8bf7\u5148\u5b8c\u6210\u5efa\u7b51\u8f6e\u5ed3\u63d0\u53d6\u6216\u4e0a\u4f20 GeoJSON\u3002";
-            }
-            pendingAnalysisIntentService.remember(memoryId, intent);
-            Map<String, Object> provenance = spatialPlanService.record(prepared, result == null ? Map.of() : result);
-            addTrace(trace, traceListener, 2, "ask", title + "\u7b49\u5f85\u6570\u636e", detail, "waiting");
-            return new AgentResult(null, null,
-                    "\u5df2\u8bc6\u522b" + title + "\u8bf7\u6c42\uff0c\u4f46\u5f53\u524d AOI \u8fd8\u7f3a\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff1a" + detail,
-                    true, null, List.of(), trace,
-                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_data_required",
-                            "analysisType", intent, "provenance", provenance));
-        }
-
-        List<Map<String, Object>> commands = new ArrayList<>();
-        collectCommands(result, commands);
-        addTrace(trace, traceListener, 2, "observation", "\u83b7\u5f97" + title + "\u7ed3\u679c",
-                formatTraceDetail(result), "success");
-        addTrace(trace, traceListener, 3, "complete", title + "\u5b8c\u6210",
-                "\u5df2\u8fd4\u56de\u5206\u6790\u9762\u677f\u4e0e\u5730\u56fe\u547d\u4ee4\u3002", "success");
-        Map<String, Object> provenance = spatialPlanService.record(prepared, result);
-        return new AgentResult(buildAdvancedReply(result), List.of("\u67e5\u770b\u5f53\u524d AOI \u5efa\u7b51\u6307\u6807", "\u5207\u6362\u4e3a\u53e6\u4e00\u9879\u9ad8\u7ea7\u5206\u6790"),
-                null, false, result, dedupeCommands(commands), trace,
-                Map.of("status", "Success", "analysisType", intent, "provenance", provenance));
     }
 
     private AgentResult executeFloodAnalysisRequest(

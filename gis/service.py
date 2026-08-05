@@ -8,9 +8,12 @@ unit-testable and reusable from the router.
 import json
 import heapq
 import math
+import hashlib
+import urllib.request
 import os
 import time
 import traceback
+import zipfile
 from datetime import date as calendar_date
 from pathlib import Path
 
@@ -31,7 +34,233 @@ SPATIAL_OPERATIONS = {
     "skyline": "skyline",
     "sunlight": "sunlight",
     "flood": "flood",
+    "site_selection": "site_selection",
 }
+
+
+def fetch_public_dem_raster(aoi):
+    """Download, mosaic and crop public GeoTIFF elevation tiles to a WGS84 AOI."""
+    features = model._features_from_source(aoi)
+    if not features:
+        return {"status": "NoData", "message": "An AOI is required to fetch a DEM raster."}
+    geometry = features[0].get("geometry") or {}
+    coordinates = []
+    def visit(value):
+        if isinstance(value, (list, tuple)) and len(value) >= 2 and isinstance(value[0], (int, float)):
+            coordinates.append((float(value[0]), float(value[1])))
+        elif isinstance(value, (list, tuple)):
+            for item in value: visit(item)
+    visit(geometry.get("coordinates"))
+    if len(coordinates) < 3:
+        return {"status": "NoData", "message": "AOI geometry has no usable coordinates."}
+    xmin, xmax = min(x for x, _ in coordinates), max(x for x, _ in coordinates)
+    ymin, ymax = min(y for _, y in coordinates), max(y for _, y in coordinates)
+    if xmin < -180 or xmax > 180 or ymin < -85 or ymax > 85:
+        return {"status": "InvalidData", "message": "Public DEM tile source accepts WGS84 AOIs only."}
+    def tile_xy(lon, lat, zoom):
+        n = 2 ** zoom
+        x = int((lon + 180.0) / 360.0 * n)
+        lat_rad = math.radians(max(-85.05112878, min(85.05112878, lat)))
+        y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+        return max(0, min(n - 1, x)), max(0, min(n - 1, y))
+    zoom, tiles = 9, []
+    for candidate in range(13, 7, -1):
+        left, top = tile_xy(xmin, ymax, candidate); right, bottom = tile_xy(xmax, ymin, candidate)
+        proposed = [(candidate, x, y) for x in range(left, right + 1) for y in range(top, bottom + 1)]
+        if len(proposed) <= 36:
+            zoom, tiles = candidate, proposed
+            break
+    if not tiles:
+        return {"status": "NoData", "message": "AOI is too large for the public DEM tile request limit."}
+    try:
+        import rasterio
+        from rasterio.merge import merge
+        from rasterio.mask import mask
+        from rasterio.warp import transform_geom
+    except ImportError:
+        return {"status": "Unavailable", "message": "Rasterio is unavailable in the GIS runtime."}
+    root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
+    work = root / "public-dem"; work.mkdir(parents=True, exist_ok=True)
+    tile_paths = []
+    try:
+        for _, x, y in tiles:
+            path = work / f"terrain-z{zoom}-{x}-{y}.tif"
+            if not path.exists():
+                urllib.request.urlretrieve(f"https://s3.amazonaws.com/elevation-tiles-prod/geotiff/{zoom}/{x}/{y}.tif", path)
+            tile_paths.append(path)
+        datasets = [rasterio.open(path) for path in tile_paths]
+        mosaic, transform = merge(datasets)
+        meta = datasets[0].meta.copy()
+        for dataset in datasets: dataset.close()
+        mosaic_path = work / (hashlib.sha256(str((xmin, ymin, xmax, ymax, zoom)).encode()).hexdigest()[:16] + ".tif")
+        meta.update(driver="GTiff", height=mosaic.shape[1], width=mosaic.shape[2], transform=transform, count=1)
+        with rasterio.open(mosaic_path, "w", **meta) as destination:
+            destination.write(mosaic)
+        with rasterio.open(mosaic_path) as source:
+            projected = transform_geom("EPSG:4326", source.crs, geometry)
+            cropped, cropped_transform = mask(source, [projected], crop=True)
+            out_meta = source.meta.copy()
+            out_meta.update(height=cropped.shape[1], width=cropped.shape[2], transform=cropped_transform)
+        output = work / ("aoi-dem-" + hashlib.sha256(str((coordinates, zoom)).encode()).hexdigest()[:16] + ".tif")
+        with rasterio.open(output, "w", **out_meta) as destination:
+            destination.write(cropped)
+        resolution_m = abs(out_meta["transform"].a)
+        return {"status": "Success", "path": str(output), "source": "aws_elevation_tiles_srtm_gmted",
+                "zoom": zoom, "tileCount": len(tiles), "resolutionMeters": round(resolution_m, 2),
+                "width": out_meta["width"], "height": out_meta["height"], "crs": str(out_meta["crs"])}
+    except Exception as exc:
+        return {"status": "Error", "message": f"Public DEM fetch failed: {exc}"}
+
+
+def inspect_spatial_file(payload):
+    """Read uploaded vector/raster metadata and normalize vector features to WGS84.
+
+    Files are accepted only from the Java upload root.  This endpoint never
+    accepts arbitrary filesystem paths from clients.
+    """
+    payload = payload or {}
+    root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
+    path = Path(str(payload.get("path") or "")).resolve()
+    extension = str(payload.get("extension") or path.suffix.lstrip(".")).lower()
+    declared_crs = str(payload.get("sourceCrs") or "").strip()
+    if root not in path.parents or not path.is_file():
+        raise ValueError("Uploaded spatial file is outside the managed data root")
+    if extension in {"asc", "tif", "tiff"}:
+        return _inspect_raster_file(path, extension, declared_crs)
+    if extension in {"geojson", "json", "gpkg", "zip", "shp"}:
+        return _inspect_vector_file(path, extension, declared_crs)
+    raise ValueError(f"Unsupported spatial file format: {extension}")
+
+
+def _inspect_vector_file(path, extension, declared_crs):
+    if extension in {"geojson", "json"}:
+        collection = json.loads(path.read_text(encoding="utf-8-sig"))
+        return _normalize_geojson_collection(collection, declared_crs, source_format=extension)
+    if gpd is None:
+        raise ValueError("Vector reader is unavailable. Install geopandas/pyogrio to import SHP or GeoPackage.")
+    source = path
+    if extension == "zip":
+        source = _safe_extract_shapefile_zip(path)
+    try:
+        frame = gpd.read_file(source)
+    except Exception as error:
+        raise ValueError(f"Unable to read vector data: {error}") from error
+    if frame.empty:
+        raise ValueError("Vector file contains no features")
+    if len(frame.index) > 50000:
+        raise ValueError("Vector file exceeds the 50,000 feature import limit")
+    if frame.crs is None:
+        if not declared_crs:
+            raise ValueError("Vector CRS is missing. Provide sourceCrs before importing this dataset.")
+        frame = frame.set_crs(declared_crs, allow_override=True)
+    source_crs = str(frame.crs)
+    try:
+        normalized = frame.to_crs("EPSG:4326")
+    except Exception as error:
+        raise ValueError(f"Unable to normalize vector CRS to EPSG:4326: {error}") from error
+    geojson = json.loads(normalized.to_json(drop_id=True))
+    if len(json.dumps(geojson, ensure_ascii=False).encode("utf-8")) > 25 * 1024 * 1024:
+        raise ValueError("Normalized GeoJSON exceeds the 25 MB context limit")
+    geometry_types = sorted({str(value) for value in normalized.geom_type.dropna().unique()})
+    minx, miny, maxx, maxy = normalized.total_bounds
+    return {
+        "dataType": "vector", "sourceFormat": "shapefile_zip" if extension == "zip" else extension,
+        "sourceCrs": source_crs, "normalizedCrs": "EPSG:4326", "metadataStatus": "ready",
+        "featureCount": int(len(normalized.index)), "geometryTypes": geometry_types,
+        "bbox": [_round(minx), _round(miny), _round(maxx), _round(maxy)],
+        "normalizedAt": _now_iso(), "geoJson": geojson,
+    }
+
+
+def _safe_extract_shapefile_zip(path):
+    output = path.parent / (path.stem + "-unpacked")
+    output.mkdir(exist_ok=True)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            shp_members = [item for item in archive.infolist() if item.filename.lower().endswith(".shp")]
+            if len(shp_members) != 1:
+                raise ValueError("SHP archive must contain exactly one .shp file")
+            for item in archive.infolist():
+                if item.is_dir():
+                    continue
+                target = (output / Path(item.filename).name).resolve()
+                if output.resolve() not in target.parents:
+                    raise ValueError("SHP archive contains an unsafe path")
+                if item.file_size > 50 * 1024 * 1024:
+                    raise ValueError("SHP archive member is too large")
+                with archive.open(item) as source, target.open("wb") as destination:
+                    destination.write(source.read())
+        candidate = output / Path(shp_members[0].filename).name
+        if not candidate.is_file():
+            raise ValueError("SHP archive did not produce a readable .shp file")
+        return candidate
+    except zipfile.BadZipFile as error:
+        raise ValueError("Invalid SHP zip archive") from error
+
+
+def _normalize_geojson_collection(collection, declared_crs, source_format):
+    if not isinstance(collection, dict) or not collection.get("type"):
+        raise ValueError("Vector file must contain a GeoJSON object")
+    if gpd is None:
+        # GeoJSON produced in WGS84 can still be accepted without optional GIS
+        # dependencies.  Java performs the coordinate bounds validation.
+        return {"dataType": "vector", "sourceFormat": source_format, "sourceCrs": declared_crs or "EPSG:4326",
+                "normalizedCrs": "EPSG:4326", "metadataStatus": "ready", "geoJson": collection,
+                "normalizedAt": _now_iso()}
+    try:
+        frame = gpd.GeoDataFrame.from_features(collection.get("features", [collection]), crs=declared_crs or "EPSG:4326")
+    except Exception as error:
+        raise ValueError(f"Unable to read GeoJSON: {error}") from error
+    if frame.empty:
+        raise ValueError("Vector file contains no features")
+    normalized = frame.to_crs("EPSG:4326")
+    minx, miny, maxx, maxy = normalized.total_bounds
+    return {"dataType": "vector", "sourceFormat": source_format, "sourceCrs": str(frame.crs),
+            "normalizedCrs": "EPSG:4326", "metadataStatus": "ready", "featureCount": int(len(normalized.index)),
+            "geometryTypes": sorted({str(value) for value in normalized.geom_type.dropna().unique()}),
+            "bbox": [_round(minx), _round(miny), _round(maxx), _round(maxy)], "normalizedAt": _now_iso(),
+            "geoJson": json.loads(normalized.to_json(drop_id=True))}
+
+
+def _inspect_raster_file(path, extension, declared_crs):
+    if extension == "asc":
+        grid = _ascii_grid(path)
+        if grid is None:
+            raise ValueError("Unable to read ASCII Grid metadata")
+        return {"dataType": "raster", "sourceFormat": "asc", "sourceCrs": declared_crs or "EPSG:4326",
+                "normalizedCrs": "EPSG:4326", "metadataStatus": "ready", "width": grid["columns"],
+                "height": grid["rows"], "resolution": [grid["dx"], grid["dy"]],
+                "bbox": [grid["x0"], grid["y0"], grid["x0"] + grid["columns"] * grid["dx"], grid["y0"] + grid["rows"] * grid["dy"]],
+                "normalizedAt": _now_iso(), "gridPolicy": "native_grid_preserved"}
+    try:
+        import rasterio
+        from rasterio.warp import transform_bounds
+        with rasterio.open(path) as dataset:
+            source_crs = str(dataset.crs) if dataset.crs else declared_crs
+            if not source_crs:
+                raise ValueError("Raster CRS is missing. Provide sourceCrs before importing this DEM.")
+            if str(source_crs).upper() == "EPSG:4326":
+                left, bottom, right, top = dataset.bounds
+            else:
+                left, bottom, right, top = transform_bounds(source_crs, "EPSG:4326", *dataset.bounds, densify_pts=21)
+            return {"dataType": "raster", "sourceFormat": extension, "sourceCrs": source_crs,
+                    "normalizedCrs": "EPSG:4326", "metadataStatus": "ready", "width": dataset.width,
+                    "height": dataset.height, "bandCount": dataset.count, "resolution": [abs(dataset.transform.a), abs(dataset.transform.e)],
+                    "bbox": [_round(left), _round(bottom), _round(right), _round(top)],
+                    "noData": dataset.nodata, "normalizedAt": _now_iso(), "gridPolicy": "native_grid_preserved"}
+    except ImportError as error:
+        raise ValueError("GeoTIFF reader is unavailable. Install rasterio.") from error
+    except Exception as error:
+        raise ValueError(f"Unable to read GeoTIFF metadata: {error}") from error
+
+
+def _round(value):
+    return round(float(value), 6)
+
+
+def _now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def execute_spatial_plan(payload):
@@ -66,6 +295,8 @@ def execute_spatial_plan(payload):
             return calculate_sunlight(args)
         if operation == "flood":
             return calculate_flood_risk(args)
+        if operation == "site_selection":
+            return calculate_site_selection(args)
     except Exception as exc:
         return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
     return {"status": "Error", "stage": "spatial_plan", "message": "Operation did not produce a result"}
@@ -337,8 +568,200 @@ def calculate_metrics(payload):
 
 
 # --------------------------------------------------------------------------- #
+# Offline / deterministic urban metrics (pure standard library)
+# --------------------------------------------------------------------------- #
+def extract_urban_metrics(aoi, buildings=None):
+    """Compute urban metrics with the standard library only.
+
+    Deterministic, offline path for the sealed-offline demo and for
+    tests/test_offline_demo_metrics.py. It never calls Overpass/ArcGIS and
+    never requires arcpy/geopandas/shapely: geometry math is limited to
+    model._ring_area_sqm (WGS84 approximate metre projection), bbox clipping
+    (adapter._clip_features_bbox, itself pure) and the pure aggregator
+    model._build_metrics_result. The returned structure is identical to the
+    backend paths of calculate_metrics, and the estimation heuristics for
+    missing levels/heights are the same model functions.
+
+    Semantics mirror calculate_metrics:
+    - aoi defines the site; exterior-ring areas are summed in square metres.
+    - buildings are bbox-clipped against the AOI; an intersecting building
+      contributes its full footprint area (same rule as the standard-library
+      fallback adapter._clip_features_bbox).
+    - buildings=None or an empty collection is tolerated -> NoData result.
+    - unparseable input raises ValueError so the router can map it to an error.
+    """
+    if aoi is None:
+        raise ValueError("AOI is required to compute urban metrics")
+
+    aoi_features = model._features_from_source(aoi)
+    if not aoi_features:
+        raise ValueError("AOI has no usable geometry")
+
+    site_area = 0.0
+    for feature in aoi_features:
+        geometry = feature.get("geometry") or {}
+        if geometry.get("type") == "Polygon":
+            rings = geometry.get("coordinates") or []
+            if rings:
+                site_area += model._ring_area_sqm(rings[0])
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates") or []:
+                if polygon:
+                    site_area += model._ring_area_sqm(polygon[0])
+
+    if buildings is not None:
+        try:
+            features = model._features_from_source(buildings)
+        except Exception as exc:
+            raise ValueError(f"buildings GeoJSON is not parseable: {exc}") from exc
+    else:
+        features = []
+
+    if not features:
+        return model._build_metrics_result(
+            [], site_area=site_area, buffer_area=site_area,
+            backend="standard_library_metrics",
+            metric_crs=model._metric_crs_for_features(aoi_features),
+        )
+
+    clipped = adapter._clip_features_bbox(features, aoi)
+    records = []
+    for feature in clipped:
+        geometry = feature.get("geometry") or {}
+        footprint_area = 0.0
+        if geometry.get("type") == "Polygon":
+            rings = geometry.get("coordinates") or []
+            if rings:
+                footprint_area = model._ring_area_sqm(rings[0])
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates") or []:
+                if polygon:
+                    footprint_area += model._ring_area_sqm(polygon[0])
+        if footprint_area <= 0:
+            continue
+        records.append({
+            "properties": dict(feature.get("properties") or {}),
+            "footprint_area": footprint_area,
+        })
+
+    return model._build_metrics_result(
+        records, site_area=site_area, buffer_area=site_area,
+        backend="standard_library_metrics",
+        metric_crs=model._metric_crs_for_features(aoi_features),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Skyline / sunlight analysis
 # --------------------------------------------------------------------------- #
+def _site_selection_weights(raw_weights):
+    raw_weights = raw_weights if isinstance(raw_weights, dict) else {}
+    defaults = {"access": 0.6, "avoidance": 0.4}
+    weights = {}
+    for name, default in defaults.items():
+        value = model._safe_float(raw_weights.get(name), default)
+        if value is None or value < 0:
+            raise ValueError(f"weights.{name} must be a non-negative number")
+        weights[name] = value
+    total = sum(weights.values())
+    if total <= 0:
+        raise ValueError("At least one site-selection weight must be greater than zero")
+    return {name: value / total for name, value in weights.items()}
+
+
+def calculate_site_selection(payload):
+    """Rank candidate sites using transparent proximity and avoidance criteria.
+
+    This is deliberately a screening tool: it does not infer land ownership,
+    zoning, terrain, environmental approval, road-network travel time, or
+    infrastructure capacity from absent data.
+    """
+    payload = payload or {}
+    candidates = model._features_from_source(payload.get("candidates"))
+    if not candidates:
+        return {
+            "status": "NoData", "stage": "site_selection", "analysis_type": "site_selection",
+            "missing_data": ["candidates"],
+            "message": "Candidate point or polygon features are required for site selection.",
+        }
+    geometry_kinds = set()
+    for candidate in candidates:
+        geometry_type = str((candidate.get("geometry") or {}).get("type") or "")
+        if geometry_type == "Point":
+            geometry_kinds.add("point")
+        elif geometry_type in {"Polygon", "MultiPolygon"}:
+            geometry_kinds.add("polygon")
+        else:
+            return {"status": "InvalidData", "stage": "site_selection", "analysis_type": "site_selection",
+                    "message": "Candidates must use Point, Polygon or MultiPolygon geometry."}
+    if len(geometry_kinds) != 1:
+        return {"status": "InvalidData", "stage": "site_selection", "analysis_type": "site_selection",
+                "message": "Use either point candidates or polygon candidates in one site-selection request."}
+    facilities = model._features_from_source(payload.get("facilities"))
+    constraints = model._features_from_source(payload.get("constraints"))
+    weights = _site_selection_weights(payload.get("weights"))
+    influence_m = model._safe_float(payload.get("facilityInfluenceM"), 1500.0)
+    exclusion_m = model._safe_float(payload.get("exclusionDistanceM"), 200.0)
+    if influence_m is None or influence_m <= 0:
+        raise ValueError("facilityInfluenceM must be greater than zero")
+    if exclusion_m is None or exclusion_m < 0:
+        raise ValueError("exclusionDistanceM must be non-negative")
+
+    facility_centers = [model._feature_centroid(item) for item in facilities]
+    facility_centers = [center for center in facility_centers if center]
+    constraint_centers = [model._feature_centroid(item) for item in constraints]
+    constraint_centers = [center for center in constraint_centers if center]
+    ranked = []
+    for index, candidate in enumerate(candidates, start=1):
+        center = model._feature_centroid(candidate)
+        if not center:
+            continue
+        props = dict(candidate.get("properties") or {})
+        nearest_facility = min((model._distance_and_bearing(center, target)[0] for target in facility_centers), default=None)
+        nearest_constraint = min((model._distance_and_bearing(center, target)[0] for target in constraint_centers), default=None)
+        access_score = None if nearest_facility is None else max(0.0, 1.0 - nearest_facility / influence_m)
+        avoidance_score = None if nearest_constraint is None else min(1.0, nearest_constraint / max(exclusion_m, 1.0))
+        excluded = nearest_constraint is not None and nearest_constraint < exclusion_m
+        active = {}
+        if access_score is not None:
+            active["access"] = access_score
+        if avoidance_score is not None:
+            active["avoidance"] = avoidance_score
+        active_weight = sum(weights[name] for name in active)
+        score = 0.0 if not active else sum(active[name] * weights[name] for name in active) / active_weight
+        props.update({
+            "siteRank": 0, "siteScore": round(score * 100.0, 1), "screeningStatus": "excluded" if excluded else "candidate",
+            "accessScore": None if access_score is None else round(access_score * 100.0, 1),
+            "avoidanceScore": None if avoidance_score is None else round(avoidance_score * 100.0, 1),
+            "nearestFacilityM": None if nearest_facility is None else round(nearest_facility, 1),
+            "nearestConstraintM": None if nearest_constraint is None else round(nearest_constraint, 1),
+            "name": props.get("name") or props.get("id") or f"Candidate {index}",
+        })
+        ranked.append({"type": "Feature", "properties": props, "geometry": candidate.get("geometry")})
+    if not ranked:
+        return {"status": "NoData", "stage": "site_selection", "analysis_type": "site_selection",
+                "message": "No candidate feature contains usable geometry."}
+    ranked.sort(key=lambda item: (item["properties"]["screeningStatus"] == "excluded", -item["properties"]["siteScore"], item["properties"]["name"]))
+    for rank, item in enumerate(ranked, start=1):
+        item["properties"]["siteRank"] = rank
+    result_features = model._feature_collection(ranked)
+    eligible = [item for item in ranked if item["properties"]["screeningStatus"] == "candidate"]
+    return {
+        "status": "Success", "stage": "site_selection", "analysis_type": "site_selection",
+        "candidate_count": len(ranked), "eligible_count": len(eligible), "excluded_count": len(ranked) - len(eligible),
+        "weights": weights, "facility_influence_m": round(influence_m, 1), "exclusion_distance_m": round(exclusion_m, 1),
+        "facility_count": len(facility_centers), "constraint_count": len(constraint_centers),
+        "candidate_geometry": next(iter(geometry_kinds)),
+        "ranked_sites": result_features, "best_site": eligible[0] if eligible else None,
+        "method": "weighted_euclidean_proximity_screening",
+        "limitations": "Straight-line-distance screening only. Validate land ownership, zoning, parcel area, road-network travel time, environmental constraints, terrain, utilities and statutory approvals with authoritative data before siting.",
+        "commands": [
+            {"action": "addGeoJsonLayer", "params": {"layerId": "site-selection-ranked", "title": "Site-selection candidates", "style": "siteSelection", "visible": True, "data": result_features}},
+            {"action": "showAdvancedAnalysis", "params": {"analysisType": "site_selection", "title": "Multi-criteria site screening", "candidateCount": len(ranked), "eligibleCount": len(eligible), "bestSite": eligible[0]["properties"] if eligible else None, "weights": weights, "limitations": "Straight-line-distance screening only; confirm authoritative planning and engineering constraints."}},
+        ],
+    }
+
+
 def _advanced_analysis_features(payload):
     buildings = payload.get("buildings")
     features = model._features_from_source(buildings)
@@ -589,10 +1012,12 @@ def _geotiff_samples(path):
         return []
 
 
-def _risk_cell(lon, lat, score, level, depth_m, elevation):
-    half_side_m = 28.0
-    lon_delta = half_side_m / (111320.0 * max(math.cos(math.radians(lat)), 0.01))
-    lat_delta = half_side_m / 111320.0
+def _risk_cell(lon, lat, score, level, depth_m, elevation, cell_width_m, cell_height_m):
+    """Render a risk cell at the DEM grid resolution, never at a fixed display size."""
+    half_width_m = max(1.0, cell_width_m * 0.5)
+    half_height_m = max(1.0, cell_height_m * 0.5)
+    lon_delta = half_width_m / (111320.0 * max(math.cos(math.radians(lat)), 0.01))
+    lat_delta = half_height_m / 111320.0
     ring = [
         [lon - lon_delta, lat - lat_delta], [lon + lon_delta, lat - lat_delta],
         [lon + lon_delta, lat + lat_delta], [lon - lon_delta, lat + lat_delta],
@@ -606,6 +1031,8 @@ def _risk_cell(lon, lat, score, level, depth_m, elevation):
             "riskScore": round(score, 1),
             "estimatedDepthM": round(depth_m, 3),
             "elevationM": round(elevation, 2),
+            "gridCellWidthM": round(cell_width_m, 1),
+            "gridCellHeightM": round(cell_height_m, 1),
         },
         "geometry": {"type": "Polygon", "coordinates": [ring]},
     }
@@ -648,26 +1075,37 @@ def _geotiff_grid(path):
         return None
     try:
         with rasterio.open(path) as dataset:
-            if dataset.width * dataset.height > 250000:
-                return None
-            band = dataset.read(1, masked=True)
+            from affine import Affine
+            from rasterio.enums import Resampling
+            # Interactive priority-flood/D8 routing is O(n log n); retain a
+            # responsive online analysis budget and leave finer runs to jobs.
+            maximum_cells = 30000
+            columns, rows = dataset.width, dataset.height
+            transform_matrix = dataset.transform
+            if columns * rows > maximum_cells:
+                scale = math.sqrt((columns * rows) / maximum_cells)
+                columns, rows = max(3, int(columns / scale)), max(3, int(rows / scale))
+                band = dataset.read(1, out_shape=(rows, columns), masked=True, resampling=Resampling.average)
+                transform_matrix = dataset.transform * Affine.scale(dataset.width / columns, dataset.height / rows)
+            else:
+                band = dataset.read(1, masked=True)
             # Hydrologic routing needs a regular grid. We retain the raster's
             # topology and convert its centres to WGS84 only for rendering.
             if not dataset.crs or str(dataset.crs).upper() == "EPSG:4326":
                 def coordinate(row, column):
-                    return dataset.xy(row, column)
+                    return rasterio.transform.xy(transform_matrix, row, column)
             else:
                 def coordinate(row, column):
-                    x, y = dataset.xy(row, column)
+                    x, y = rasterio.transform.xy(transform_matrix, row, column)
                     lon, lat = transform(dataset.crs, "EPSG:4326", [x], [y])
                     return lon[0], lat[0]
             origin_x, origin_y = coordinate(0, 0)
-            x_next, _ = coordinate(0, min(1, dataset.width - 1))
-            _, y_next = coordinate(min(1, dataset.height - 1), 0)
+            x_next, _ = coordinate(0, min(1, columns - 1))
+            _, y_next = coordinate(min(1, rows - 1), 0)
             values = [[None if getattr(band[row, column], "mask", False) else float(band[row, column])
-                       for column in range(dataset.width)] for row in range(dataset.height)]
+                       for column in range(columns)] for row in range(rows)]
             return {
-                "values": values, "rows": dataset.height, "columns": dataset.width,
+                "values": values, "rows": rows, "columns": columns,
                 "x0": origin_x, "y0": origin_y,
                 "dx": abs(x_next - origin_x) or 1e-9, "dy": abs(y_next - origin_y) or 1e-9,
                 "source": "geotiff", "derived": False,
@@ -698,7 +1136,8 @@ def _grid_from_samples(samples):
 
 
 def _hydrologic_grid(dem):
-    if isinstance(dem, dict) and dem.get("kind") == "raster" and dem.get("path"):
+    # Use the managed path as the authority; session metadata can vary by provider.
+    if isinstance(dem, dict) and dem.get("path"):
         root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
         path = Path(str(dem["path"])).resolve()
         if root not in path.parents or not path.is_file():
@@ -857,7 +1296,9 @@ def calculate_flood_risk(payload):
             depth_m = min(depression_depth, event_depth) if depression_depth > 0 else event_depth * 0.15
             score = min(100.0, depth_m / 0.30 * 100.0)
             level = "high" if depth_m >= 0.020 else "medium" if depth_m >= 0.008 else "low"
-            feature = _risk_cell(lon, lat, score, level, depth_m, elevation)
+            cell_width_m = abs(grid["dx"]) * 111320.0 * max(math.cos(math.radians(lat)), 0.01)
+            cell_height_m = abs(grid["dy"]) * 111320.0
+            feature = _risk_cell(lon, lat, score, level, depth_m, elevation, cell_width_m, cell_height_m)
             feature["properties"].update({"filledElevationM": round(filled[row][column], 3),
                                              "depressionFillDepthM": round(depression_depth, 3),
                                              "d8Direction": directions[row][column],
@@ -866,9 +1307,11 @@ def calculate_flood_risk(payload):
             risk_features.append(feature)
             risk_by_sample.append((lon, lat, score, level, depth_m))
 
+    building_features = model._features_from_source(payload.get("buildings"))
+    building_exposure_available = bool(building_features)
     affected_buildings = 0
     exposed_buildings = []
-    for building in model._features_from_source(payload.get("buildings")):
+    for building in building_features:
         center = model._feature_centroid(building)
         if not center:
             continue
@@ -893,12 +1336,16 @@ def calculate_flood_risk(payload):
         "dem_sample_count": len(elevations), "high_risk_cell_count": levels.count("high"),
         "medium_risk_cell_count": levels.count("medium"), "low_risk_cell_count": levels.count("low"),
         "max_estimated_depth_m": round(max(feature["properties"]["estimatedDepthM"] for feature in risk_features), 3),
-        "affected_building_count": affected_buildings, "risk_cells": risk_cells,
+        "affected_building_count": affected_buildings if building_exposure_available else None, "risk_cells": risk_cells,
         "affected_buildings": model._feature_collection(exposed_buildings), "dem_quality": dem_quality,
+        "building_exposure_available": building_exposure_available,
+        "grid_cell_size_m": {"width": round(abs(grid["dx"]) * 111320.0, 1),
+                             "height": round(abs(grid["dy"]) * 111320.0, 1)},
         "data_source": "current_context", "method": "hydrologic_dem_priority_flood_d8_flow_accumulation",
         "hydrology": {"depressionFill": "priority_flood", "flowDirection": "D8",
                        "drainageNetworkApplied": has_drainage, "runoffCoefficient": 0.65},
-        "limitations": "Hydrologic terrain screening uses DEM depression filling, D8 routing and proximity-based drainage reduction. It is not a calibrated 2D hydraulic model and does not represent pipe capacity, river stage, boundary inflow, roughness or time-varying inundation.",
+        "limitations": "Hydrologic terrain screening uses DEM depression filling, D8 routing and proximity-based drainage reduction. It is not a calibrated 2D hydraulic model and does not represent pipe capacity, river stage, boundary inflow, roughness or time-varying inundation."
+                       + ("" if building_exposure_available else " Building exposure was not calculated because no complete building dataset is available for this AOI."),
     }
     result["commands"] = [{"action": "addGeoJsonLayer", "params": {
         "layerId": "flood-risk-screening", "title": "Flood risk screening", "style": "floodRisk",
@@ -931,7 +1378,6 @@ def _load_demo_json(file_name):
     candidates.extend([
         base_dir / "demo-case" / file_name,
         base_dir / "src" / "main" / "resources" / "static" / "demo-case" / file_name,
-        base_dir.parent / "lc4j-1(1)" / "src" / "main" / "resources" / "static" / "demo-case" / file_name,
     ])
 
     for path in candidates:

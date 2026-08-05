@@ -28,7 +28,7 @@ import java.util.Set;
 @Component
 public class SpatialCapabilityCatalog {
     private static final Set<String> APPROVED_TOOLS = Set.of(
-            "analyzeCurrentView", "skylineAnalysis", "sunlightAnalysis", "floodAnalysis");
+            "analyzeCurrentView", "skylineAnalysis", "sunlightAnalysis", "floodAnalysis", "siteSelection");
     private final RestTemplate http = new RestTemplate();
     private volatile Snapshot snapshot;
     private Snapshot bundledSnapshot;

@@ -15,9 +15,18 @@ import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.output.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.web.client.RestTemplate;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Lets the model choose an intent through a forced function call. The returned
@@ -33,13 +42,48 @@ public class LlmSpatialRouter {
 
     private final ChatLanguageModel llm;
     private final SpatialCapabilityCatalog catalog;
+    private final RestTemplate restTemplate;
+    private final String deepSeekApiKey;
+    private final String deepSeekBaseUrl;
+    private final String deepSeekModel;
+    private final SpatialRoutingTelemetry telemetry;
 
-    public LlmSpatialRouter(ChatLanguageModel llm, SpatialCapabilityCatalog catalog) {
+    public LlmSpatialRouter(
+            @Qualifier("spatialRouterModel") ChatLanguageModel llm,
+            SpatialCapabilityCatalog catalog,
+            RestTemplate restTemplate,
+            SpatialRoutingTelemetry telemetry,
+            @Value("${DEEPSEEK_API_KEY:}") String deepSeekApiKey,
+            @Value("${ai.deepseek.base-url:https://api.deepseek.com}") String deepSeekBaseUrl,
+            @Value("${ai.deepseek.router-model-name:deepseek-v4-flash}") String deepSeekModel) {
         this.llm = llm;
         this.catalog = catalog;
+        this.restTemplate = restTemplate;
+        this.telemetry = telemetry;
+        this.deepSeekApiKey = deepSeekApiKey;
+        this.deepSeekBaseUrl = deepSeekBaseUrl;
+        this.deepSeekModel = deepSeekModel;
     }
 
     public Route route(String request) {
+        long startedAt = System.nanoTime();
+        Route strictRoute = strictDeepSeekRoute(request);
+        long strictElapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+        if (strictRoute != null && !"none".equals(strictRoute.kind())) {
+            telemetry.record("deepseek", "success", strictElapsedMs, null);
+            return strictRoute;
+        }
+        if (deepSeekApiKey != null && !deepSeekApiKey.isBlank()) {
+            telemetry.record("deepseek", "fallback", strictElapsedMs, "strict_tool_call_unavailable");
+        }
+        Route fallback = fallbackRoute(request);
+        long totalElapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+        telemetry.record("unavailable".equals(fallback.kind()) ? "unavailable" : "qwen_fallback",
+                "unavailable".equals(fallback.kind()) ? "failed" : "success", totalElapsedMs, fallback.diagnostic());
+        return fallback;
+    }
+
+    private Route fallbackRoute(String request) {
         List<String> capabilityIds = catalog.capabilities().stream()
                 .map(SpatialCapabilityCatalog.Capability::id)
                 .toList();
@@ -49,7 +93,7 @@ public class LlmSpatialRouter {
                 Select only one kind and never invent catalog IDs or datasets.
                 Route the requested analysis even when its input data is missing. Do not ask for rainfall, DEM, radius, or other data here; the data validator runs after routing.
                 Select ground_dem when the user asks to obtain, sample, load, or query DEM/elevation from the current map or current AOI. This action needs no analysis radius or metric selection.
-                A request for flood analysis must select the catalog ID flood_analysis. A request for skyline or sunlight analysis must select its matching catalog ID.
+                A request for flood analysis, 洪水分析, 进行洪水分析, 内涝分析, or 淹没分析 must select the catalog ID flood_analysis. A request for skyline or sunlight analysis must select its matching catalog ID.
                 Select discovery only to search external data candidates. Select import_osm only when the user explicitly confirms importing an OSM dataset. Select none for requests unrelated to GIS routing.
                 Catalog capability IDs: %s
                 """.formatted(String.join(", ", capabilityIds));
@@ -61,10 +105,10 @@ public class LlmSpatialRouter {
                         List.of(SystemMessage.from(instructions), UserMessage.from(request == null ? "" : request)),
                         List.of(routeTool));
                 Route route = parseToolCall(response.content());
-                if (route != null) {
+                if (route != null && !"none".equals(route.kind())) {
                     return route;
                 }
-                failure = "invalid_tool_call";
+                failure = route == null ? "invalid_tool_call" : "tool_call_none";
                 log.warn("LLM spatial routing attempt {} returned an invalid tool call", attempt);
             } catch (RuntimeException error) {
                 failure = "tool_call_" + diagnostic(error);
@@ -75,7 +119,7 @@ public class LlmSpatialRouter {
                         SystemMessage.from(instructions + " Return exactly one JSON object with the route fields if tool calls are unavailable."),
                         UserMessage.from(request == null ? "" : request))).content();
                 Route route = parseJsonResponse(compatibilityResponse);
-                if (route != null) {
+                if (route != null && !"none".equals(route.kind())) {
                     return route;
                 }
                 route = parseSingleCatalogMention(compatibilityResponse);
@@ -89,7 +133,59 @@ public class LlmSpatialRouter {
                 log.warn("LLM spatial routing compatibility attempt {} failed: {}", attempt, error.getMessage());
             }
         }
-        return new Route("unavailable", List.of(), List.of(), null, failure);
+        return new Route("unavailable", List.of(), List.of(), null, failure, null);
+    }
+
+    private Route strictDeepSeekRoute(String request) {
+        if (deepSeekApiKey == null || deepSeekApiKey.isBlank()) return null;
+        try {
+            List<String> catalogIds = new ArrayList<>(catalog.capabilities().stream()
+                    .map(SpatialCapabilityCatalog.Capability::id).toList());
+            catalogIds.add("ground_dem");
+            catalogIds.add("none");
+            Map<String, Object> properties = new LinkedHashMap<>();
+            properties.put("kind", Map.of("type", "string", "enum", ROUTE_KINDS));
+            properties.put("catalog_id", Map.of("type", "string", "enum", catalogIds));
+            properties.put("dataset", Map.of("type", "string", "enum", List.of("dem", "buildings", "roads", "waterways", "none")));
+            properties.put("location", Map.of("type", "string", "description", "Exact place named by the user for a ground DEM request, or an empty string when no place is named."));
+            Map<String, Object> parameters = new LinkedHashMap<>();
+            parameters.put("type", "object");
+            parameters.put("properties", properties);
+            parameters.put("required", List.of("kind", "catalog_id", "dataset", "location"));
+            parameters.put("additionalProperties", false);
+            Map<String, Object> function = new LinkedHashMap<>();
+            function.put("name", ROUTE_TOOL);
+            function.put("strict", true);
+            function.put("description", "Select one validated GIS route. Never explain or ask questions.");
+            function.put("parameters", parameters);
+            Map<String, Object> tool = Map.of("type", "function", "function", function);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("model", deepSeekModel);
+            body.put("messages", List.of(
+                    Map.of("role", "system", "content", "Select exactly one GIS route. 洪水分析、进行洪水分析、内涝分析必须选择 kind=analysis and catalog_id=flood_analysis. 获取DEM必须选择 kind=ground_dem and catalog_id=ground_dem. Missing data never changes the selected route."),
+                    Map.of("role", "user", "content", request == null ? "" : request)));
+            body.put("thinking", Map.of("type", "disabled"));
+            body.put("tools", List.of(tool));
+            body.put("tool_choice", Map.of("type", "function", "function", Map.of("name", ROUTE_TOOL)));
+            body.put("stream", false);
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(deepSeekApiKey);
+            String raw = restTemplate.postForObject(deepSeekBaseUrl.replaceAll("/+$", "") + "/beta/chat/completions",
+                    new HttpEntity<>(JSON.toJSONString(body), headers), String.class);
+            JSONObject response = JSON.parseObject(raw);
+            JSONArray choices = response.getJSONArray("choices");
+            if (choices == null || choices.isEmpty()) return null;
+            JSONObject message = choices.getJSONObject(0).getJSONObject("message");
+            JSONArray calls = message == null ? null : message.getJSONArray("tool_calls");
+            if (calls == null || calls.isEmpty()) return null;
+            JSONObject functionCall = calls.getJSONObject(0).getJSONObject("function");
+            if (functionCall == null || !ROUTE_TOOL.equals(functionCall.getString("name"))) return null;
+            return parse(JSON.parseObject(functionCall.getString("arguments")));
+        } catch (RuntimeException error) {
+            log.warn("DeepSeek strict spatial route failed: {}", error.getMessage());
+            return null;
+        }
     }
 
     private ToolSpecification routeTool(List<String> capabilityIds) {
@@ -101,6 +197,7 @@ public class LlmSpatialRouter {
                         .items(JsonEnumSchema.builder().enumValues(DATASETS).build())
                         .build())
                 .addEnumProperty("dataset", DATASETS, "The OSM dataset to import")
+                .addStringProperty("location", "The exact user-named place for a ground DEM request, or an empty string")
                 .required("kind")
                 .additionalProperties(false)
                 .build();
@@ -150,8 +247,8 @@ public class LlmSpatialRouter {
         if (response == null || response.text() == null) return null;
         String answer = response.text();
         List<String> matches = catalog.capabilities().stream()
+                .filter(capability -> answer.contains(capability.id()) || capability.aliases().stream().anyMatch(answer::contains))
                 .map(SpatialCapabilityCatalog.Capability::id)
-                .filter(answer::contains)
                 .toList();
         return matches.size() == 1 ? parseCatalogRoute(matches.get(0)) : null;
     }
@@ -170,14 +267,14 @@ public class LlmSpatialRouter {
         for (String key : List.of("route", "analysis", "selection", "plan")) {
             JSONObject envelope = value.getJSONObject(key);
             if (envelope == null) continue;
-            Route route = parseCatalogRoute(catalogId(envelope));
+            Route route = withLocation(parseCatalogRoute(catalogId(envelope)), location(envelope));
             if (route != null) return route;
         }
         if (value.containsKey("route") && value.get("route") instanceof String routeId) {
-            Route route = parseCatalogRoute(routeId);
+            Route route = withLocation(parseCatalogRoute(routeId), location(value));
             if (route != null) return route;
         }
-        Route catalogRoute = parseCatalogRoute(catalogId(value));
+        Route catalogRoute = withLocation(parseCatalogRoute(catalogId(value)), location(value));
         if (catalogRoute != null) {
             return catalogRoute;
         }
@@ -187,21 +284,31 @@ public class LlmSpatialRouter {
             if (raw == null || raw.isEmpty()) return null;
             List<String> ids = raw.toJavaList(String.class);
             if (ids.stream().anyMatch(id -> catalog.find(id).isEmpty())) return null;
-            return new Route(kind, ids, List.of(), null, null);
+            return new Route(kind, ids, List.of(), null, null, location(value));
         }
         if ("discovery".equals(kind)) {
             JSONArray raw = value.getJSONArray("datasets");
             List<String> datasets = raw == null ? List.of() : raw.toJavaList(String.class);
             if (datasets.stream().anyMatch(dataset -> !DATASETS.contains(dataset))) return null;
-            return new Route(kind, List.of(), datasets, null, null);
+            return new Route(kind, List.of(), datasets, null, null, location(value));
         }
         if ("import_osm".equals(kind)) {
             String dataset = value.getString("dataset");
-            return DATASETS.contains(dataset) ? new Route(kind, List.of(), List.of(), dataset, null) : null;
+            return DATASETS.contains(dataset) ? new Route(kind, List.of(), List.of(), dataset, null, location(value)) : null;
         }
         return ("none".equals(kind) || "ground_dem".equals(kind))
-                ? new Route(kind, List.of(), List.of(), null, null)
+                ? new Route(kind, List.of(), List.of(), null, null, location(value))
                 : null;
+    }
+
+    private Route withLocation(Route route, String location) {
+        if (route == null) return null;
+        return new Route(route.kind(), route.capabilityIds(), route.datasets(), route.dataset(), route.diagnostic(), location);
+    }
+
+    private String location(JSONObject value) {
+        String location = value.getString("location");
+        return location == null || location.isBlank() ? null : location.trim();
     }
 
     private String catalogId(JSONObject value) {
@@ -214,13 +321,13 @@ public class LlmSpatialRouter {
 
     private Route parseCatalogRoute(String catalogId) {
         if ("ground_dem".equals(catalogId) || "none".equals(catalogId)) {
-            return new Route(catalogId, List.of(), List.of(), null, null);
+            return new Route(catalogId, List.of(), List.of(), null, null, null);
         }
         if (catalogId != null && catalog.find(catalogId).isPresent()) {
-            return new Route("analysis", List.of(catalogId), List.of(), null, null);
+            return new Route("analysis", List.of(catalogId), List.of(), null, null, null);
         }
         return null;
     }
 
-    public record Route(String kind, List<String> capabilityIds, List<String> datasets, String dataset, String diagnostic) { }
+    public record Route(String kind, List<String> capabilityIds, List<String> datasets, String dataset, String diagnostic, String location) { }
 }

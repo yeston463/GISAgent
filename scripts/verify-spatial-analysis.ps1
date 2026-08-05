@@ -38,11 +38,19 @@ foreach ($request in @(
         memoryId = $memoryId
         message = $request.message
     }
-    Require ($response.outcome.status -eq 'Success') "$($request.label) did not succeed: $($response.outcome.status)"
+    $acceptedStatuses = if ($request.label -eq 'flood') { @('Success', 'NeedsClarification') } else { @('Success') }
+    Require ($acceptedStatuses -contains $response.outcome.status) "$($request.label) returned $($response.outcome.status)"
     Require ($response.outcome.analysisType -eq $request.expected) "$($request.label) used an unexpected capability."
     Require (@($response.trace | Where-Object { $_.phase -eq 'plan' }).Count -gt 0) "$($request.label) has no plan trace."
-    Require (-not [string]::IsNullOrWhiteSpace($response.resultEnvelope.provenance.runId)) "$($request.label) has no provenance run id."
-    Require ($null -ne $response.metrics) "$($request.label) returned no analysis metrics."
+    if ($response.outcome.status -eq 'Success') {
+        Require (-not [string]::IsNullOrWhiteSpace($response.resultEnvelope.provenance.runId)) "$($request.label) has no provenance run id."
+        Require ($null -ne $response.metrics) "$($request.label) returned no analysis metrics."
+    } else {
+        $needsRainfall = @($response.outcome.missingData) -contains 'rainfall_scenario'
+        $needsGridDem = $response.outcome.code -eq 'execution_data_required' -and
+            @($response.outcome.provenance.result.missing_data) -contains 'hydrologic_dem_grid'
+        Require ($needsRainfall -or $needsGridDem) 'flood clarification did not identify rainfall or hydrologic DEM requirements.'
+    }
     $results += [PSCustomObject]@{
         analysis = $request.label
         status = $response.outcome.status

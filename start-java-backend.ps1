@@ -30,14 +30,6 @@ if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     }
 }
 
-# This launcher is for local development. Keep the application default closed
-# for shared deployments, but make the repeatable spatial sample available
-# unless the developer explicitly set SPATIAL_DEMO_ENABLED.
-if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('SPATIAL_DEMO_ENABLED', 'Process'))) {
-    [Environment]::SetEnvironmentVariable('SPATIAL_DEMO_ENABLED', 'true', 'Process')
-    Write-Host '[Java] SPATIAL_DEMO_ENABLED was not configured; using true for local development.'
-}
-
 function Get-Java17Executable {
     $candidates = [System.Collections.Generic.List[string]]::new()
 

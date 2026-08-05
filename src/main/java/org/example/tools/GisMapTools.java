@@ -2,6 +2,8 @@ package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.model.chat.ChatLanguageModel;
@@ -16,6 +18,8 @@ import java.util.ArrayList;
 import java.util.Locale;
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.net.URLEncoder;
 
 @Component
 public class GisMapTools {
@@ -45,6 +49,62 @@ public class GisMapTools {
             return "{\"status\": \"error\", \"message\": \"地址为空\"}";
         }
         return geocodeInternal(locationName, city != null ? city : "");
+    }
+
+    @Tool("resolveAdministrativeBoundary")
+    public String resolveAdministrativeBoundary(@P("locationName") String locationName) {
+        if (locationName == null || locationName.isBlank()) {
+            return "{\"status\":\"error\",\"message\":\"地点为空\"}";
+        }
+        if (amapKey == null || amapKey.isBlank()) {
+            return "{\"status\":\"error\",\"message\":\"AMAP_KEY environment variable is not configured\"}";
+        }
+        try {
+            String queryName = locationName.trim().replaceFirst("^.+?市", "");
+            String keyword = URLEncoder.encode(queryName, StandardCharsets.UTF_8);
+            java.net.URI url = java.net.URI.create("https://restapi.amap.com/v3/config/district"
+                    + "?key=" + URLEncoder.encode(amapKey, StandardCharsets.UTF_8)
+                    + "&keywords=" + keyword + "&subdistrict=0&extensions=all");
+            String response = restTemplate.getForObject(url, String.class);
+            JsonNode district = objectMapper.readTree(response).path("districts").path(0);
+            String boundary = district.path("polyline").asText("");
+            if (district.isMissingNode() || boundary.isBlank()) {
+                return "{\"status\":\"error\",\"message\":\"未返回可用行政区边界\"}";
+            }
+            ArrayNode polygons = objectMapper.createArrayNode();
+            for (String rawRing : boundary.split(java.util.regex.Pattern.quote("|"))) {
+                ArrayNode ring = objectMapper.createArrayNode();
+                for (String coordinate : rawRing.split(";")) {
+                    String[] parts = coordinate.split(",");
+                    if (parts.length != 2) continue;
+                    double[] wgs84 = CoordinateTransform.gcj02ToWgs84(
+                            Double.parseDouble(parts[0]), Double.parseDouble(parts[1]));
+                    ArrayNode point = ring.addArray(); point.add(wgs84[0]); point.add(wgs84[1]);
+                }
+                if (ring.size() >= 3) {
+                    if (!ring.get(0).equals(ring.get(ring.size() - 1))) ring.add(ring.get(0));
+                    polygons.addArray().add(ring);
+                }
+            }
+            if (polygons.isEmpty()) return "{\"status\":\"error\",\"message\":\"行政区边界坐标无效\"}";
+            String[] center = district.path("center").asText().split(",");
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("status", "success"); result.put("source", "amap_district");
+            result.put("location", district.path("name").asText(locationName.trim()));
+            result.put("adcode", district.path("adcode").asText(""));
+            if (center.length == 2) {
+                double[] wgs84 = CoordinateTransform.gcj02ToWgs84(Double.parseDouble(center[0]), Double.parseDouble(center[1]));
+                result.put("longitude", wgs84[0]); result.put("latitude", wgs84[1]);
+            }
+            ObjectNode feature = result.putObject("aoi"); feature.put("type", "Feature");
+            feature.putObject("properties").put("source", "amap_district").put("name", result.path("location").asText());
+            ObjectNode geometry = feature.putObject("geometry");
+            if (polygons.size() == 1) { geometry.put("type", "Polygon"); geometry.set("coordinates", polygons.get(0)); }
+            else { geometry.put("type", "MultiPolygon"); geometry.set("coordinates", polygons); }
+            return objectMapper.writeValueAsString(result);
+        } catch (Exception error) {
+            return "{\"status\":\"error\",\"message\":\"行政区边界查询失败\"}";
+        }
     }
 
     private static boolean isInChina(double lng, double lat) {
@@ -383,12 +443,6 @@ public class GisMapTools {
     }
 
     private record LocationReview(String locationName, String city) {}
-
-
-    @Tool("getHistoryDisaster")
-    public String getHistoryDisaster(@P("lon") double lon, @P("lat") double lat) {
-        return "该位置 500 米范围内 2023 年曾发生过一次内涝记录。";
-    }
 
     @Tool("layerControl")
     public String controlLayer(

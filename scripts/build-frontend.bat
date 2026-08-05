@@ -6,22 +6,18 @@ rem ---------------------------------------------------------------------------
 rem Build the Vue / ArcGIS frontend and sync the output into the Spring Boot
 rem static folder (src/main/resources/static).
 rem
-rem Source of truth: share/<snapshot>/frontend-arcgis1  (discovered automatically
-rem so the dated snapshot folder name does not matter).
+rem Source of truth: frontend/ (Vue 3 + Vite + @arcgis/core).
+rem This script only builds the frontend into frontend/dist/ — it does NOT
+rem sync into Spring Boot's static/ folder (backend no longer hosts the UI).
 rem
 rem Usage: scripts\build-frontend.bat
 rem ---------------------------------------------------------------------------
 
 for %%R in ("%~dp0..") do set "ROOT=%%~fR"
-set "STATIC=%ROOT%\src\main\resources\static"
-set "FRONTEND="
+set "FRONTEND=%ROOT%frontend"
 
-for /d %%S in ("%ROOT%\share\*") do (
-    if exist "%%S\frontend-arcgis1\package.json" set "FRONTEND=%%S\frontend-arcgis1"
-)
-
-if not defined FRONTEND (
-    echo [ERROR] frontend-arcgis1 not found under "!ROOT!\share"
+if not exist "!FRONTEND!\package.json" (
+    echo [ERROR] frontend/package.json not found at "!FRONTEND!"
     exit /b 1
 )
 
@@ -42,11 +38,5 @@ if not exist "!FRONTEND!\dist" (
     exit /b 1
 )
 
-echo Syncing dist -^> "!STATIC!"
-robocopy "!FRONTEND!\dist" "!STATIC!" /E /PURGE /NFL /NDL /NJS
-if %ERRORLEVEL% GEQ 8 (
-    echo [ERROR] robocopy failed with exit code %ERRORLEVEL%.
-    exit /b %ERRORLEVEL%
-)
-echo [OK] Frontend built and synced to "!STATIC!"
+echo [OK] Frontend built at "!FRONTEND!\dist" (backend no longer hosts static assets).
 exit /b 0

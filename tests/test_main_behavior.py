@@ -447,6 +447,9 @@ def test_calculate_flood_risk_lock():
     assert result["analysis_type"] == "flood"
     assert result["high_risk_cell_count"] >= 1
     assert result["risk_cells"]["type"] == "FeatureCollection"
+    assert result["risk_cells"]["features"][0]["properties"]["gridCellWidthM"] > 30
+    assert result["building_exposure_available"] is False
+    assert result["affected_building_count"] is None
     assert result["commands"][0]["action"] == "addGeoJsonLayer"
     advanced = next(command for command in result["commands"] if command["action"] == "showAdvancedAnalysis")
     assert advanced["params"]["analysisType"] == "flood"
@@ -491,6 +494,43 @@ def test_ascii_grid_dem_is_accepted_for_flood_screening(tmp_path, monkeypatch):
 
     assert len(samples) == 4
     assert min(sample[2] for sample in samples) == 4.0
+
+
+def test_spatial_file_inspection_reports_normalized_ascii_metadata(tmp_path, monkeypatch):
+    raster_root = tmp_path / "gis-inputs"
+    raster_path = raster_root / "session" / "terrain.asc"
+    raster_path.parent.mkdir(parents=True)
+    raster_path.write_text(
+        "ncols 3\nnrows 3\nxllcorner 121\nyllcorner 31\ncellsize 0.001\nNODATA_value -9999\n1 2 3\n4 5 6\n7 8 9\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIS_RASTER_ROOT", str(raster_root))
+
+    inspected = service.inspect_spatial_file({"path": str(raster_path), "extension": "asc"})
+
+    assert inspected["metadataStatus"] == "ready"
+    assert inspected["normalizedCrs"] == "EPSG:4326"
+    assert inspected["width"] == 3
+    assert inspected["gridPolicy"] == "native_grid_preserved"
+
+
+def test_spatial_file_inspection_normalizes_geopackage(tmp_path, monkeypatch):
+    geopandas = pytest.importorskip("geopandas")
+    shapely = pytest.importorskip("shapely.geometry")
+    raster_root = tmp_path / "gis-inputs"
+    vector_path = raster_root / "session" / "buildings.gpkg"
+    vector_path.parent.mkdir(parents=True)
+    frame = geopandas.GeoDataFrame({"name": ["sample"]}, geometry=[shapely.Point(13522390, 3640000)], crs="EPSG:3857")
+    frame.to_file(vector_path, driver="GPKG")
+    monkeypatch.setenv("GIS_RASTER_ROOT", str(raster_root))
+
+    inspected = service.inspect_spatial_file({"path": str(vector_path), "extension": "gpkg"})
+
+    assert inspected["metadataStatus"] == "ready"
+    assert inspected["normalizedCrs"] == "EPSG:4326"
+    assert inspected["featureCount"] == 1
+    coordinates = inspected["geoJson"]["features"][0]["geometry"]["coordinates"]
+    assert 121 < coordinates[0] < 122
 
 
 def test_hydrologic_flood_uses_depression_fill_flow_and_drainage(tmp_path, monkeypatch):
