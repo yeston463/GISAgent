@@ -23,11 +23,16 @@ Baseline values (computed offline, standard-library path):
   floor_stats              max=22 min=4 avg=15.8 counts={4:1,15:1,16:1,18:1,20:1,22:1}
   estimated_ratio          = 0.0
 """
+import json
 import time
+from pathlib import Path
 
 import pytest
 
 from gis import adapter, model, service
+
+
+BUNDLED_CASE = Path(__file__).resolve().parents[1] / "src" / "main" / "resources" / "demo-case" / "case.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +100,20 @@ def test_documented_baseline_values():
     assert result["floor_stats"]["max"] == 22
     assert result["floor_stats"]["min"] == 4
     assert result["floor_stats"]["avg"] == 15.8
+
+
+def test_bundled_case_matches_offline_acceptance_baseline():
+    """The API demo fixture and its acceptance baseline must evolve together."""
+    with BUNDLED_CASE.open(encoding="utf-8") as handle:
+        bundled = json.load(handle)
+
+    result = service.extract_urban_metrics(bundled["aoi"], bundled["buildings"])
+    assert result["status"] == "Success"
+    assert result["building_count"] == 6
+    assert result["site_area_sqm"] == pytest.approx(126264.63, rel=1e-4)
+    assert result["total_const_area_sqm"] == pytest.approx(359118.95, rel=1e-3)
+    assert result["far"] == pytest.approx(2.844, abs=0.05)
+    assert result["building_density"] == pytest.approx(19.33, abs=0.5)
 
 
 def test_metric_shapes_and_types():

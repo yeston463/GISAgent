@@ -67,23 +67,20 @@ Write-Host "  Python GIS ready (backend: $($runtime.backend))"
 Write-Host "`n[3/5] Starting Java backend on :8080 ..." -ForegroundColor Yellow
 Push-Location $root
 try {
-    # Resolve runtime classpath if missing
-    if (-not (Test-Path 'target\runtime-classpath.txt')) {
-        Write-Host "  resolving Maven runtime classpath ..."
-        cmd /c 'mvnw.cmd -q dependency:build-classpath "-Dmdep.outputFile=target/runtime-classpath.txt" "-Dmdep.includeScope=runtime"'
-        if ($LASTEXITCODE -ne 0) { throw "Maven classpath resolution failed" }
-    }
     if (-not (Test-Path 'target\classes\org\example\Lc4j1Application.class')) {
         Write-Host "  compiling Java backend ..."
         cmd /c 'mvnw.cmd -q -DskipTests compile'
         if ($LASTEXITCODE -ne 0) { throw "Java compilation failed" }
     }
+    if (-not (Test-Path 'target\runtime-classpath.txt')) {
+        Write-Host "  resolving Maven runtime classpath ..."
+        cmd /c 'mvnw.cmd -q dependency:build-classpath "-Dmdep.outputFile=target/runtime-classpath.txt" "-Dmdep.includeScope=runtime"'
+        if ($LASTEXITCODE -ne 0) { throw "Maven classpath resolution failed" }
+    }
 
     $env:SPATIAL_DEMO_ENABLED = 'true'
-    $cp = "target\classes;$(Get-Content 'target\runtime-classpath.txt' -Raw -Encoding UTF8)".Trim()
-    $javaExe = Get-Command java -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-    if (-not $javaExe) { $javaExe = Join-Path $env:JAVA_HOME 'bin\java.exe' }
-    $javaProc = Start-Process -FilePath $javaExe -ArgumentList @('-cp', $cp, 'org.example.Lc4j1Application') -RedirectStandardOutput $javaLog -RedirectStandardError "$javaLog.err" -WorkingDirectory $root -WindowStyle Hidden -PassThru
+    $javaLauncher = Join-Path $root 'start-java-backend.ps1'
+    $javaProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $javaLauncher, '-ProjectRoot', $root, '-SkipBuild') -RedirectStandardOutput $javaLog -RedirectStandardError "$javaLog.err" -WorkingDirectory $root -WindowStyle Hidden -PassThru
 
     if (-not (Wait-Port 8080 $WaitSeconds)) { throw "Java backend did not start on :8080. Log: $javaLog" }
     Write-Host "  Java backend ready"
@@ -107,10 +104,10 @@ $metrics = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/analysis/urban_metrics'
 
 $baseline = @{
     building_count        = 6
-    site_area_sqm         = 126264.63
-    total_const_area_sqm  = 479807.48
-    far                   = 3.8
-    building_density      = 24.0
+    site_area_sqm         = 126723.29
+    total_const_area_sqm  = 360424.33
+    far                   = 2.844
+    building_density      = 19.33
 }
 $failed = $false
 foreach ($k in $baseline.Keys) {

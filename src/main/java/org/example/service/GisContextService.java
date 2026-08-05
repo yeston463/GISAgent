@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,6 +36,10 @@ public class GisContextService {
     }
 
     public record SaveResult(long contextVersion, boolean conflict) {}
+
+    public record LockEntry(String userId, long expiresAt) {}
+
+    private final Map<String, LockEntry> editLocks = new ConcurrentHashMap<>();
 
     @PostConstruct
     public synchronized void restore() {
@@ -115,6 +120,53 @@ public class GisContextService {
     public long getContextVersion(String sessionId) {
         JSONObject context = JSON.parseObject(getGeoJson(sessionId));
         return context == null ? 0 : context.getLongValue("contextVersion");
+    }
+
+    public boolean acquireEditLock(String memoryId, String userId, int ttlSeconds) {
+        String key = normalizeSession(memoryId);
+        long now = System.currentTimeMillis();
+        long expiresAt = now + (long) ttlSeconds * 1000;
+        LockEntry newEntry = new LockEntry(userId, expiresAt);
+        return editLocks.compute(key, (k, existing) -> {
+            if (existing != null && existing.expiresAt() > now) {
+                return existing;
+            }
+            return newEntry;
+        }) == newEntry;
+    }
+
+    public boolean releaseEditLock(String memoryId, String userId) {
+        String key = normalizeSession(memoryId);
+        return editLocks.computeIfPresent(key, (k, existing) -> {
+            if (existing != null && existing.userId().equals(userId)) {
+                return null;
+            }
+            return existing;
+        }) == null;
+    }
+
+    public Map<String, Object> getEditStatus(String memoryId) {
+        String key = normalizeSession(memoryId);
+        long now = System.currentTimeMillis();
+        LockEntry entry = editLocks.get(key);
+        Map<String, Object> status = new HashMap<>();
+        if (entry == null || entry.expiresAt() <= now) {
+            status.put("locked", false);
+            status.put("userId", null);
+            status.put("remainingTtl", 0L);
+            if (entry != null) {
+                editLocks.remove(key, entry);
+            }
+        } else {
+            status.put("locked", true);
+            status.put("userId", entry.userId());
+            status.put("remainingTtl", entry.expiresAt() - now);
+        }
+        return status;
+    }
+
+    public SaveResult updateWithVersion(String memoryId, String data, long expectedVersion) {
+        return saveGeoJson(normalizeSession(memoryId), data, expectedVersion);
     }
 
     private void persist() {

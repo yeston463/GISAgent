@@ -1108,3 +1108,501 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
         sceneServiceUrl=service_url,
     )
     return share_publication({"status": "completed", "portalUrl": PORTAL_URL, "sourceItemId": item_id, "serviceItemId": service_item_id, "sceneServiceUrl": service_url, "hostedService": hosted_service, "publishedAt": int(time.time())})
+
+
+# =============================================================================
+# Feature Service 发布
+# =============================================================================
+
+def publish_featureservice(aoi_geojson, buildings_geojson, metrics_dict, service_name=None):
+    """将 AOI + 建筑 GeoJSON 打包为 FeatureSet 并发布为 Hosted Feature Service。
+
+    Args:
+        aoi_geojson (dict): AOI 几何 GeoJSON（Feature 或 Geometry）。
+        buildings_geojson (dict): 建筑集合 GeoJSON（FeatureCollection，含 FAR、density 等属性）。
+        metrics_dict (dict): 指标字典，存入服务描述。
+        service_name (str, optional): 服务名称，默认自动生成。
+
+    Returns:
+        dict: {"status": "Success", "serviceUrl": "...", "itemId": "...", "featureCount": N}
+              或 {"status": "Error", "code": "...", "message": "..."}
+    """
+    try:
+        if not publishing_status()["configured"]:
+            return {"status": "Error", "code": "not_configured", "message": "Portal credentials not configured"}
+
+        token = _token()
+        user = urllib.parse.quote(PORTAL_USERNAME)
+        folder_id = _ensure_folder(token)
+        folder_segment = f"/{folder_id}" if folder_id else ""
+
+        aoi_features = _normalize_features(aoi_geojson, {"source": "aoi"})
+        building_features = _normalize_features(buildings_geojson, {"source": "buildings"})
+        all_features = aoi_features + building_features
+        feature_count = len(all_features)
+
+        if feature_count == 0:
+            return {"status": "Error", "code": "empty_features", "message": "No valid features found in input GeoJSON"}
+
+        if not service_name:
+            service_name = f"GISAgent_FS_{int(time.time())}"
+        service_name = re.sub(r"[^A-Za-z0-9_]", "_", service_name)[:120]
+
+        feature_set = {
+            "layers": [{
+                "layerDefinition": {
+                    "name": service_name,
+                    "geometryType": "esriGeometryPolygon",
+                    "fields": _infer_fields(all_features),
+                    "spatialReference": {"wkid": 4326},
+                },
+                "featureSet": {
+                    "features": all_features,
+                    "geometryType": "esriGeometryPolygon",
+                },
+            }]
+        }
+
+        publish_params = {
+            "name": service_name,
+            "maxRecordCount": 5000,
+            "description": f"GISAgent Feature Service | metrics: {json.dumps(metrics_dict, ensure_ascii=False)}",
+        }
+
+        publish_fields = {
+            "token": token,
+            "f": "json",
+            "filetype": "featureCollection",
+            "publishParameters": json.dumps(publish_params),
+            "file": json.dumps(feature_set),
+        }
+
+        try:
+            result = _request_json(
+                f"{PORTAL_URL}/sharing/rest/content/users/{user}{folder_segment}/publish",
+                publish_fields,
+                timeout=120,
+            )
+        except RuntimeError as exc:
+            return {"status": "Error", "code": "publish_failed", "message": str(exc)}
+
+        services = result.get("services") or []
+        service = services[0] if services else result
+        if service.get("success") is False:
+            return {"status": "Error", "code": "service_creation_failed", "message": str(service.get("error") or service)}
+
+        service_item_id = service.get("serviceItemId")
+        if not service_item_id:
+            return {"status": "Error", "code": "no_item_id", "message": "Publish did not return a service item id"}
+
+        service_url = service.get("serviceurl") or service.get("serviceUrl")
+        if not service_url and service_item_id:
+            item_info = _request_json(
+                f"{PORTAL_URL}/sharing/rest/content/items/{service_item_id}",
+                {"token": token, "f": "json"},
+            )
+            service_url = item_info.get("url")
+
+        return {
+            "status": "Success",
+            "serviceUrl": service_url,
+            "itemId": service_item_id,
+            "featureCount": feature_count,
+        }
+
+    except Exception as exc:
+        return {"status": "Error", "code": "unexpected", "message": str(exc)}
+
+
+def _normalize_features(geojson, default_attrs=None):
+    """将 GeoJSON 归一化为 ArcGIS REST features 列表。"""
+    if not geojson:
+        return []
+    default_attrs = default_attrs or {}
+    features = []
+    geojson_type = geojson.get("type", "")
+    if geojson_type == "FeatureCollection":
+        raw_features = geojson.get("features", [])
+    elif geojson_type == "Feature":
+        raw_features = [geojson]
+    else:
+        raw_features = [{"type": "Feature", "geometry": geojson, "properties": {}}]
+    for f in raw_features:
+        if not f or f.get("type") != "Feature":
+            continue
+        geometry = f.get("geometry") or {}
+        if not geometry:
+            continue
+        properties = {**default_attrs, **(f.get("properties") or {})}
+        features.append({"geometry": _to_esri_geometry(geometry), "attributes": properties})
+    return features
+
+
+def _to_esri_geometry(geojson_geom):
+    """将 GeoJSON 几何转换为 ArcGIS REST 几何。"""
+    geom_type = geojson_geom.get("type", "")
+    coords = geojson_geom.get("coordinates", [])
+    if geom_type == "Polygon":
+        return {"rings": coords, "spatialReference": {"wkid": 4326}}
+    if geom_type == "MultiPolygon":
+        rings = []
+        for polygon in coords:
+            rings.extend(polygon)
+        return {"rings": rings, "spatialReference": {"wkid": 4326}}
+    if geom_type == "Point":
+        return {"x": coords[0], "y": coords[1], "spatialReference": {"wkid": 4326}}
+    return geojson_geom
+
+
+def _infer_fields(features):
+    """从 features 列表推断 ArcGIS fields schema。"""
+    field_map = {}
+    for feature in features:
+        attrs = feature.get("attributes", {}) or {}
+        for key, value in attrs.items():
+            if key in field_map:
+                continue
+            field_type = _arcgis_field_type(value)
+            field_map[key] = {
+                "name": key[:64],
+                "type": field_type,
+                "alias": key,
+                "nullable": True,
+            }
+    if not field_map:
+        field_map["OBJECTID"] = {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "OBJECTID", "nullable": False}
+    return list(field_map.values())
+
+
+def _arcgis_field_type(value):
+    """将 Python 类型映射为 ArcGIS field type。"""
+    if isinstance(value, int):
+        return "esriFieldTypeInteger"
+    if isinstance(value, float):
+        return "esriFieldTypeDouble"
+    if isinstance(value, str):
+        return "esriFieldTypeString"
+    return "esriFieldTypeString"
+
+
+# =============================================================================
+# Web Map 自动生成
+# =============================================================================
+
+def create_webmap(aoi_geojson, feature_service_urls, title="GISAgent Analysis"):
+    """构造 Web Map JSON 并 POST 到 Portal 创建 Web Map Item。
+
+    Args:
+        aoi_geojson (dict): AOI 几何 GeoJSON，用于设置地图范围。
+        feature_service_urls (list[str]): Feature Service URL 列表。
+        title (str): Web Map 标题。
+
+    Returns:
+        dict: {"status": "Success", "webmapUrl": "...", "itemId": "..."}
+              或 {"status": "Error", "code": "...", "message": "..."}
+    """
+    try:
+        if not publishing_status()["configured"]:
+            return {"status": "Error", "code": "not_configured", "message": "Portal credentials not configured"}
+
+        token = _token()
+        user = urllib.parse.quote(PORTAL_USERNAME)
+        folder_id = _ensure_folder(token)
+        folder_segment = f"/{folder_id}" if folder_id else ""
+
+        extent = _aoi_to_extent(aoi_geojson)
+        operational_layers = []
+        for idx, service_url in enumerate(feature_service_urls or []):
+            layer = {
+                "id": f"fs_layer_{idx}",
+                "title": f"Feature Layer {idx + 1}",
+                "url": service_url,
+                "layerType": "ArcGISFeatureLayer",
+                "visibility": True,
+                "popupInfo": {
+                    "title": "{Name}",
+                    "fieldInfos": [
+                        {"fieldName": "FAR", "label": "容积率", "visible": True, "format": {"digitSeparator": True, "places": 2}},
+                        {"fieldName": "density", "label": "密度", "visible": True, "format": {"digitSeparator": True, "places": 2}},
+                    ],
+                    "showAttachments": False,
+                },
+            }
+            operational_layers.append(layer)
+
+        webmap_json = {
+            "baseMap": {
+                "baseMapLayers": [{
+                    "id": "defaultBasemap",
+                    "title": "底图",
+                    "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+                    "layerType": "ArcGISTiledMapServiceLayer",
+                    "visibility": True,
+                    "opacity": 1,
+                }],
+                "title": "底图",
+            },
+            "operationalLayers": operational_layers,
+            "spatialReference": {"wkid": 4326},
+            "version": "2.28",
+        }
+        if extent:
+            webmap_json["initialState"] = {"viewpoint": {"targetGeometry": extent}}
+
+        webmap_text = json.dumps(webmap_json, ensure_ascii=False)
+        add_fields = {
+            "token": token,
+            "f": "json",
+            "title": title,
+            "type": "Web Map",
+            "typeKeywords": "Web Map, Explorer Web Map",
+            "tags": "GISAgent,Analysis",
+            "snippet": "GISAgent 自动生成的分析 Web Map",
+            "text": webmap_text,
+            "extent": _extent_string(extent) if extent else "",
+        }
+
+        try:
+            result = _request_json(
+                f"{PORTAL_URL}/sharing/rest/content/users/{user}{folder_segment}/addItem",
+                add_fields,
+                timeout=60,
+            )
+        except RuntimeError as exc:
+            return {"status": "Error", "code": "add_item_failed", "message": str(exc)}
+
+        if not result.get("success"):
+            return {"status": "Error", "code": "add_item_rejected", "message": str(result)}
+
+        item_id = result.get("id")
+        webmap_url = f"{PORTAL_URL}/home/webmap/viewer.html?webmap={item_id}"
+        return {"status": "Success", "webmapUrl": webmap_url, "itemId": item_id}
+
+    except Exception as exc:
+        return {"status": "Error", "code": "unexpected", "message": str(exc)}
+
+
+def _aoi_to_extent(aoi_geojson):
+    """从 AOI GeoJSON 计算 extent（中心点 + 缩放参考）。"""
+    if not aoi_geojson:
+        return None
+    coords = _extract_coordinates(aoi_geojson)
+    if not coords:
+        return None
+    xs = [c[0] for c in coords]
+    ys = [c[1] for c in coords]
+    return {
+        "xmin": min(xs), "ymin": min(ys),
+        "xmax": max(xs), "ymax": max(ys),
+        "spatialReference": {"wkid": 4326},
+    }
+
+
+def _extract_coordinates(geom):
+    """递归提取 GeoJSON 坐标点列表。"""
+    if not geom:
+        return []
+    geom_type = geom.get("type", "")
+    coords = geom.get("coordinates", [])
+    if geom_type == "Point":
+        return [coords]
+    if geom_type in ("LineString", "MultiPoint"):
+        return coords
+    if geom_type == "Polygon":
+        return [pt for ring in coords for pt in ring]
+    if geom_type == "MultiPolygon":
+        return [pt for poly in coords for ring in poly for pt in ring]
+    if geom_type == "Feature":
+        return _extract_coordinates(geom.get("geometry", {}))
+    if geom_type == "FeatureCollection":
+        pts = []
+        for f in geom.get("features", []):
+            pts.extend(_extract_coordinates(f.get("geometry", {})))
+        return pts
+    if geom_type == "GeometryCollection":
+        pts = []
+        for g in geom.get("geometries", []):
+            pts.extend(_extract_coordinates(g))
+        return pts
+    return []
+
+
+def _extent_string(extent):
+    """将 extent 对象格式化为 Portal addItem 参数字符串。"""
+    if not extent:
+        return ""
+    return f"{extent['xmin']},{extent['ymin']},{extent['xmax']},{extent['ymax']}"
+
+
+# =============================================================================
+# Web Scene 三维发布
+# =============================================================================
+
+def create_webscene(slpk_item_id, title="GISAgent 3D"):
+    """基于 SLPK Item ID 创建 Web Scene（含地面、图层、相机位置）。
+
+    Args:
+        slpk_item_id (str): 已上传的 SLPK Portal Item ID。
+        title (str): Web Scene 标题。
+
+    Returns:
+        dict: {"status": "Success", "websceneUrl": "...", "itemId": "..."}
+              或 {"status": "Error", "code": "...", "message": "..."}
+    """
+    try:
+        if not publishing_status()["configured"]:
+            return {"status": "Error", "code": "not_configured", "message": "Portal credentials not configured"}
+
+        token = _token()
+        user = urllib.parse.quote(PORTAL_USERNAME)
+        folder_id = _ensure_folder(token)
+        folder_segment = f"/{folder_id}" if folder_id else ""
+
+        item_info = _request_json(
+            f"{PORTAL_URL}/sharing/rest/content/items/{slpk_item_id}",
+            {"token": token, "f": "json"},
+        )
+        service_url = item_info.get("url")
+
+        scene_json = {
+            "baseMap": {
+                "id": "basemap",
+                "title": "底图",
+                "baseMapLayers": [{
+                    "id": "worldImagery",
+                    "title": "World Imagery",
+                    "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+                    "layerType": "ArcGISTiledMapServiceLayer",
+                }],
+                "elevationLayers": [{
+                    "id": "globalElevation",
+                    "url": "https://server.arcgisonline.com/arcgis/rest/services/WorldElevation/Terrain/ImageServer",
+                    "layerType": "ArcGISTiledElevationServiceLayer",
+                    "title": "World Elevation",
+                }],
+            },
+            "ground": {
+                "layers": [{
+                    "id": "worldElevation",
+                    "url": "https://server.arcgisonline.com/arcgis/rest/services/WorldElevation/Terrain/ImageServer",
+                    "layerType": "ArcGISTiledElevationServiceLayer",
+                    "title": "World Elevation",
+                }],
+                "transparency": 0,
+            },
+            "layers": [{
+                "id": "slpk_layer_0",
+                "title": title,
+                "url": service_url,
+                "layerType": "ArcGISSceneServiceLayer",
+                "visibility": True,
+            }] if service_url else [],
+            "spatialReference": {"wkid": 4326},
+            "initialState": {
+                "environment": {"lighting": {"datetime": int(time.time() * 1000)}},
+                "viewpoint": {
+                    "scale": 50000,
+                    "rotation": 0,
+                    "targetGeometry": {
+                        "spatialReference": {"wkid": 4326},
+                        "x": 116.397, "y": 39.908, "z": 5000,
+                    },
+                },
+            },
+            "version": "1.37",
+            "authoringApp": "GISAgent",
+        }
+
+        add_fields = {
+            "token": token,
+            "f": "json",
+            "title": title,
+            "type": "Web Scene",
+            "typeKeywords": "Web Scene, GISAgent",
+            "tags": "GISAgent,3D,Scene",
+            "snippet": f"GISAgent 自动生成的三维场景，源 SLPK: {slpk_item_id}",
+            "text": json.dumps(scene_json, ensure_ascii=False),
+        }
+
+        try:
+            result = _request_json(
+                f"{PORTAL_URL}/sharing/rest/content/users/{user}{folder_segment}/addItem",
+                add_fields,
+                timeout=60,
+            )
+        except RuntimeError as exc:
+            return {"status": "Error", "code": "add_item_failed", "message": str(exc)}
+
+        if not result.get("success"):
+            return {"status": "Error", "code": "add_item_rejected", "message": str(result)}
+
+        item_id = result.get("id")
+        webscene_url = f"{PORTAL_URL}/home/webscene/viewer.html?webmap={item_id}"
+        return {"status": "Success", "websceneUrl": webscene_url, "itemId": item_id}
+
+    except Exception as exc:
+        return {"status": "Error", "code": "unexpected", "message": str(exc)}
+
+
+# =============================================================================
+# Locator 地理编码（高德备用）
+# =============================================================================
+
+def geocode_with_locator(address, country_code="CN"):
+    """调用 Enterprise Locator 服务进行地理编码，作为高德 API 备用路径。
+
+    Args:
+        address (str): 地址字符串。
+        country_code (str): 国家代码，默认 "CN"。
+
+    Returns:
+        dict: {"status": "Success", "longitude": x, "latitude": y, "score": 匹配度}
+              或 {"status": "Error", "code": "...", "message": "..."}
+    """
+    try:
+        portal_parts = urllib.parse.urlsplit(PORTAL_URL)
+        locator_url = os.environ.get("GEOSCENE_LOCATOR_URL")
+        if not locator_url:
+            default_host = portal_parts.netloc.split(":")[0]
+            locator_url = f"{portal_parts.scheme}://{default_host}/server/rest/services/World/GeocodeServer"
+        locator_url = locator_url.rstrip("/")
+
+        search_fields = {
+            "singleLine": address,
+            "countryCode": country_code,
+            "f": "json",
+            "maxLocations": 1,
+        }
+
+        candidates = None
+        try:
+            result = _request_json(f"{locator_url}/findAddressCandidates", search_fields, timeout=30)
+            candidates = result.get("candidates", [])
+        except RuntimeError:
+            pass
+
+        if candidates is None:
+            try:
+                token = _token()
+                search_fields["token"] = token
+                result = _request_json(f"{locator_url}/findAddressCandidates", search_fields, timeout=30)
+                candidates = result.get("candidates", [])
+            except (RuntimeError, Exception):
+                return {"status": "Error", "code": "locator_unavailable", "message": "Locator service is not accessible"}
+
+        if not candidates:
+            return {"status": "Error", "code": "no_match", "message": f"No match found for: {address}"}
+
+        best = candidates[0]
+        location = best.get("location", {})
+        return {
+            "status": "Success",
+            "longitude": location.get("x"),
+            "latitude": location.get("y"),
+            "score": best.get("score", 0),
+        }
+
+    except TimeoutError:
+        return {"status": "Error", "code": "timeout", "message": "Locator request timed out"}
+    except Exception as exc:
+        return {"status": "Error", "code": "unexpected", "message": str(exc)}

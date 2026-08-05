@@ -2057,4 +2057,66 @@ public class AgentLoopService {
 
     private record PlaceAnalysisRequest(String locationName, int radiusMeters) {}
     private record NavigationRequest(String locationName) {}
+
+    private final List<ScenarioStrategy> scenarioStrategies = List.of(
+            new ConservativeStrategy(),
+            new BalancedStrategy(),
+            new AggressiveStrategy()
+    );
+
+    public List<Scenario> generateScenarios(
+            Map<String, Object> aoi,
+            List<Map<String, Object>> buildings,
+            SpatialCapabilityCatalog catalog) {
+        double siteArea = extractSiteArea(aoi);
+        double heightLimit = extractHeightLimit(catalog);
+        Map<String, Double> context = new LinkedHashMap<>();
+        context.put("siteArea", siteArea);
+        context.put("heightLimit", heightLimit);
+        context.put("targetFar", 2.0);
+        context.put("densityFactor", 0.85);
+        List<Scenario> scenarios = new ArrayList<>();
+        for (ScenarioStrategy strategy : scenarioStrategies) {
+            List<Map<String, Object>> adjustedBuildings = strategy.apply(buildings, context);
+            Map<String, Double> params = new LinkedHashMap<>(context);
+            params.put("strategyId", (double) strategy.id().hashCode());
+            scenarios.add(new Scenario(
+                    strategy.id(),
+                    strategy.name(),
+                    strategy.description(),
+                    params,
+                    adjustedBuildings
+            ));
+        }
+        return scenarios;
+    }
+
+    public List<ScenarioResult> evaluateScenarios(
+            List<Scenario> scenarios,
+            String capabilityId,
+            double originalFar) {
+        ScenarioEvaluator evaluator = new ScenarioEvaluator(spatialCapabilityCatalog);
+        return evaluator.evaluate(scenarios, capabilityId, originalFar);
+    }
+
+    private double extractSiteArea(Map<String, Object> aoi) {
+        if (aoi == null) return 10000.0;
+        Object area = aoi.get("siteArea");
+        if (area == null) area = aoi.get("site_area");
+        if (area == null) area = aoi.get("site_area_sqm");
+        if (area == null) return 10000.0;
+        try { return Math.max(1, Double.parseDouble(area.toString())); }
+        catch (NumberFormatException e) { return 10000.0; }
+    }
+
+    private double extractHeightLimit(SpatialCapabilityCatalog catalog) {
+        if (catalog == null) return 24.0;
+        List<SpatialCapabilityCatalog.Constraint> constraints = catalog.getConstraints("urban_metrics");
+        for (SpatialCapabilityCatalog.Constraint c : constraints) {
+            if ("buildingHeight".equals(c.metric()) || "building_height".equals(c.metric())) {
+                return c.max();
+            }
+        }
+        return 24.0;
+    }
 }

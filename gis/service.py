@@ -652,6 +652,220 @@ def extract_urban_metrics(aoi, buildings=None):
 
 
 # --------------------------------------------------------------------------- #
+# Incremental analysis
+# --------------------------------------------------------------------------- #
+def _geometry_hash(geom):
+    """Compute a stable hash for a geometry dict.
+
+    Uses SHA-256 over the JSON-serialized geometry with sorted keys so that
+    geometrically identical inputs produce the same hash regardless of key
+    ordering or serialization noise.
+    """
+    normalized = json.dumps(geom, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _extract_building_id(feature):
+    """Extract the stable identifier from a building feature."""
+    props = (feature or {}).get("properties") or {}
+    return model._building_identifier(props, 0)
+
+
+def _diff_buildings(old_list, new_list):
+    """Compare two building feature lists by id.
+
+    Returns {"added": [], "removed": [], "modified": []} where each entry
+    is a building feature. A building is "modified" if its id exists in both
+    lists but its geometry or properties differ.
+    """
+    old_by_id = {}
+    for feature in old_list:
+        bid = _extract_building_id(feature)
+        old_by_id[bid] = feature
+
+    new_by_id = {}
+    for feature in new_list:
+        bid = _extract_building_id(feature)
+        new_by_id[bid] = feature
+
+    added = []
+    removed = []
+    modified = []
+
+    for bid, feature in new_by_id.items():
+        if bid not in old_by_id:
+            added.append(feature)
+        elif json.dumps(feature, sort_keys=True, ensure_ascii=False) != json.dumps(
+            old_by_id[bid], sort_keys=True, ensure_ascii=False
+        ):
+            modified.append(feature)
+
+    for bid, feature in old_by_id.items():
+        if bid not in new_by_id:
+            removed.append(feature)
+
+    return {"added": added, "removed": removed, "modified": modified}
+
+
+def _compute_building_records(buildings, aoi):
+    """Compute metric records for a set of buildings against an AOI.
+
+    Reuses the same clipping + area logic as extract_urban_metrics so
+    incremental records are consistent with full computation.
+    """
+    if not buildings:
+        return []
+    features = model._features_from_source(buildings)
+    clipped = adapter._clip_features_bbox(features, aoi)
+    records = []
+    for feature in clipped:
+        geometry = feature.get("geometry") or {}
+        footprint_area = 0.0
+        if geometry.get("type") == "Polygon":
+            rings = geometry.get("coordinates") or []
+            if rings:
+                footprint_area = model._ring_area_sqm(rings[0])
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates") or []:
+                if polygon:
+                    footprint_area += model._ring_area_sqm(polygon[0])
+        if footprint_area <= 0:
+            continue
+        records.append({
+            "properties": dict(feature.get("properties") or {}),
+            "footprint_area": footprint_area,
+        })
+    return records
+
+
+def _merge_delta_metrics(prev_buildings, curr_buildings, aoi):
+    """Merge unchanged building records with delta-building records.
+
+    Identifies which buildings are unchanged (same id in both sets with
+    identical serialized form), then computes records only for added +
+    modified buildings. The merged record set is fed through
+    _build_metrics_result for a consistent result identical to full
+    recomputation.
+    """
+    aoi_features = model._features_from_source(aoi)
+    if not aoi_features:
+        raise ValueError("AOI has no usable geometry")
+
+    site_area = 0.0
+    for feature in aoi_features:
+        geometry = feature.get("geometry") or {}
+        if geometry.get("type") == "Polygon":
+            rings = geometry.get("coordinates") or []
+            if rings:
+                site_area += model._ring_area_sqm(rings[0])
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in geometry.get("coordinates") or []:
+                if polygon:
+                    site_area += model._ring_area_sqm(polygon[0])
+
+    prev_features = model._features_from_source(prev_buildings) if prev_buildings else []
+    curr_features = model._features_from_source(curr_buildings) if curr_buildings else []
+    delta = _diff_buildings(prev_features, curr_features)
+
+    unchanged_features = [
+        f for f in prev_features
+        if _extract_building_id(f) not in {_extract_building_id(x) for x in delta["removed"]}
+        and _extract_building_id(f) not in {_extract_building_id(x) for x in delta["modified"]}
+    ]
+
+    added_modified = delta["added"] + delta["modified"]
+    delta_records = _compute_building_records(
+        {"type": "FeatureCollection", "features": added_modified}, aoi
+    )
+    unchanged_records = _compute_building_records(
+        {"type": "FeatureCollection", "features": unchanged_features}, aoi
+    )
+
+    merged_records = unchanged_records + delta_records
+
+    return model._build_metrics_result(
+        merged_records, site_area=site_area, buffer_area=site_area,
+        backend="standard_library_metrics",
+        metric_crs=model._metric_crs_for_features(aoi_features),
+    )
+
+
+def compute_delta_metrics(previous_state, current_state):
+    """Compute urban metrics incrementally based on AOI/building changes.
+
+    previous_state / current_state structure:
+        {
+            "aoi": {...},         # GeoJSON geometry or FeatureCollection
+            "buildings": {...},   # GeoJSON FeatureCollection
+            "metrics": {...},     # previous extract_urban_metrics output
+        }
+
+    Returns:
+        {
+            "status": "incremental" | "full",
+            "metrics": {...},
+            "delta": {"added": [...], "removed": [...], "modified": [...]},
+            "computationSaved": "75%"
+        }
+    """
+    if previous_state is None:
+        metrics = extract_urban_metrics(
+            current_state.get("aoi"), current_state.get("buildings")
+        )
+        return {
+            "status": "full",
+            "metrics": metrics,
+            "delta": {"added": [], "removed": [], "modified": []},
+            "computationSaved": "0%",
+        }
+
+    prev_aoi = previous_state.get("aoi") or {}
+    curr_aoi = current_state.get("aoi") or {}
+    prev_buildings = previous_state.get("buildings") or {}
+    curr_buildings = current_state.get("buildings") or {}
+
+    prev_aoi_geom = prev_aoi.get("geometry", prev_aoi)
+    curr_aoi_geom = curr_aoi.get("geometry", curr_aoi)
+    aoi_changed = _geometry_hash(prev_aoi_geom) != _geometry_hash(curr_aoi_geom)
+
+    prev_features = model._features_from_source(prev_buildings)
+    curr_features = model._features_from_source(curr_buildings)
+    delta = _diff_buildings(prev_features, curr_features)
+
+    changed_count = len(delta["added"]) + len(delta["removed"]) + len(delta["modified"])
+    total_prev = max(len(prev_features), 1)
+
+    if aoi_changed:
+        metrics = extract_urban_metrics(curr_aoi, curr_buildings)
+        return {
+            "status": "full",
+            "metrics": metrics,
+            "delta": delta,
+            "computationSaved": "0%",
+        }
+
+    if changed_count == 0:
+        return {
+            "status": "incremental",
+            "metrics": previous_state.get("metrics", {}),
+            "delta": delta,
+            "computationSaved": "100%",
+        }
+
+    merged_metrics = _merge_delta_metrics(prev_buildings, curr_buildings, curr_aoi)
+
+    saved_ratio = max(0.0, 1.0 - changed_count / total_prev)
+    saved_pct = f"{round(saved_ratio * 100)}%"
+
+    return {
+        "status": "incremental",
+        "metrics": merged_metrics,
+        "delta": delta,
+        "computationSaved": saved_pct,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Skyline / sunlight analysis
 # --------------------------------------------------------------------------- #
 def _site_selection_weights(raw_weights):

@@ -1,5 +1,5 @@
 {
-  "version": "1.3",
+  "version": "1.4",
   "capabilities": [
     {
       "id": "urban_metrics",
@@ -29,7 +29,17 @@
       "operations": ["urban_metrics"],
       "tool": "analyzeCurrentView",
       "outputs": ["metric", "chart"],
-      "rendererKinds": ["metric", "chart"]
+      "rendererKinds": ["metric", "chart"],
+      "constraints": [
+        {"metric": "FAR", "max": 2.0, "unit": "", "source": "R2用地规范 GB50137"},
+        {"metric": "buildingDensity", "max": 30.0, "unit": "%", "source": "R2用地规范 GB50137"},
+        {"metric": "buildingHeight", "max": 54.0, "unit": "m", "source": "R2用地规范 GB50137"}
+      ],
+      "relations": [
+        {"trigger": "height > 24m", "action": "require", "target": "sunlight_analysis"},
+        {"trigger": "FAR > max", "action": "flag", "target": "violation_over_limit"},
+        {"trigger": "density > max", "action": "flag", "target": "violation_over_density"}
+      ]
     },
     {
       "id": "skyline_analysis",
@@ -39,7 +49,13 @@
       "operations": ["directional_height_profile"],
       "tool": "skylineAnalysis",
       "outputs": ["chart", "metric"],
-      "rendererKinds": ["chart", "metric"]
+      "rendererKinds": ["chart", "metric"],
+      "constraints": [
+        {"metric": "maxBuildingHeight", "max": 200.0, "unit": "m", "source": "通用天际线分析上限"}
+      ],
+      "relations": [
+        {"trigger": "maxHeight > 100m", "action": "require", "target": "sunlight_analysis"}
+      ]
     },
     {
       "id": "sunlight_analysis",
@@ -49,7 +65,13 @@
       "operations": ["solar_position", "shadow_screening"],
       "tool": "sunlightAnalysis",
       "outputs": ["vector", "chart", "metric"],
-      "rendererKinds": ["vector", "chart", "metric"]
+      "rendererKinds": ["vector", "chart", "metric"],
+      "constraints": [
+        {"metric": "minSunlightHours", "max": 2.0, "unit": "h", "source": "城市居住区规划设计标准 GB50180"}
+      ],
+      "relations": [
+        {"trigger": "sunlightHours < min", "action": "flag", "target": "violation_insufficient_sunlight"}
+      ]
     },
     {
       "id": "site_selection",
@@ -65,7 +87,11 @@
         "purpose": "按候选地块与设施、约束要素的直线距离进行透明的多准则选址筛查和排序。",
         "qualityGates": ["候选地块必须为点或面 GeoJSON。", "设施与约束应来自可追溯的权威数据源。", "权重必须由业务目标明确给定或确认。"],
         "limitations": "结果仅为直线距离筛查，不包含路网时间、产权、法定用地条件、地形、容量或审批约束；不得作为最终选址结论。"
-      }
+      },
+      "constraints": [],
+      "relations": [
+        {"trigger": "candidateCount > 50", "action": "flag", "target": "warning_large_candidate_set"}
+      ]
     },
     {
       "id": "flood_analysis",
@@ -90,7 +116,14 @@
       "operations": ["depression_fill", "d8_flow_direction", "flow_accumulation", "rainfall_runoff_screening", "drainage_proximity_reduction"],
       "tool": "floodAnalysis",
       "outputs": ["vector", "raster", "metric"],
-      "rendererKinds": ["vector", "raster", "metric"]
+      "rendererKinds": ["vector", "raster", "metric"],
+      "constraints": [
+        {"max": 500.0, "metric": "rainfallMm", "unit": "mm", "source": "极端降雨情景上限"}
+      ],
+      "relations": [
+        {"trigger": "rainfallMm > 200", "action": "require", "target": "dem_resolution_check"},
+        {"trigger": "rainfallMm > 300", "action": "flag", "target": "warning_extreme_rainfall"}
+      ]
     }
   ]
 }
