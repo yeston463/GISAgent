@@ -44,7 +44,7 @@ class SpatialCapabilityCatalogTest {
                   "outputs":["chart","metric"],"rendererKinds":["chart","metric"]
                 }]}"""));
 
-        assertEquals("1.2", catalog.version());
+        assertEquals("1.4", catalog.version());
         assertEquals("directional_height_profile", catalog.find("skyline_analysis").orElseThrow().operations().get(0));
     }
 }

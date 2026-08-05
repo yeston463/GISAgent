@@ -1537,7 +1537,7 @@ def create_webscene(slpk_item_id, title="GISAgent 3D"):
             return {"status": "Error", "code": "add_item_rejected", "message": str(result)}
 
         item_id = result.get("id")
-        webscene_url = f"{PORTAL_URL}/home/webscene/viewer.html?webmap={item_id}"
+        webscene_url = f"{PORTAL_URL}/home/webscene/viewer.html?webscene={item_id}"
         return {"status": "Success", "websceneUrl": webscene_url, "itemId": item_id}
 
     except Exception as exc:

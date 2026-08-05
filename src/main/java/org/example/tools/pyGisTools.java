@@ -1,9 +1,13 @@
 package org.example.tools;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
+import org.example.agent.AgentLoopService;
+import org.example.agent.Scenario;
+import org.example.agent.ScenarioResult;
 import org.example.service.GisContextService;
 import org.example.service.KnowledgeService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,8 +15,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -26,6 +32,9 @@ public class pyGisTools {
 
     @Autowired
     private KnowledgeService knowledgeService;
+
+    @Autowired
+    private AgentLoopService agentLoopService;
 
     @Value("${gis.python-service-url:http://127.0.0.1:8000/analysis}")
     private String pythonServiceUrl;
@@ -365,6 +374,56 @@ public class pyGisTools {
             base = base.substring(0, base.length() - 1);
         }
         return base + path;
+    }
+
+    @Tool("scenarioComparison")
+    public Map<String, Object> scenarioComparison(
+            @P("capabilityId") String capabilityId) {
+        try {
+            JSONObject context = JSON.parseObject(contextService.getGeoJson());
+            if (context == null || !context.containsKey("aoi") || !context.containsKey("buildings")) {
+                return Map.of("status", "Error", "message", "No AOI/buildings in context. Run analyzeArea first.");
+            }
+            Map<String, Object> aoi = context.getJSONObject("aoi");
+            List<Map<String, Object>> buildings = new ArrayList<>();
+            JSONArray buildingArray = context.getJSONArray("buildings");
+            if (buildingArray != null) {
+                for (Object o : buildingArray) {
+                    if (o instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> entry = (Map<String, Object>) o;
+                        buildings.add(entry);
+                    }
+                }
+            }
+            double originalFar = context.getDoubleValue("far");
+            if (originalFar <= 0) originalFar = 1.0;
+
+            List<Scenario> scenarios = agentLoopService.generateScenarios(aoi, buildings, null);
+            List<ScenarioResult> results = agentLoopService.evaluateScenarios(scenarios, capabilityId != null ? capabilityId : "urban_metrics", originalFar);
+
+            List<Map<String, Object>> responseResults = new ArrayList<>();
+            for (ScenarioResult r : results) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("scenarioId", r.scenario().id());
+                entry.put("name", r.scenario().name());
+                entry.put("description", r.scenario().description());
+                entry.put("metrics", r.metrics());
+                entry.put("violations", r.violations());
+                entry.put("score", r.score());
+                responseResults.add(entry);
+            }
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "Success");
+            response.put("scenarios", responseResults);
+            response.put("command", Map.of(
+                    "action", "show-planning-comparison",
+                    "params", Map.of("scenarios", responseResults)
+            ));
+            return response;
+        } catch (Exception e) {
+            return Map.of("status", "Error", "message", e.getMessage());
+        }
     }
 
     private void saveContextFromResult(Map<String, Object> result) {

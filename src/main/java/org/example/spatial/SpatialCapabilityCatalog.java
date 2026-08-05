@@ -182,14 +182,19 @@ public class SpatialCapabilityCatalog {
         for (Map.Entry<String, Capability> entry : candidate.capabilities().entrySet()) {
             Capability before = current.capabilities().get(entry.getKey());
             Capability after = entry.getValue();
-            if (before == null || (!before.aliases().equals(after.aliases())
-                    || !before.dataRequirements().equals(after.dataRequirements())
-                    || !before.knowledge().equals(after.knowledge()))) {
+            boolean aliasesChanged = before == null || !before.aliases().equals(after.aliases());
+            boolean dataReqChanged = before == null || !before.dataRequirements().equals(after.dataRequirements());
+            boolean knowledgeChanged = before == null || !before.knowledge().equals(after.knowledge());
+            boolean constraintsChanged = before == null || !before.constraints().equals(after.constraints());
+            boolean relationsChanged = before == null || !before.relations().equals(after.relations());
+            if (aliasesChanged || dataReqChanged || knowledgeChanged || constraintsChanged || relationsChanged) {
                 Map<String, Object> change = new LinkedHashMap<>();
                 change.put("capabilityId", entry.getKey());
-                change.put("aliasesChanged", before == null || !before.aliases().equals(after.aliases()));
-                change.put("dataRequirementsChanged", before == null || !before.dataRequirements().equals(after.dataRequirements()));
-                change.put("knowledgeChanged", before == null || !before.knowledge().equals(after.knowledge()));
+                change.put("aliasesChanged", aliasesChanged);
+                change.put("dataRequirementsChanged", dataReqChanged);
+                change.put("knowledgeChanged", knowledgeChanged);
+                change.put("constraintsChanged", constraintsChanged);
+                change.put("relationsChanged", relationsChanged);
                 result.add(change);
             }
         }

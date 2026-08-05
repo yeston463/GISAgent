@@ -738,14 +738,12 @@ def _compute_building_records(buildings, aoi):
     return records
 
 
-def _merge_delta_metrics(prev_buildings, curr_buildings, aoi):
-    """Merge unchanged building records with delta-building records.
+def _merge_delta_metrics(prev_buildings, curr_buildings, aoi, cached_records=None):
+    """Merge cached unchanged building records with delta-building records.
 
-    Identifies which buildings are unchanged (same id in both sets with
-    identical serialized form), then computes records only for added +
-    modified buildings. The merged record set is fed through
-    _build_metrics_result for a consistent result identical to full
-    recomputation.
+    If cached_records is provided (from a previous extract_urban_metrics call),
+    unchanged buildings are not recomputed. Only added + modified buildings
+    go through _compute_building_records.
     """
     aoi_features = model._features_from_source(aoi)
     if not aoi_features:
@@ -767,18 +765,20 @@ def _merge_delta_metrics(prev_buildings, curr_buildings, aoi):
     curr_features = model._features_from_source(curr_buildings) if curr_buildings else []
     delta = _diff_buildings(prev_features, curr_features)
 
-    unchanged_features = [
-        f for f in prev_features
-        if _extract_building_id(f) not in {_extract_building_id(x) for x in delta["removed"]}
-        and _extract_building_id(f) not in {_extract_building_id(x) for x in delta["modified"]}
-    ]
+    changed_ids = {_extract_building_id(x) for x in delta["removed"]}
+    changed_ids |= {_extract_building_id(x) for x in delta["modified"]}
+
+    if cached_records is not None:
+        unchanged_records = [r for r in cached_records if r.get("id") not in changed_ids]
+    else:
+        unchanged_features = [f for f in prev_features if _extract_building_id(f) not in changed_ids]
+        unchanged_records = _compute_building_records(
+            {"type": "FeatureCollection", "features": unchanged_features}, aoi
+        )
 
     added_modified = delta["added"] + delta["modified"]
     delta_records = _compute_building_records(
         {"type": "FeatureCollection", "features": added_modified}, aoi
-    )
-    unchanged_records = _compute_building_records(
-        {"type": "FeatureCollection", "features": unchanged_features}, aoi
     )
 
     merged_records = unchanged_records + delta_records
@@ -854,14 +854,11 @@ def compute_delta_metrics(previous_state, current_state):
 
     merged_metrics = _merge_delta_metrics(prev_buildings, curr_buildings, curr_aoi)
 
-    saved_ratio = max(0.0, 1.0 - changed_count / total_prev)
-    saved_pct = f"{round(saved_ratio * 100)}%"
-
     return {
         "status": "incremental",
         "metrics": merged_metrics,
         "delta": delta,
-        "computationSaved": saved_pct,
+        "computationSaved": "deferred_to_cached_records",
     }
 
 

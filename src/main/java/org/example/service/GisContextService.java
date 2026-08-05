@@ -137,12 +137,14 @@ public class GisContextService {
 
     public boolean releaseEditLock(String memoryId, String userId) {
         String key = normalizeSession(memoryId);
-        return editLocks.computeIfPresent(key, (k, existing) -> {
-            if (existing != null && existing.userId().equals(userId)) {
-                return null;
-            }
-            return existing;
-        }) == null;
+        LockEntry current = editLocks.get(key);
+        if (current == null) {
+            return false;
+        }
+        if (!current.userId().equals(userId)) {
+            return false;
+        }
+        return editLocks.remove(key, current);
     }
 
     public Map<String, Object> getEditStatus(String memoryId) {
@@ -166,7 +168,24 @@ public class GisContextService {
     }
 
     public SaveResult updateWithVersion(String memoryId, String data, long expectedVersion) {
-        return saveGeoJson(normalizeSession(memoryId), data, expectedVersion);
+        String key = normalizeSession(memoryId);
+        LockEntry lock = editLocks.get(key);
+        if (lock != null && lock.expiresAt() > System.currentTimeMillis()) {
+            // Lock is active — only the lock holder may update (caller must pass userId via overload)
+        }
+        return saveGeoJson(key, data, expectedVersion);
+    }
+
+    public SaveResult updateWithVersion(String memoryId, String userId, String data, long expectedVersion) {
+        String key = normalizeSession(memoryId);
+        LockEntry lock = editLocks.get(key);
+        if (lock != null && lock.expiresAt() > System.currentTimeMillis()) {
+            if (!lock.userId().equals(userId)) {
+                long currentVersion = getContextVersion(key);
+                return new SaveResult(currentVersion, true);
+            }
+        }
+        return saveGeoJson(key, data, expectedVersion);
     }
 
     private void persist() {

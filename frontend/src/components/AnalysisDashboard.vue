@@ -42,7 +42,7 @@
               <strong>{{ (result.score * 100).toFixed(1) }}</strong>
             </div>
             <div v-if="result.violations.length" class="violations-list">
-              <small v-for="(v, vi) in result.violations" :key="vi" class="violation-item">{{ v.metric() }}={{ v.value() }}>{{ v.max() }}</small>
+              <small v-for="(v, vi) in result.violations" :key="vi" class="violation-item">{{ v.metric }}={{ v.value }} > {{ v.max }}</small>
             </div>
           </article>
         </div>
