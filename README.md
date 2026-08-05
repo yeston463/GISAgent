@@ -1,163 +1,147 @@
-# GISAgent · 专业 GIS 分析引擎
+# GISAgent · 一句话完成地块分析
 
-面向竞赛的「LLM 智能体 + GIS 空间分析」全栈系统：用自然语言驱动规划方案生成、城市指标计算、天际线/日照分析，并通过 CityEngine / GeoScene 做三维成果发布。
+## 解决什么问题
 
-## 架构
+规划师分析一个地块的容积率、建筑密度、日照和天际线，通常要打开 **CAD 算指标 → GIS 取建筑 → SketchUp 看三维 → PPT 写结论**——切 5 个软件，耗时 30 分钟以上，数据在工具间对不齐，结论容易遗漏或编造。
 
-三个服务协同，前端由 Spring Boot 托管（也可独立 `npm run dev`）：
+## 我们的方案
 
-| 服务 | 技术 | 端口 | 职责 |
-|------|------|------|------|
-| **Java 后端** | Spring Boot | `:8080` | 主网关 / 智能体编排 / 动态代码执行安全层 |
-| **Python GIS 服务** | FastAPI | `:8000` | 空间分析（指标/天际线/日照/缓冲/取楼），Overpass 取楼 |
-| **Vue + ArcGIS 前端** | Vue 3 + Vite + @arcgis/core | `:5173`(dev) | 交互式地图与成果展示（独立 Vite 服务） |
+**说一句话，45 秒完成全流程。** 用户输入"分析上海这块地的容积率和天际线"，系统自动定位地块、获取建筑、计算指标、生成三维视图、输出带溯源证据的分析报告。
+
+**核心不是 LLM 调工具，而是受约束、可追溯的空间分析工作流：**
+
+| 环节 | 机制 | 保障 |
+|------|------|------|
+| 意图理解 | LLM 强制工具调用，路由到能力目录白名单 | 模型不能随意编造分析类型 |
+| 数据获取 | 优先 OSM/服务端取数，失败降级到离线案例 | 无网络时仍可演示演示 |
+| 指标计算 | GIS 引擎（Python）计算，LLM 不碰数字 | 杜绝模型幻觉污染专业结论 |
+| 结果校验 | 约束校验层检查容积率、密度、高度是否越界 | 异常值自动标记 |
+| 证据溯源 | 每条记录带 memoryId、时间戳、数据来源、会话隔离 | A 用户看不到 B 用户的分析 |
+
+## 三类用户
+
+- **规划师/设计师**：快速筛查方案指标，多方案比选
+- **教师/学生**：规划课程教学演示，理解指标计算过程
+- **评审方**：验证分析结论的可复现性与数据来源
+
+## 关键差异（有实测对比）
+
+| 维度 | 传统流程 | GISAgent |
+|------|----------|----------|
+| 操作步骤 | 5+ 软件切换 | 一个对话窗口 |
+| 耗时 | ~30 分钟 | ~45 秒 |
+| 数据一致性 | 手工传递，易出错 | 全链路统一上下文 |
+| 结果可复现 | 依赖个人操作 | 固定输入 → 固定输出，自动测试锁定 |
+| 离线能力 | 依赖专业软件许可 | 内置 6 栋建筑案例，无网络可跑 |
+
+**离线验证数据**（内置案例，纯标准库计算，零外部依赖）：
+
+```
+用地面积：126,264 m²
+总建筑面积：479,807 m²
+容积率 FAR：3.8
+建筑密度：24.0%
+建筑数量：6
+数据确定性：SHA-256 锁定，可复现
+```
+
+## 30 秒体验
+
+```bash
+# 1. 配置密钥
+cp .env.example .env          # 填 QWEN-APIKEY
+
+# 2. 一键启动
+start-dev.bat                 # Java :8080 + Python :8000 + Vue :5173
+
+# 3. 浏览器打开
+# http://127.0.0.1:5173
+# 输入："分析上海这块地的容积率和天际线"
+```
+
+**无网络/无密钥？** 系统自动加载内置离线案例，前端 demo 模式一键验证完整分析链路。
+
+## 一键验收（离线模式）
+
+```powershell
+scripts\acceptance-offline.ps1
+```
+
+自动完成：启动 Python GIS → 启动 Java 后端 → 加载离线案例 → 计算指标 → 比对基准值。全程不依赖 OSM/LLM。
+
+## 技术架构
+
+三个服务协同，前端独立运行：
 
 ```
 浏览器 ──▶ Vite(:5173) ──┬─▶ /api/* 代理到 Java(:8080) ──▶ Python(:8000 /analysis/*)
-                        └─▶ /analysis/* 代理到 Python(:8080)
+                        └─▶ /analysis/* 代理到 Python(:8000)
                                 │
                                 └─▶ CityEngine / GeoScene（三维成果发布）
 ```
 
-## 快速开始
+| 服务 | 技术 | 端口 | 职责 |
+|------|------|------|------|
+| **Vue 前端** | Vue 3 + Vite + @arcgis/core | `:5173` | 交互式地图 + 对话分析（独立 Vite 服务） |
+| **Java 后端** | Spring Boot 3.3 + LangChain4j | `:8080` | Agent 编排 / 工具注册 / 安全校验 / 溯源记录 |
+| **Python GIS** | FastAPI + Pydantic | `:8000` | 指标计算 / 天际线 / 日照 / 取楼 |
 
-1. 复制环境变量模板并填写密钥：
+## 能力目录
 
-   ```bash
-   cp .env.example .env      # 至少填 QWEN-APIKEY
-   ```
+- `urban_metrics` — 容积率、建筑密度、建筑覆盖率、高度统计、层数分布
+- `skyline_analysis` — 天际线轮廓筛查（城市尺度近似）
+- `sunlight_analysis` — 日照阴影筛查（城市尺度近似）
+- `flood_analysis` — 内涝积水筛查（DEM + 降雨情景）
+- `site_selection` — 多准则选址适宜性评估
 
-2. 一键启动全部服务（Java / Python / Vue / 可选 Redis·pgvector）：
-
-   ```bash
-   start-dev.bat
-   ```
-
-   启动后访问：
-   - 前端：http://127.0.0.1:5173
-   - Java 后端：http://127.0.0.1:8080
-   - Python GIS API：http://127.0.0.1:8000/analysis/runtime（交互式文档 `/docs`）
-
-3. 仅重启 Python GIS 服务（不重启 Java、前端、Portal）：双击或在终端运行：
-
-   ```bat
-   start-python-gis.bat
-   ```
-
-## 环境变量（`.env`）
-
-| 变量 | 说明 | 默认 |
-|------|------|------|
-| `QWEN-APIKEY` | DashScope/Qwen 密钥（必填） | — |
-| `GIS_PYTHON_SERVICE_URL` | 前端调用的 Python 服务地址 | `http://127.0.0.1:8000/analysis` |
-| `POSTGRES_*` | pgvector 向量库（记忆/检索，可选） | 本地 5432 |
-| `CITYENGINE_RUNTIME_ROOT` | CityEngine 运行时根目录（**必须 ASCII 路径**） | `C:/GISAgentCityEngine` |
-| `CITYENGINE_BOOT_TIMEOUT_SECONDS` | CityEngine 冷启动、Python 支持文件重建预算 | 300 |
-| `CITYENGINE_AUTOMATION_TIMEOUT_SECONDS` | 启动钩子安装后的自动化启动预算 | 120 |
-| `CITYENGINE_JOB_TIMEOUT_SECONDS` | 单任务总超时 | 900 |
-| `CITYENGINE_MAX_INPUT_BUILDINGS` | 单个 CityEngine 作业的完整建筑输入上限 | 1200 |
-| `GEOSCENE_*` | GeoScene Enterprise 发布凭据 | — |
-| `DYNAMIC_EXECUTION_ENABLED` | 动态代码执行总开关 | `false` |
-| `DYNAMIC_EXECUTION_AUTH_MODE` | `token`（独立令牌）或 `local`（仅回环） | `local` |
-| `GIS_AGENT_EXEC_TOKEN` | token 模式下的执行令牌（不复用 QWEN-APIKEY） | 空 |
-| `DYNAMIC_EXECUTION_TIMEOUT_MS` | 单次执行硬超时，超时强制终止 GraalJS | `3000` |
-| `SERVER_ADDRESS` | Java 实际绑定地址，local 鉴权仅允许该/回环地址 | `127.0.0.1` |
-| `FRONTEND_URL` | 后端根路径重定向目标（前端 Vite 地址） | `http://127.0.0.1:5173` |
-
-> 后端不再托管前端构建产物。访问 `http://127.0.0.1:8080/` 会自动重定向到 `FRONTEND_URL`。前端通过 Vite 代理（`/api` → :8080、`/analysis` → :8000）与后端通信。
-| `DYNAMIC_EXECUTION_MAX_*` | 输入/输出字节上限、并发、线程池大小 | 64KB / 4 |
-
-> 动态执行安全层默认**关闭**（`false`），对竞赛本地演示最稳；仅在需要时开启。
-
-## 前端源码与构建链路（重要）
-
-前端**唯一源码真相源**位于仓库根目录：
+## 目录结构
 
 ```
-frontend/        # Vue 3 + Vite + @arcgis/core
-```
-
-构建产物输出到 `frontend/dist/`，但不再同步进 Spring Boot 静态目录——后端不再托管前端，前端始终以独立 Vite 服务运行（生产环境可将 `frontend/dist/` 部署到任意静态托管）。
-
-一键构建并验证（仅构建，不同步）：
-
-```bash
-scripts\build-frontend.bat        # Windows
-bash scripts/build-frontend.sh    # Linux / CI
-```
-
-脚本会自动执行 `npm run build` 并验证产物存在。
-
-## 测试
-
-| 层 | 命令 | 说明 |
-|----|------|------|
-| Python（行为锁定 + API 契约） | `python -m pytest` | 纯函数 + 路由级 E2E，无需 arcpy/geopandas/shapely |
-| Java（安全 + 单元） | `./mvnw -q test` | 含动态执行安全用例 |
-| 前端 E2E（冒烟） | `cd share/.../frontend-arcgis1 && npm i -D @playwright/test && npx playwright install && npm run test:e2e` | 校验应用挂载 + 代理连通 |
-
-Python 测试依赖：`pip install -r requirements-dev.txt`（含 `fastapi`/`pydantic`/`pytest`/`httpx`）。
-
-### 本地冒烟测试
-
-在 Java、Python 和前端服务均已启动后运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
-```
-
-脚本不会提交新的 CityEngine 作业。它检查前端和 Python 服务、地点导航是否返回 `flyTo`、`analyze_area` 是否在限定时间内返回，以及最近完成作业是否同时具备 SLPK 与 SceneServer 元数据。
-
-## CI / CD
-
-`.github/workflows/ci.yml` 在 push/PR 时自动运行三件事：
-
-1. **Java** — `./mvnw -q test`
-2. **Python** — `pytest`
-3. **前端** — `scripts/build-frontend.sh`（构建校验）
-
-`.github/workflows/security.yml` 额外跑 `pip-audit` 依赖漏洞扫描。
-
-## 安全
-
-- **动态代码执行四层防护**（仅开启 `DYNAMIC_EXECUTION_ENABLED=true` 时生效）：功能开关 → 鉴权（token/local，fail-closed） → GraalVM 沙箱 → 硬超时强制终止 + 输入/输出大小限制 + 并发限流。
-- **FastAPI 输入校验**：所有 `POST` 路由均有 Pydantic 模型，非法请求体返回 `422`（而非 500），并在 `/docs` 自动生成契约。
-- **依赖扫描**：`pip-audit`（见 CI security 作业）。
-
-## 目录结构（关键部分）
-
-```
-lc4j-1(1)/
-├── frontend/                    # Vue 3 前端源码真相源（唯一）
-│   ├── src/                      #   App.vue、组件、命令执行器
-│   │   └── components/           #   MapViewer / ChatAgent / AnalysisDashboard / ...
-│   └── vite.config.js            #   /api → :8080、/analysis → :8000 代理
-├── gis/                          # Python 服务四层拆分
-│   ├── router.py                 #   FastAPI 路由 + Pydantic 请求模型
-│   ├── service.py                #   编排：指标/天际线/日照/取楼
-│   ├── adapter.py                #   后端适配：CityEngine/GeoScene/arcpy/geopandas/Overpass
-│   └── model.py                  #   纯几何/JSON/太阳数学（无后端依赖）
+├── frontend/                    # Vue 3 前端源码（唯一真相源）
+│   ├── src/components/          # MapViewer / ChatAgent / AnalysisDashboard
+│   └── vite.config.js           # /api → :8080, /analysis → :8000 代理
+├── gis/                         # Python GIS 服务四层拆分
+│   ├── router.py                # FastAPI 路由 + Pydantic 请求模型
+│   ├── service.py               # 编排：指标/天际线/日照/取楼
+│   ├── adapter.py               # 后端适配：Overpass/GeoPandas/ArcPy/GeoScene
+│   └── model.py                 # 纯几何/太阳数学（零后端依赖）
 ├── src/main/resources/
-│   ├── demo-case/                # 离线演示案例（AOI + 建筑 + 规则）
-│   └── static/                   # [已清空] 不再使用；前端由 Vite 托管
-├── main.py                       # Python GIS 服务入口
-│   ├── router.py                #   FastAPI 路由 + Pydantic 请求模型
-│   ├── service.py               #   编排：指标/天际线/日照/取楼
-│   ├── adapter.py               #   后端适配：CityEngine/GeoScene/arcpy/geopandas/Overpass
-│   └── model.py                 #   纯几何/JSON/太阳数学（无后端依赖）
-├── main.py                      # 兼容 shim：从 gis.* re-export（app 等）
-├── cityengine_bridge.py         # CityEngine 作业桥接（标准库级）
-├── geoscene_publisher.py        # GeoScene 发布桥接（标准库级）
-├── share/<快照>/frontend-arcgis1/  # 前端源码真相源
-├── scripts/build-frontend.*     # 前端构建→static 同步脚本
-├── tests/                       # Python pytest（行为锁定 + API 契约）
+│   ├── demo-case/               # 离线演示案例（6 栋建筑 + 规则）
+│   │   ├── case.json            # 含 dataIdentity（synthetic + SHA-256）
+│   │   └── rules.json           # R2 用地控制指标（effective=false）
+│   └── static/                  # [已清空] 不再使用
+├── main.py                      # Python 入口（gis.* re-export）
+├── cityengine_bridge.py         # CityEngine 三维成果桥接
+├── geoscene_publisher.py        # GeoScene Enterprise 发布
+├── scripts/
+│   ├── build-frontend.*         # 前端构建验证（不同步 static）
+│   ├── acceptance-offline.ps1   # 离线一键验收
+│   └── smoke-test.ps1           # 本地冒烟测试
+├── tests/                       # Python pytest（确定性 + API 契约）
+├── src/test/java/               # Java 单元测试（安全 + 合同 + 溯源）
 └── .github/workflows/           # CI + 安全扫描
 ```
 
-## 已知限制 / 后续
+## 测试覆盖
 
-- **离线演示模式**：`spatial.demo.enabled=true` 时，前端自动加载内置案例（上海某城中村更新规划演示地块，6 栋建筑 + 绿地），分析链路完全不依赖 OSM/网络。后端提供 `/api/gis/offline-case` 接口下发案例数据。
-- **后端不再托管前端**：前端始终以独立 Vite 服务运行（`:5173`），后端根路径重定向到前端。构建脚本仅验证构建产物，不再同步到 `static/`。
-- 前端全局事件正逐步收敛到 `src/bus.js`（替代散落的 `window.dispatchEvent(new CustomEvent(...))`）。
-- 天际线/日照为**城市尺度快速筛查/辅助决策**模型，非高精度物理仿真，界面与报告均标注误差边界与数据来源。
-- 三维发布（CityEngine/GeoScene）依赖本地运行时与凭据，CI 中不跑。
+| 层 | 命令 | 说明 |
+|----|------|------|
+| Python（确定性 + 契约） | `python -m pytest` | 11 项离线指标测试 + 16 项 API 契约测试 |
+| Java（安全 + 合同） | `./mvnw -q test` | 动态执行防护 + 空间规划合同 + 溯源隔离 |
+| 前端 E2E | `cd frontend && npm run test:e2e` | 应用挂载 + 代理连通 |
+| 离线验收 | `scripts\acceptance-offline.ps1` | 启动 → 加载离线案例 → 指标比对 |
+
+CI（`.github/workflows/ci.yml`）：push/PR 自动跑 Java 测试 + Python 测试 + 前端构建校验。
+
+## 安全设计
+
+- **动态代码执行四层防护**（默认关闭）：开关 → 鉴权（token/local，fail-closed）→ GraalVM 沙箱 → 硬超时终止 + 输入/输出限制 + 并发限流
+- **FastAPI 全路由 Pydantic 校验**：非法请求体返回 `422`，不暴露内部错误
+- **会话隔离**：分析记录带 memoryId，跨会话不可见
+- **依赖扫描**：`pip-audit`（CI security 作业）
+
+## 已知限制
+
+- 天际线/日照为**城市尺度快速筛查/辅助决策**模型，非高精度物理仿真
+- 三维发布（CityEngine/GeoScene）依赖本地运行时与凭据，CI 中不跑
+- 动态代码执行默认关闭，竞赛演示不建议开启
