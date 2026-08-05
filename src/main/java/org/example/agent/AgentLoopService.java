@@ -11,6 +11,15 @@ import org.example.service.KnowledgeService;
 import org.example.service.PromptResourceService;
 import org.example.service.GisContextService;
 import org.example.service.PendingAnalysisIntentService;
+import org.example.spatial.SpatialPlanService;
+import org.example.spatial.AnalysisPlanCompiler;
+import org.example.spatial.SpatialPlanValidator;
+import org.example.spatial.SpatialCapabilityCatalog;
+import org.example.spatial.SpatialWorkflowService;
+import org.example.spatial.PendingSpatialWorkflowService;
+import org.example.spatial.SpatialResultQualityService;
+import org.example.spatial.GeoDataDiscoveryAgent;
+import org.example.spatial.LlmSpatialRouter;
 import org.example.tools.pyGisTools;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -68,6 +77,30 @@ public class AgentLoopService {
     @Autowired
     private PendingAnalysisIntentService pendingAnalysisIntentService;
 
+    @Autowired
+    private SpatialPlanService spatialPlanService;
+
+    @Autowired
+    private AnalysisPlanCompiler analysisPlanCompiler;
+
+    @Autowired
+    private SpatialCapabilityCatalog spatialCapabilityCatalog;
+
+    @Autowired
+    private SpatialWorkflowService spatialWorkflowService;
+
+    @Autowired
+    private PendingSpatialWorkflowService pendingSpatialWorkflowService;
+
+    @Autowired
+    private SpatialResultQualityService spatialResultQualityService;
+
+    @Autowired
+    private GeoDataDiscoveryAgent geoDataDiscoveryAgent;
+    @Autowired
+    private LlmSpatialRouter llmSpatialRouter;
+    @Value("${agent.llm-routing.enabled:true}") private boolean llmRoutingEnabled;
+
     private final AgentDecisionParser decisionParser = new AgentDecisionParser();
 
     @Value("${agent.max-rounds:8}")
@@ -84,12 +117,34 @@ public class AgentLoopService {
             Consumer<ExecutionTrace> traceListener) {
         gisContextService.activateSession(memoryId);
         List<ExecutionTrace> trace = new ArrayList<>();
-        String advancedIntent = detectAdvancedIntent(userMessage);
-        if (advancedIntent == null && isCurrentRangeReply(userMessage)) {
-            advancedIntent = pendingAnalysisIntentService.consume(memoryId);
+        if (llmRoutingEnabled) { AgentResult routed = executeLlmSpatialRoute(userMessage, userId, memoryId, trace, traceListener); if (routed != null) return routed; }
+        if (!llmRoutingEnabled) {
+            AgentResult confirmedImport = executeConfirmedDataImport(userMessage, trace, traceListener);
+            if (confirmedImport != null) return confirmedImport;
+            AgentResult dataDiscovery = executeDataDiscovery(userMessage, trace, traceListener);
+            if (dataDiscovery != null) return dataDiscovery;
         }
-        if (advancedIntent != null) {
-            return executeAdvancedIntent(advancedIntent, memoryId, trace, traceListener);
+        AgentResult collectedWorkflowData = collectPendingWorkflowData(userMessage, userId, memoryId, trace, traceListener);
+        if (collectedWorkflowData != null) return collectedWorkflowData;
+        AgentResult resumedWorkflow = resumePendingWorkflow(trace, traceListener);
+        if (resumedWorkflow != null) return resumedWorkflow;
+        AgentResult collectedData = collectPendingCapabilityData(userMessage, userId, memoryId, trace, traceListener);
+        if (collectedData != null) return collectedData;
+        AgentResult revisedData = reviseCurrentCapabilityData(userMessage, userId, memoryId, trace, traceListener);
+        if (revisedData != null) return revisedData;
+        if (!llmRoutingEnabled) { AgentResult workflow = executeSpatialWorkflow(userMessage, memoryId, trace, traceListener); if (workflow != null) return workflow; }
+        String capabilityId = llmRoutingEnabled ? null : analysisPlanCompiler.compile(userMessage)
+                .map(AnalysisPlanCompiler.Compilation::capabilityId)
+                .orElse(null);
+        if (capabilityId != null) {
+            AgentResult inlineData = collectInlineCapabilityData(capabilityId, userMessage, userId, memoryId, trace, traceListener);
+            if (inlineData != null) return inlineData;
+        }
+        if (capabilityId == null && isCurrentRangeReply(userMessage)) {
+            capabilityId = normalizePendingCapability(pendingAnalysisIntentService.consume(memoryId));
+        }
+        if (capabilityId != null) {
+            return executeGraphPlan(capabilityId, userMessage, userId, memoryId, trace, traceListener);
         }
         NavigationRequest navigationRequest = parseNavigationRequest(userMessage);
         if (navigationRequest != null) {
@@ -311,6 +366,435 @@ public class AgentLoopService {
                 || lower.contains("flood") || lower.contains("inundation");
     }
 
+    private String normalizePendingCapability(String pending) {
+        if (pending == null || pending.isBlank()) return null;
+        return switch (pending) {
+            case "skyline" -> "skyline_analysis";
+            case "sunlight" -> "sunlight_analysis";
+            default -> pending;
+        };
+    }
+
+    private AgentResult executeLlmSpatialRoute(String message, String userId, String memoryId, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        LlmSpatialRouter.Route route = llmSpatialRouter.route(message);
+        if (route == null || "none".equals(route.kind())) return null;
+        if ("unavailable".equals(route.kind())) {
+            addTrace(trace, listener, 1, "llm_plan", "LLM 空间路由不可用", route.diagnostic(), "failed");
+            return new AgentResult("当前未得到可验证的空间工具选择，未执行任何分析。请稍后重试。", null, null, false, null,
+                    List.of(), trace, Map.of("status", "Unavailable", "reason", route.diagnostic()));
+        }
+        addTrace(trace, listener, 1, "llm_plan", "LLM 选择空间计划", "kind=" + route.kind(), "success");
+        if ("discovery".equals(route.kind())) return executeDataDiscovery(route.datasets(), trace, listener);
+        if ("import_osm".equals(route.kind())) return executeOsmImport(route.dataset(), trace, listener);
+        if ("ground_dem".equals(route.kind())) {
+            addTrace(trace, listener, 2, "command", "请求前端底图 DEM", "当前 AOI 地形采样", "running");
+            return new AgentResult("已请求从当前 ArcGIS 底图采样 DEM。采样完成后会写入当前会话。", null, null, false, null,
+                    List.of(Map.of("action", "requestGroundDem", "params", Map.of())), trace,
+                    Map.of("status", "Success", "analysisType", "ground_dem_request"));
+        }
+        if (!"analysis".equals(route.kind())) return null;
+        if (route.capabilityIds().size() > 1) {
+            SpatialWorkflowService.WorkflowResult result = spatialWorkflowService.executeCapabilities(message, route.capabilityIds());
+            if (result.needsClarification()) {
+                pendingSpatialWorkflowService.remember(message, result.capabilityIds());
+                String question="综合分析缺少："+String.join("、",result.missingData())+"。";
+                return new AgentResult(null,null,question,true,null,List.of(),trace,Map.of("status","NeedsClarification","analysisType","spatial_workflow","missingData",result.missingData(),"capabilityIds",result.capabilityIds(),"dataRecommendations",result.dataRecommendations()));
+            }
+            return workflowResultToAgentResult(result, trace, listener);
+        }
+        String capabilityId=route.capabilityIds().get(0); AgentResult inline=collectInlineCapabilityData(capabilityId,message,userId,memoryId,trace,listener);
+        return inline != null ? inline : executeGraphPlan(capabilityId,message,userId,memoryId,trace,listener);
+    }
+
+    private AgentResult executeDataDiscovery(String message, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        List<String> datasets = discoveryDatasets(message);
+        if (datasets.isEmpty() || !isDiscoveryRequest(message)) return null;
+        return executeDataDiscovery(datasets, trace, listener);
+    }
+    private AgentResult executeDataDiscovery(List<String> datasets, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        addTrace(trace, listener, 1, "discovery", "检索真实地理数据", "datasets=" + String.join(",", datasets), "running");
+        Map<String, Object> found = geoDataDiscoveryAgent.discover(datasets);
+        List<?> candidates = (List<?>) found.getOrDefault("candidates", List.of());
+        String reply = "已检索 " + String.join("、", datasets) + " 候选数据，共 " + candidates.size()
+                + " 条。候选仅供查看；输入“确认导入 OSM 建筑/道路/水系”才会写入当前会话。";
+        addTrace(trace, listener, 2, "complete", "数据候选已返回", "candidateCount=" + candidates.size(), "success");
+        return new AgentResult(reply, List.of("确认导入 OSM 建筑", "确认导入 OSM 水系"), null, false, found, List.of(), trace,
+                Map.of("status", "Success", "analysisType", "data_discovery", "dataDiscovery", found));
+    }
+
+    private AgentResult executeConfirmedDataImport(String message, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        String dataset = confirmedOsmDataset(message); if (dataset == null) return null;
+        return executeOsmImport(dataset, trace, listener);
+    }
+    private AgentResult executeOsmImport(String dataset, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        addTrace(trace, listener, 1, "import", "确认导入 OSM 数据", "dataset=" + dataset, "running");
+        try {
+            JSONObject data = geoDataDiscoveryAgent.importOsm(dataset);
+            String target = "roads".equals(dataset) ? "road_network" : "waterways".equals(dataset) ? "river_network" : "buildings";
+            gisContextService.saveGeoJson(JSON.toJSONString(Map.of(target, data)));
+            int count = data.getJSONArray("features").size();
+            addTrace(trace, listener, 2, "complete", "OSM 数据已导入", "featureCount=" + count, "success");
+            return new AgentResult("已导入 OSM " + dataset + "，共 " + count + " 个要素。数据已进入当前会话，等待你的分析请求。", List.of("执行建筑指标分析"), null,
+                    false, Map.of("source", "osm_overpass", "dataset", target, "featureCount", count), List.of(), trace,
+                    Map.of("status", "Success", "analysisType", "data_import", "source", "osm_overpass", "dataset", target));
+        } catch (IllegalArgumentException error) {
+            return new AgentResult(null, null, "OSM 导入失败：" + error.getMessage(), true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", error.getMessage()));
+        }
+    }
+
+    private boolean isDiscoveryRequest(String message) {
+        if (message == null) return false; String lower = message.toLowerCase();
+        return message.contains("检索") || message.contains("搜索") || message.contains("查找") || lower.contains("search") || lower.contains("discover");
+    }
+    private List<String> discoveryDatasets(String message) {
+        if (message == null) return List.of(); String lower=message.toLowerCase(); List<String> values=new ArrayList<>();
+        if (message.contains("建筑") || lower.contains("building")) values.add("buildings");
+        if (message.contains("道路") || lower.contains("road")) values.add("roads");
+        if (message.contains("水系") || message.contains("河网") || lower.contains("water")) values.add("waterways");
+        if (message.contains("高程") || message.contains("DEM") || lower.contains("dem")) values.add("dem");
+        return values;
+    }
+    private String confirmedOsmDataset(String message) {
+        if (message == null || !message.toLowerCase().contains("osm") || !(message.contains("确认") || message.toLowerCase().contains("confirm"))) return null;
+        if (message.contains("建筑")) return "buildings"; if (message.contains("道路")) return "roads"; if (message.contains("水系") || message.contains("河网")) return "waterways"; return null;
+    }
+
+    private AgentResult executeSpatialWorkflow(String userMessage, String memoryId, List<ExecutionTrace> trace,
+                                               Consumer<ExecutionTrace> traceListener) {
+        SpatialWorkflowService.WorkflowResult workflow = spatialWorkflowService.execute(userMessage);
+        if (workflow == null) return null;
+        addTrace(trace, traceListener, 1, "workflow", "编排综合空间分析",
+                "capabilities=" + String.join(",", workflow.capabilityIds()), "running");
+        if (workflow.needsClarification()) {
+            pendingSpatialWorkflowService.remember(userMessage, workflow.capabilityIds());
+            String question = "综合分析还缺少：" + String.join("、", workflow.missingData()) + "。补齐后将依次执行："
+                    + String.join("、", workflow.capabilityIds()) + "。";
+            addTrace(trace, traceListener, 2, "ask", "汇总数据缺失", question, "waiting");
+            return new AgentResult(null, null, question, true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "workflow_data_required", "analysisType", "spatial_workflow",
+                            "capabilityIds", workflow.capabilityIds(), "missingData", workflow.missingData(), "dataRecommendations", workflow.dataRecommendations(), "provenance", workflow.provenance()));
+        }
+        pendingSpatialWorkflowService.clear();
+        for (Map<String, Object> result : workflow.results()) {
+            addTrace(trace, traceListener, 2, "observation", "完成 " + result.get("capabilityId"),
+                    "tool=" + result.get("tool") + ", status=" + result.get("status"), "Success".equals(result.get("status")) ? "success" : "error");
+        }
+        addTrace(trace, traceListener, 3, "complete", "综合空间分析完成", "已汇总 " + workflow.results().size() + " 个子分析", "success");
+        Map<String, Object> metrics = new LinkedHashMap<>();
+        metrics.put("analysis_type", "spatial_workflow");
+        metrics.put("subAnalyses", workflow.results());
+        metrics.put("limitations", "各子分析使用各自图谱定义的数据要求与局限；综合结果不替代法定审查。");
+        String reply = "已完成综合空间分析：" + String.join("、", workflow.capabilityIds()) + "。结果已按子分析汇总，详见分析面板与溯源记录。";
+        return new AgentResult(reply, List.of("导出分析报告"), null, false, metrics, dedupeCommands(workflow.commands()), trace,
+                Map.of("status", workflow.status(), "analysisType", "spatial_workflow", "capabilityIds", workflow.capabilityIds(),
+                        "subAnalyses", workflow.results(), "provenance", workflow.provenance()));
+    }
+
+    private AgentResult collectPendingWorkflowData(String userMessage, String userId, String memoryId,
+                                                   List<ExecutionTrace> trace, Consumer<ExecutionTrace> traceListener) {
+        PendingSpatialWorkflowService.PendingWorkflow pending = pendingSpatialWorkflowService.peek();
+        if (pending == null) return null;
+        for (String capabilityId : pending.capabilityIds()) {
+            SpatialCapabilityCatalog.Capability capability = spatialCapabilityCatalog.find(capabilityId).orElse(null);
+            if (capability == null) continue;
+            for (SpatialCapabilityCatalog.DataRequirement requirement : capability.dataRequirements()) {
+                if (!contextContains(requirement.contextKey())) {
+                    AgentResult collected = collectRequirement(capabilityId, requirement, userMessage, userId, memoryId, trace, traceListener, false);
+                    if (collected != null) return collected;
+                }
+            }
+        }
+        return null;
+    }
+
+    private AgentResult resumePendingWorkflow(List<ExecutionTrace> trace, Consumer<ExecutionTrace> traceListener) {
+        PendingSpatialWorkflowService.PendingWorkflow pending = pendingSpatialWorkflowService.peek();
+        if (pending == null) return null;
+        SpatialWorkflowService.WorkflowResult workflow = spatialWorkflowService.execute(pending.request());
+        if (workflow == null) { pendingSpatialWorkflowService.clear(); return null; }
+        addTrace(trace, traceListener, 1, "workflow", "恢复综合空间分析",
+                "capabilities=" + String.join(",", workflow.capabilityIds()), "running");
+        if (workflow.needsClarification()) {
+            String question = "综合分析仍缺少：" + String.join("、", workflow.missingData()) + "。已保留工作流，补齐后会自动继续。";
+            addTrace(trace, traceListener, 2, "ask", "等待工作流数据", question, "waiting");
+            return new AgentResult(null, null, question, true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "workflow_data_required", "analysisType", "spatial_workflow",
+                            "capabilityIds", workflow.capabilityIds(), "missingData", workflow.missingData(), "dataRecommendations", workflow.dataRecommendations(), "provenance", workflow.provenance()));
+        }
+        pendingSpatialWorkflowService.clear();
+        return workflowResultToAgentResult(workflow, trace, traceListener);
+    }
+
+    private AgentResult workflowResultToAgentResult(SpatialWorkflowService.WorkflowResult workflow, List<ExecutionTrace> trace,
+                                                    Consumer<ExecutionTrace> traceListener) {
+        int total = workflow.results().size();
+        for (int index = 0; index < total; index++) {
+            Map<String, Object> result = workflow.results().get(index);
+            addTrace(trace, traceListener, index + 2, "observation", "子分析 " + (index + 1) + "/" + total + "：" + result.get("capabilityId"),
+                    "tool=" + result.get("tool") + ", status=" + result.get("status"), "Success".equals(result.get("status")) ? "success" : "error");
+        }
+        addTrace(trace, traceListener, total + 2, "complete", "综合空间分析完成", "已汇总 " + total + " 个子分析", "success");
+        Map<String, Object> metrics = new LinkedHashMap<>();
+        metrics.put("analysis_type", "spatial_workflow"); metrics.put("subAnalyses", workflow.results());
+        metrics.put("limitations", "各子分析使用各自图谱定义的数据要求与局限；综合结果不替代法定审查。");
+        return new AgentResult("已完成综合空间分析：" + String.join("、", workflow.capabilityIds()) + "。", List.of("导出分析报告"), null, false,
+                metrics, dedupeCommands(workflow.commands()), trace, Map.of("status", workflow.status(), "analysisType", "spatial_workflow",
+                        "capabilityIds", workflow.capabilityIds(), "subAnalyses", workflow.results(), "provenance", workflow.provenance()));
+    }
+
+    private AgentResult executeGraphPlan(
+            String capabilityId,
+            String userMessage,
+            String userId,
+            String memoryId,
+            List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener) {
+        AnalysisPlanCompiler.Compilation compilation = analysisPlanCompiler.compile(capabilityId, userMessage);
+        SpatialPlanService.PreparedPlan prepared = spatialPlanService.prepare(compilation.plan());
+        SpatialPlanValidator.Validation validation = prepared.validation();
+        String displayName = switch (capabilityId) {
+            case "skyline_analysis" -> "天际线分析";
+            case "sunlight_analysis" -> "日照与阴影筛查";
+            case "flood_analysis" -> "洪水分析";
+            case "urban_metrics" -> "建筑指标分析";
+            default -> capabilityId;
+        };
+
+        if (!validation.canExecute()) {
+            Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
+            List<String> missing = validation.missingData();
+            String message;
+            if ("CapabilityPending".equals(validation.status())) {
+                message = "已识别“" + displayName + "”，但该能力尚未启用。"
+                        + (missing.isEmpty() ? "" : "仍缺少数据：" + String.join("、", missing) + "。");
+            } else if ("flood_analysis".equals(capabilityId)) {
+                message = describeFloodMissingData(missing);
+            } else if (missing.contains("aoi")) {
+                message = "请先绘制、上传或选择分析范围（AOI），再执行“" + displayName + "”。";
+            } else {
+                message = "“" + displayName + "”需要的数据尚未就绪：" + String.join("、", missing) + "。";
+            }
+            if ("NeedsClarification".equals(validation.status())) {
+                pendingAnalysisIntentService.remember(memoryId, capabilityId);
+            }
+            addTrace(trace, traceListener, 1, "plan", "编译空间分析计划",
+                    "capability=" + capabilityId + ", validation=" + validation.status(), "success");
+            addTrace(trace, traceListener, 2,
+                    "CapabilityPending".equals(validation.status()) ? "wait" : "ask",
+                    displayName + "等待条件", message, "waiting");
+            return new AgentResult(
+                    "CapabilityPending".equals(validation.status()) ? message : null,
+                    "CapabilityPending".equals(validation.status()) ? List.of("保留当前 AOI", "查看当前可用分析能力") : null,
+                    "NeedsClarification".equals(validation.status()) ? message : null,
+                    "NeedsClarification".equals(validation.status()), null, List.of(), trace,
+                    planOutcome(validation.status(), validation.code(), capabilityId, missing, provenance, compilation));
+        }
+
+        pendingAnalysisIntentService.clear(memoryId);
+        addTrace(trace, traceListener, 1, "plan", "编译空间分析计划",
+                "capability=" + capabilityId + ", tool=" + prepared.plan().tool(), "running");
+        JSONObject params = new JSONObject();
+        params.putAll(prepared.plan().params());
+        Map<String, Object> result = asMap(invokeTool(prepared.plan().tool(), params));
+        if (result != null) {
+            result = new LinkedHashMap<>(result);
+            result.put("quality", spatialResultQualityService.assess(prepared.plan(), result));
+        }
+        Map<String, Object> provenance = spatialPlanService.record(prepared, result == null ? Map.of() : result);
+        if (result == null || isFailed(result)) {
+            String detail = result == null ? "分析工具未返回结果"
+                    : String.valueOf(result.getOrDefault("message", "分析工具执行失败"));
+            addTrace(trace, traceListener, 2, "ask", displayName + "等待数据", detail, "waiting");
+            pendingAnalysisIntentService.remember(memoryId, capabilityId);
+            return new AgentResult(null, null,
+                    "已生成“" + displayName + "”计划，但暂不能完成执行：" + detail,
+                    true, null, List.of(), trace,
+                    planOutcome("NeedsClarification", "execution_data_required", capabilityId, List.of(), provenance, compilation));
+        }
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        collectCommands(result, commands);
+        Map<String, Object> metrics = null;
+        String reply;
+        if (isAdvancedAnalysis(result)) {
+            metrics = result;
+            reply = buildAdvancedReply(result);
+        } else if (isValidMetrics(result)) {
+            metrics = validationLayer.validateMetrics(result);
+            reply = buildMetricReply(metrics);
+            saveAnalysis(userId, userMessage, metrics);
+        } else {
+            reply = "“" + displayName + "”已执行，但未返回标准指标。";
+        }
+        addTrace(trace, traceListener, 2, "observation", "获得" + displayName + "结果",
+                formatTraceDetail(result), "success");
+        addTrace(trace, traceListener, 3, "complete", displayName + "完成",
+                "已返回结果、地图命令与执行溯源。", "success");
+        return new AgentResult(reply, suggestionEngine.generateSuggestions(metrics), null, false,
+                metrics, dedupeCommands(commands), trace,
+                planOutcome("Success", "", capabilityId, List.of(), provenance, compilation));
+    }
+
+    private Map<String, Object> planOutcome(
+            String status,
+            String code,
+            String capabilityId,
+            List<String> missingData,
+            Map<String, Object> provenance,
+            AnalysisPlanCompiler.Compilation compilation) {
+        Map<String, Object> outcome = new LinkedHashMap<>();
+        outcome.put("status", status);
+        if (code != null && !code.isBlank()) outcome.put("code", code);
+        outcome.put("analysisType", capabilityId);
+        outcome.put("missingData", missingData);
+        outcome.put("plan", compilation.plan());
+        outcome.put("provenance", provenance);
+        return outcome;
+    }
+
+    private AgentResult collectPendingCapabilityData(String userMessage, String userId, String memoryId,
+            List<ExecutionTrace> trace, Consumer<ExecutionTrace> traceListener) {
+        String capabilityId = pendingAnalysisIntentService.peek(memoryId);
+        if (capabilityId == null) return null;
+        SpatialCapabilityCatalog.Capability capability = spatialCapabilityCatalog.find(capabilityId).orElse(null);
+        if (capability == null) return null;
+        return capability.dataRequirements().stream()
+                .filter(requirement -> !contextContains(requirement.contextKey()))
+                .map(requirement -> collectRequirement(capabilityId, requirement, userMessage, userId, memoryId, trace, traceListener, false))
+                .filter(result -> result != null).findFirst().orElse(null);
+    }
+
+    private AgentResult collectInlineCapabilityData(String capabilityId, String userMessage, String userId, String memoryId,
+            List<ExecutionTrace> trace, Consumer<ExecutionTrace> traceListener) {
+        SpatialCapabilityCatalog.Capability capability = spatialCapabilityCatalog.find(capabilityId).orElse(null);
+        if (capability == null) return null;
+        return capability.dataRequirements().stream()
+                .filter(requirement -> !contextContains(requirement.contextKey()))
+                .map(requirement -> collectRequirement(capabilityId, requirement, userMessage, userId, memoryId, trace, traceListener, false))
+                .filter(result -> result != null).findFirst().orElse(null);
+    }
+
+    private AgentResult reviseCurrentCapabilityData(String userMessage, String userId, String memoryId,
+            List<ExecutionTrace> trace, Consumer<ExecutionTrace> traceListener) {
+        for (SpatialCapabilityCatalog.Capability capability : spatialCapabilityCatalog.capabilities()) {
+            for (SpatialCapabilityCatalog.DataRequirement requirement : capability.dataRequirements()) {
+                if (contextContains(requirement.contextKey()) && matchesAnyTrigger(requirement.revisionTriggers(), userMessage)) {
+                    AgentResult result = collectRequirement(capability.id(), requirement, userMessage, userId, memoryId, trace, traceListener, true);
+                    if (result != null) return result;
+                }
+            }
+        }
+        return null;
+    }
+
+    private AgentResult collectRequirement(String capabilityId, SpatialCapabilityCatalog.DataRequirement requirement,
+            String userMessage, String userId, String memoryId, List<ExecutionTrace> trace,
+            Consumer<ExecutionTrace> traceListener, boolean revision) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        JSONObject existing = contextObject(revision ? requirement.contextKey() : requirement.contextKey() + "_collection");
+        if (existing != null) values.putAll(existing.getInnerMap());
+        boolean recognized = false;
+        for (SpatialCapabilityCatalog.DataField field : requirement.fields()) {
+            Object parsed = parseField(field, userMessage);
+            if (parsed != null) { values.put(field.key(), parsed); recognized = true; }
+        }
+        if (!recognized) {
+            JSONObject aiValues = extractRequirementWithAi(requirement, userMessage);
+            if (aiValues != null) for (SpatialCapabilityCatalog.DataField field : requirement.fields()) {
+                Object parsed = aiValues.get(field.key());
+                if (isValidFieldValue(field, parsed)) { values.put(field.key(), parsed); recognized = true; }
+            }
+        }
+        if (!recognized) return null;
+        List<SpatialCapabilityCatalog.DataField> missing = requirement.fields().stream()
+                .filter(field -> !values.containsKey(field.key())).toList();
+        if (!missing.isEmpty()) {
+            gisContextService.saveGeoJson(JSON.toJSONString(Map.of(requirement.contextKey() + "_collection", values)));
+            String needed = missing.stream().map(field -> field.label() + "（例如 " + field.example() + "）")
+                    .reduce((left, right) -> left + "、" + right).orElse("");
+            String message = "已记录“" + requirement.label() + "”的部分信息；还需要" + needed + "。";
+            addTrace(trace, traceListener, 1, "ask", "补充" + requirement.label(), message, "waiting");
+            return new AgentResult(null, null, message, true, null, List.of(), trace,
+                    Map.of("status", "NeedsClarification", "code", "capability_data_incomplete", "missingData", missing.stream().map(SpatialCapabilityCatalog.DataField::key).toList()));
+        }
+        values.put("name", applyNameTemplate(requirement.nameTemplate(), values));
+        values.put("source", revision ? "conversation_user_revised" : requirement.source());
+        gisContextService.saveGeoJson(JSON.toJSONString(Map.of(requirement.contextKey(), values)));
+        addTrace(trace, traceListener, 1, "observation", (revision ? "已更新" : "已记录") + requirement.label(),
+                values.toString() + "，自动继续执行分析。", "success");
+        if (pendingSpatialWorkflowService.peek() != null) {
+            return resumePendingWorkflow(trace, traceListener);
+        }
+        return executeGraphPlan(capabilityId, capabilityId, userId, memoryId, trace, traceListener);
+    }
+
+    private Object parseField(SpatialCapabilityCatalog.DataField field, String message) {
+        try {
+            Matcher matcher = Pattern.compile(field.pattern()).matcher(message == null ? "" : message);
+            if (!matcher.find()) return null;
+            return "integer".equals(field.type()) ? Integer.parseInt(matcher.group(1)) : Double.parseDouble(matcher.group(1));
+        } catch (RuntimeException ignored) { return null; }
+    }
+
+    /** LLM is the primary semantic parser; values still pass the graph schema gate below. */
+    private JSONObject extractRequirementWithAi(SpatialCapabilityCatalog.DataRequirement requirement, String message) {
+        try {
+            List<Map<String, String>> fields = requirement.fields().stream().map(field -> Map.of(
+                    "key", field.key(), "type", field.type(), "description", field.label(), "example", field.example())).toList();
+            String prompt = """
+                    You extract user-provided GIS analysis data. Return JSON only, with exactly the requested keys.
+                    Do not infer or invent values. A value not explicitly stated is null.
+                    Numeric values must be JSON numbers. Understand Chinese expressions such as '80mm，24h，20年' and '20年一遇'.
+                    Required data schema: %s
+                    User message: %s
+                    """.formatted(JSON.toJSONString(fields), message == null ? "" : message);
+            String raw = chatLanguageModel.generate(prompt);
+            if (raw == null || raw.isBlank()) return null;
+            raw = raw.trim().replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
+            return JSON.parseObject(raw);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isValidFieldValue(SpatialCapabilityCatalog.DataField field, Object value) {
+        if (value == null) return false;
+        try {
+            if ("integer".equals(field.type())) Integer.parseInt(String.valueOf(value));
+            else Double.parseDouble(String.valueOf(value));
+            return true;
+        } catch (NumberFormatException ignored) { return false; }
+    }
+
+    private boolean contextContains(String key) { return contextObject(key) != null; }
+
+    private JSONObject contextObject(String key) {
+        try { return JSON.parseObject(gisContextService.getGeoJson()).getJSONObject(key); }
+        catch (Exception ignored) { return null; }
+    }
+
+    private boolean matchesAnyTrigger(List<String> triggers, String message) {
+        String text = message == null ? "" : message.toLowerCase();
+        return triggers.stream().anyMatch(trigger -> text.contains(trigger.toLowerCase()));
+    }
+
+    private String applyNameTemplate(String template, Map<String, Object> values) {
+        String name = template == null || template.isBlank() ? "conversation-data" : template;
+        for (Map.Entry<String, Object> entry : values.entrySet()) name = name.replace("{" + entry.getKey() + "}", String.valueOf(entry.getValue()));
+        return name;
+    }
+
+    private String describeFloodMissingData(List<String> missing) {
+        List<String> descriptions = new ArrayList<>();
+        if (missing.contains("aoi")) descriptions.add("分析范围（AOI）");
+        if (missing.contains("dem")) descriptions.add("地形高程数据（建议上传 ASC 或 GeoTIFF DEM；底图采样仅适合初步筛查）");
+        if (missing.contains("rainfall_scenario")) descriptions.add("降雨情景数据（至少包括雨量、历时和重现期，或可追溯的设计暴雨资料）");
+        if (descriptions.isEmpty()) descriptions.addAll(missing);
+        return "当前不能执行洪水分析，缺少：" + String.join("；", descriptions)
+                + "。可选补充排水管网、河网和建筑物数据，以提高积水与暴露度筛查的解释性。";
+    }
+
     private String detectAdvancedIntent(String userMessage) {
         if (userMessage == null) return null;
         String lower = userMessage.toLowerCase();
@@ -338,21 +822,28 @@ public class AgentLoopService {
     }
 
     private AgentResult executeAdvancedIntent(
-            String intent,
+        String intent,
             String memoryId,
             List<ExecutionTrace> trace,
             Consumer<ExecutionTrace> traceListener) {
         String title = "skyline".equals(intent) ? "\u5929\u9645\u7ebf\u5206\u6790" : "\u65e5\u7167\u4e0e\u9634\u5f71\u7b5b\u67e5";
-        if (!hasCurrentAoi()) {
+        String capabilityId = "skyline".equals(intent) ? "skyline_analysis" : "sunlight_analysis";
+        SpatialPlanService.PreparedPlan prepared = spatialPlanService.prepare(capabilityId, Map.of());
+        if (!prepared.validation().canExecute()) {
             pendingAnalysisIntentService.remember(memoryId, intent);
-            String question = "\u8bf7\u7ed8\u5236\u3001\u4e0a\u4f20\u6216\u9009\u62e9\u5206\u6790\u8303\u56f4\uff08AOI\uff09\uff0c\u518d\u6267\u884c" + title + "\u3002";
-            addTrace(trace, traceListener, 1, "ask", title + "\u7f3a\u5c11\u8303\u56f4", question, "waiting");
+            List<String> missing = prepared.validation().missingData();
+            String question = missing.contains("aoi")
+                    ? "\u8bf7\u7ed8\u5236\u3001\u4e0a\u4f20\u6216\u9009\u62e9\u5206\u6790\u8303\u56f4\uff08AOI\uff09\uff0c\u518d\u6267\u884c" + title + "\u3002"
+                    : "\u5f53\u524d AOI \u5c1a\u672a\u540c\u6b65\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff0c\u8bf7\u5148\u5b8c\u6210\u5efa\u7b51\u8f6e\u5ed3\u63d0\u53d6\u6216\u4e0a\u4f20 GeoJSON\u3002";
+            Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
+            addTrace(trace, traceListener, 1, "ask", title + "\u7b49\u5f85\u6570\u636e", question, "waiting");
             return new AgentResult(null, null, question, true, null, List.of(), trace,
-                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_aoi_required", "analysisType", intent));
+                    Map.of("status", prepared.validation().status(), "code", prepared.validation().code(),
+                            "analysisType", intent, "missingData", missing, "provenance", provenance));
         }
 
         pendingAnalysisIntentService.clear(memoryId);
-        String tool = "skyline".equals(intent) ? "skylineAnalysis" : "sunlightAnalysis";
+        String tool = prepared.plan().tool();
         addTrace(trace, traceListener, 1, "decision", "\u8bc6\u522b" + title + "\u8bf7\u6c42",
                 "\u76f4\u63a5\u4f7f\u7528\u5f53\u524d AOI \u4e0e\u5efa\u7b51\u4e0a\u4e0b\u6587\uff0c\u4e0d\u4f9d\u8d56\u6a21\u578b\u51b3\u7b56 JSON\u3002", "running");
         Map<String, Object> result = asMap(invokeTool(tool, new JSONObject()));
@@ -363,11 +854,13 @@ public class AgentLoopService {
                 detail = "\u5f53\u524d AOI \u5c1a\u672a\u540c\u6b65\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff0c\u8bf7\u5148\u5b8c\u6210\u5efa\u7b51\u8f6e\u5ed3\u63d0\u53d6\u6216\u4e0a\u4f20 GeoJSON\u3002";
             }
             pendingAnalysisIntentService.remember(memoryId, intent);
+            Map<String, Object> provenance = spatialPlanService.record(prepared, result == null ? Map.of() : result);
             addTrace(trace, traceListener, 2, "ask", title + "\u7b49\u5f85\u6570\u636e", detail, "waiting");
             return new AgentResult(null, null,
                     "\u5df2\u8bc6\u522b" + title + "\u8bf7\u6c42\uff0c\u4f46\u5f53\u524d AOI \u8fd8\u7f3a\u53ef\u7528\u5efa\u7b51\u6570\u636e\uff1a" + detail,
                     true, null, List.of(), trace,
-                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_data_required", "analysisType", intent));
+                    Map.of("status", "NeedsClarification", "code", "advanced_analysis_data_required",
+                            "analysisType", intent, "provenance", provenance));
         }
 
         List<Map<String, Object>> commands = new ArrayList<>();
@@ -376,25 +869,29 @@ public class AgentLoopService {
                 formatTraceDetail(result), "success");
         addTrace(trace, traceListener, 3, "complete", title + "\u5b8c\u6210",
                 "\u5df2\u8fd4\u56de\u5206\u6790\u9762\u677f\u4e0e\u5730\u56fe\u547d\u4ee4\u3002", "success");
+        Map<String, Object> provenance = spatialPlanService.record(prepared, result);
         return new AgentResult(buildAdvancedReply(result), List.of("\u67e5\u770b\u5f53\u524d AOI \u5efa\u7b51\u6307\u6807", "\u5207\u6362\u4e3a\u53e6\u4e00\u9879\u9ad8\u7ea7\u5206\u6790"),
                 null, false, result, dedupeCommands(commands), trace,
-                Map.of("status", "Success", "analysisType", intent));
+                Map.of("status", "Success", "analysisType", intent, "provenance", provenance));
     }
 
     private AgentResult executeFloodAnalysisRequest(
             List<ExecutionTrace> trace,
             Consumer<ExecutionTrace> traceListener) {
+        SpatialPlanService.PreparedPlan prepared = spatialPlanService.prepare("flood_analysis", Map.of());
+        Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
         JSONObject context;
         try {
             context = JSON.parseObject(gisContextService.getGeoJson());
         } catch (Exception ignored) {
             context = null;
         }
-        if (context == null || !context.containsKey("aoi")) {
+        if (prepared.availability().missing().contains("aoi")) {
             String question = "请先绘制或上传洪水分析范围（AOI），再提交洪水分析请求。";
             addTrace(trace, traceListener, 1, "ask", "洪水分析缺少范围", question, "waiting");
             return new AgentResult(null, null, question, true, null, List.of(), trace,
-                    Map.of("status", "NeedsClarification", "code", "flood_aoi_required"));
+                    Map.of("status", "NeedsClarification", "code", "flood_aoi_required",
+                            "missingData", prepared.validation().missingData(), "provenance", provenance));
         }
 
         addTrace(trace, traceListener, 1, "decision", "识别洪水分析请求",
@@ -403,10 +900,11 @@ public class AgentLoopService {
                 + "需要接入 DEM、降雨/重现期情景、河网或排水设施数据后才能输出淹没范围和水深。";
         addTrace(trace, traceListener, 2, "wait", "洪水分析能力待配置", message, "waiting");
         Map<String, Object> outcome = Map.of(
-                "status", "CapabilityPending",
-                "code", "flood_analysis_configuration_required",
+                "status", prepared.validation().status(),
+                "code", prepared.validation().code(),
                 "analysisType", "flood",
-                "requiredInputs", List.of("DEM", "rainfall_scenario", "drainage_or_river_network"));
+                "requiredInputs", prepared.validation().missingData(),
+                "provenance", provenance);
         return new AgentResult(message,
                 List.of("查看当前 AOI 建筑指标", "执行天际线分析", "执行日照与阴影筛查"),
                 null, false, null, List.of(), trace, outcome);
@@ -427,6 +925,17 @@ public class AgentLoopService {
             String userId,
             List<ExecutionTrace> trace,
             Consumer<ExecutionTrace> traceListener) {
+        SpatialPlanService.PreparedPlan prepared = spatialPlanService.prepare("urban_metrics", Map.of());
+        if (!prepared.validation().canExecute()) {
+            String question = prepared.validation().missingData().contains("aoi")
+                    ? "请先绘制或上传 AOI，再计算当前范围建筑指标。"
+                    : "当前 AOI 尚未同步可用建筑数据，请先完成建筑轮廓提取或上传 GeoJSON。";
+            Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
+            addTrace(trace, traceListener, 1, "ask", "建筑指标分析等待数据", question, "waiting");
+            return new AgentResult(null, null, question, true, null, List.of(), trace,
+                    Map.of("status", prepared.validation().status(), "code", prepared.validation().code(),
+                            "missingData", prepared.validation().missingData(), "provenance", provenance));
+        }
         addTrace(trace, traceListener, 1, "decision", "识别当前红线指标请求",
                 "直接使用已同步的 AOI 与建筑上下文，不依赖模型工具 JSON", "running");
         Map<String, Object> result = asMap(invokeTool("analyzeCurrentView", new JSONObject()));
@@ -1208,6 +1717,7 @@ public class AgentLoopService {
         String type = String.valueOf(result.getOrDefault("analysis_type", ""));
         return "skyline".equalsIgnoreCase(type)
                 || "sunlight".equalsIgnoreCase(type)
+                || "flood".equalsIgnoreCase(type)
                 || "advanced_analysis".equalsIgnoreCase(type);
     }
 
@@ -1338,6 +1848,16 @@ public class AgentLoopService {
                     getDouble(result, "max_height", 0),
                     getDouble(result, "mean_height", 0));
         }
+        if ("flood".equalsIgnoreCase(type)) {
+            return String.format(
+                    "Flood hydrologic terrain screening completed: %d high-risk cells, %d medium-risk cells, and %d potentially affected buildings. "
+                            + "Under %.0f mm rainfall, the maximum screened depth is %.3f m (DEM depression fill, D8 routing, and drainage reduction).",
+                    getInt(result, "high_risk_cell_count", 0),
+                    getInt(result, "medium_risk_cell_count", 0),
+                    getInt(result, "affected_building_count", 0),
+                    getDouble(result, "rainfall_mm", 0),
+                    getDouble(result, "max_estimated_depth_m", 0));
+        }
         return String.format(
                 "已完成日照/阴影筛查：采样 %d 个时段，日照高度合格时段约 %.0f%%，最大估算阴影长度约 %.1f 米。结果用于方案比选，不替代法定日照审查。",
                 getInt(result, "sample_count", 0),
@@ -1402,7 +1922,8 @@ public class AgentLoopService {
             List<String> fields = new ArrayList<>();
             for (String key : List.of("status", "stage", "analysis_type", "building_count", "far",
                     "max_height", "mean_height", "sample_count", "sunlight_window_percent",
-                    "max_shadow_length_m", "registered_tool", "message")) {
+                    "max_shadow_length_m", "high_risk_cell_count", "medium_risk_cell_count",
+                    "max_estimated_depth_m", "registered_tool", "message")) {
                 if (map.containsKey(key)) fields.add(key + "=" + map.get(key));
             }
             detail = fields.isEmpty() ? "工具已返回结构化结果" : String.join("，", fields);

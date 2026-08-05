@@ -231,6 +231,15 @@ public class pyGisTools {
         return postAdvancedAnalysis("/sunlight", payload);
     }
 
+    @Tool("floodAnalysis")
+    public Map<String, Object> floodAnalysis(@P("returnPeriodYears") int returnPeriodYears) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (returnPeriodYears > 0) {
+            payload.put("returnPeriodYears", returnPeriodYears);
+        }
+        return postAdvancedAnalysis("/flood", payload);
+    }
+
     private Map<String, Object> postAdvancedAnalysis(String path, Map<String, Object> options) {
         String geoJson = contextService.getGeoJson();
         if (geoJson == null || geoJson.isBlank() || "{}".equals(geoJson)) {

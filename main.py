@@ -12,7 +12,7 @@ configure_logging()
 
 from gis.router import app, _cityengine_pipeline_terminal
 from gis.adapter import ensure_cityengine_published, runtime_status
-from gis.service import calculate_skyline, calculate_sunlight, create_buffer_feature
+from gis.service import calculate_skyline, calculate_sunlight, calculate_flood_risk, create_buffer_feature
 from gis.model import (
     _metric_crs,
     _epsg_number,

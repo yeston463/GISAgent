@@ -21,6 +21,12 @@ public class PendingAnalysisIntentService {
         return intents.remove(normalize(sessionId));
     }
 
+    /** Inspect the outstanding request without clearing it while data is collected. */
+    public String peek(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) return null;
+        return intents.get(normalize(sessionId));
+    }
+
     public void clear(String sessionId) {
         if (sessionId != null && !sessionId.isBlank()) intents.remove(normalize(sessionId));
     }

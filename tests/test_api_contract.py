@@ -79,6 +79,33 @@ def test_spatial_execute_dispatches_whitelisted_operation(client, monkeypatch):
     assert resp.json() == expected
 
 
+def test_flood_route_rejects_invalid_return_period(client):
+    resp = client.post("/analysis/flood", json={"returnPeriodYears": 0})
+    assert resp.status_code == 422
+
+
+def test_flood_route_returns_risk_layer(client):
+    aoi = {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[[121.47, 31.23], [121.471, 31.23], [121.471, 31.231], [121.47, 31.231], [121.47, 31.23]]]},
+        "properties": {},
+    }
+    resp = client.post("/analysis/flood", json={
+        "aoi": aoi,
+        "dem": {"samples": [
+            {"longitude": 121.470 + col * .0004, "latitude": 31.230 + row * .0004,
+             "elevation_m": 4 if row == 1 and col == 1 else 8}
+            for row in range(3) for col in range(3)
+        ]},
+        "rainfall_scenario": {"rainfallMm": 120},
+    })
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["status"] == "Success"
+    assert body["risk_cells"]["type"] == "FeatureCollection"
+    assert body["commands"][0]["params"]["layerId"] == "flood-risk-screening"
+
+
 # --- Task G: route-level E2E with mocked GIS backends ------------------------
 def test_fetch_buildings_with_aoi_e2e(client, monkeypatch):
     fake = {

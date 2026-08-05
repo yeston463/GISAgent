@@ -6,6 +6,14 @@ import org.example.agent.AgentLoopService;
 import org.example.agent.DynamicCodeGenerator;
 import org.example.agent.DynamicExecutionGuard;
 import org.example.agent.CommandProtocol;
+import org.example.service.GisContextService;
+import org.example.spatial.SpatialCapabilityCatalog;
+import org.example.spatial.AnalysisPlan;
+import org.example.spatial.AnalysisProvenanceService;
+import org.example.spatial.SpatialPlanService;
+import org.example.spatial.KnowledgeGraphRevisionService;
+import org.example.spatial.KnowledgeGraphAdminGuard;
+import org.example.spatial.AnalysisPlanCompiler;
 import org.example.memory.PgVectorMemoryStore;
 import org.example.tools.DynamicToolRegistry;
 import jakarta.servlet.http.HttpServletRequest;
@@ -48,6 +56,27 @@ public class AgentController {
 
     @Autowired
     private DynamicExecutionGuard executionGuard;
+
+    @Autowired
+    private SpatialCapabilityCatalog spatialCapabilityCatalog;
+
+    @Autowired
+    private SpatialPlanService spatialPlanService;
+
+    @Autowired
+    private GisContextService gisContextService;
+
+    @Autowired
+    private AnalysisProvenanceService analysisProvenanceService;
+
+    @Autowired
+    private KnowledgeGraphRevisionService knowledgeGraphRevisionService;
+
+    @Autowired
+    private KnowledgeGraphAdminGuard knowledgeGraphAdminGuard;
+
+    @Autowired
+    private AnalysisPlanCompiler analysisPlanCompiler;
 
     @CrossOrigin(origins = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:7173", "http://127.0.0.1:7173"})
     @PostMapping("/chat/agentic")
@@ -132,6 +161,103 @@ public class AgentController {
         return Map.of("tools", toolRegistry.getToolDescriptors());
     }
 
+    @GetMapping("/capabilities")
+    public Map<String, Object> capabilities() {
+        return Map.of("capabilities", spatialCapabilityCatalog.descriptors(), "graph", spatialCapabilityCatalog.status());
+    }
+
+    @GetMapping("/capabilities/status")
+    public Map<String, Object> capabilityGraphStatus() { return spatialCapabilityCatalog.status(); }
+
+    @PostMapping("/capabilities/refresh")
+    public Map<String, Object> refreshCapabilityGraph() { return spatialCapabilityCatalog.refresh(); }
+
+    @PostMapping("/capabilities/candidates/preview")
+    public ResponseEntity<Map<String, Object>> previewCapabilityGraph(@RequestBody CapabilityGraphRequest request, HttpServletRequest httpRequest) {
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("valid", false, "code", "graph_admin_forbidden"));
+        try {
+            return ResponseEntity.ok(knowledgeGraphRevisionService.preview(request.graph(), request.acceptanceTests()));
+        } catch (IllegalArgumentException error) {
+            return ResponseEntity.badRequest().body(Map.of("valid", false, "code", "graph_rejected", "message", error.getMessage()));
+        }
+    }
+
+    @PostMapping("/capabilities/publish")
+    public ResponseEntity<Map<String, Object>> publishCapabilityGraph(@RequestBody CapabilityGraphRequest request, HttpServletRequest httpRequest) {
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("published", false, "code", "graph_admin_forbidden"));
+        try {
+            return ResponseEntity.ok(knowledgeGraphRevisionService.publish(request.graph(), request.author(), request.note(), request.acceptanceTests()));
+        } catch (IllegalArgumentException error) {
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "graph_rejected", "message", error.getMessage()));
+        }
+    }
+
+    @GetMapping("/capabilities/revisions")
+    public Map<String, Object> capabilityGraphRevisions() {
+        return Map.of("revisions", knowledgeGraphRevisionService.list(), "active", spatialCapabilityCatalog.status());
+    }
+
+    @PostMapping("/capabilities/test-intents")
+    public ResponseEntity<Map<String, Object>> testCapabilityIntents(@RequestBody CapabilityIntentTestRequest request, HttpServletRequest httpRequest) {
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) {
+            return ResponseEntity.status(403).body(Map.of("code", "graph_admin_forbidden"));
+        }
+        List<String> utterances = request.utterances() == null ? List.of() : request.utterances().stream()
+                .filter(item -> item != null && !item.isBlank()).limit(30).toList();
+        List<Map<String, Object>> results = new java.util.ArrayList<>();
+        for (String utterance : utterances) {
+            AnalysisPlanCompiler.Compilation compilation = analysisPlanCompiler.compile(utterance).orElse(null);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("utterance", utterance);
+            item.put("matched", compilation != null);
+            if (compilation != null) {
+                item.put("capabilityId", compilation.capabilityId());
+                item.put("tool", compilation.plan().tool());
+                item.put("operations", compilation.plan().operations());
+                item.put("params", compilation.params());
+            }
+            results.add(item);
+        }
+        return ResponseEntity.ok(Map.of("results", results, "graph", spatialCapabilityCatalog.status()));
+    }
+
+    @PostMapping("/capabilities/rollback/{version}")
+    public ResponseEntity<Map<String, Object>> rollbackCapabilityGraph(@PathVariable String version, HttpServletRequest httpRequest) {
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("rolledBack", false, "code", "graph_admin_forbidden"));
+        try {
+            return ResponseEntity.ok(knowledgeGraphRevisionService.rollback(version));
+        } catch (IllegalArgumentException error) {
+            return ResponseEntity.status(404).body(Map.of("rolledBack", false, "code", "revision_not_found", "message", error.getMessage()));
+        }
+    }
+
+    @GetMapping("/runs")
+    public Map<String, Object> recentRuns(@RequestParam(defaultValue = "20") int limit) {
+        return Map.of("runs", analysisProvenanceService.recent(Math.max(1, Math.min(limit, 200))));
+    }
+
+    @PostMapping("/plans/validate")
+    public ResponseEntity<Map<String, Object>> validatePlan(@RequestBody PlanRequest request) {
+        String memoryId = resolveMemoryId(request.memoryId());
+        gisContextService.activateSession(memoryId);
+        try {
+            SpatialPlanService.PreparedPlan prepared = request.plan() == null
+                    ? spatialPlanService.prepare(request.capabilityId(), request.params())
+                    : spatialPlanService.prepare(request.plan());
+            Map<String, Object> provenance = spatialPlanService.record(prepared, Map.of());
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("memoryId", memoryId);
+            response.put("plan", prepared.plan());
+            response.put("availability", prepared.availability());
+            response.put("validation", prepared.validation().asMap());
+            response.put("provenance", provenance);
+            return ResponseEntity.ok(response);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "InvalidPlan", "code", "capability_not_registered", "message", e.getMessage()));
+        }
+    }
+
     @DeleteMapping("/tools/{name}")
     public ResponseEntity<Map<String, Object>> removeDynamicTool(@PathVariable String name, HttpServletRequest httpRequest) {
         if (!executionGuard.isEnabled()) {
@@ -170,6 +296,12 @@ public class AgentController {
     public record ExecuteRequest(String requirement, JSONObject context, String name, String description) {}
 
     public record PreferenceRequest(String userId, String key, String value) {}
+
+    public record PlanRequest(String capabilityId, String memoryId, Map<String, Object> params, AnalysisPlan plan) {}
+
+    public record CapabilityGraphRequest(String graph, String author, String note, Map<String, List<String>> acceptanceTests) {}
+
+    public record CapabilityIntentTestRequest(List<String> utterances) {}
 
     private Map<String, Object> buildResponse(AgentLoopService.AgentResult result, String memoryId) {
         Map<String, Object> response = new LinkedHashMap<>();
@@ -210,6 +342,7 @@ public class AgentController {
         boolean failed = "Error".equals(outcome.get("status")) || "Failed".equals(outcome.get("status"));
         envelope.put("errors", failed ? List.of(outcome) : List.of());
         envelope.put("capability", "CapabilityPending".equals(outcome.get("status")) ? outcome : Map.of());
+        envelope.put("provenance", outcome.getOrDefault("provenance", Map.of()));
         envelope.put("commands", response.getOrDefault("commands", new JSONArray()));
         response.put("resultEnvelope", envelope);
         response.put("trace", result.trace() == null ? List.of() : result.trace());

@@ -2,9 +2,9 @@ package org.example.config;
 
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.dashscope.QwenChatModel;
 import dev.langchain4j.model.dashscope.QwenEmbeddingModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.store.embedding.EmbeddingStore;
@@ -24,6 +24,9 @@ public class AiConfig {
     @Value("${ai.qwen.model-name:qwen3.7-flash-2026-07-15}")
     private String chatModelName;
 
+    @Value("${ai.qwen.base-url:https://dashscope.aliyuncs.com/compatible-mode/v1}")
+    private String chatBaseUrl;
+
     @Value("${rag.min-score:0.6}")
     private double minScore;
 
@@ -33,9 +36,13 @@ public class AiConfig {
     @Bean
     @Primary
     public ChatLanguageModel chatLanguageModel() {
-        return QwenChatModel.builder()
+        // Current Qwen models expose function calling through the OpenAI-compatible
+        // DashScope endpoint. This is required by the GIS route selector.
+        return OpenAiChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(chatModelName)
+                .baseUrl(chatBaseUrl)
+                .temperature(0.0)
                 .build();
     }
 

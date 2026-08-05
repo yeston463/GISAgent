@@ -50,3 +50,48 @@ jobs:
           cache-dependency-path: 'share/**/frontend-arcgis1/package-lock.json'
       - name: Build & sync frontend
         run: bash scripts/build-frontend.sh
+
+  spatial-integration:
+    name: Spatial API integration contract
+    runs-on: ubuntu-latest
+    env:
+      QWEN-APIKEY: ci-placeholder
+      RAG_AUTO_LOAD: "false"
+      SPATIAL_DEMO_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install Python GIS runtime
+        run: python -m pip install -r requirements.txt
+      - name: Compile Java backend and resolve runtime classpath
+        run: |
+          ./mvnw -q -B -DskipTests compile
+          ./mvnw -q -B dependency:build-classpath -Dmdep.outputFile=target/runtime-classpath.txt -Dmdep.includeScope=runtime
+      - name: Start local services
+        run: |
+          python main.py > /tmp/gis-python.log 2>&1 &
+          java -cp "target/classes:$(cat target/runtime-classpath.txt)" org.example.Lc4j1Application > /tmp/gis-java.log 2>&1 &
+      - name: Wait for services
+        run: |
+          for attempt in {1..60}; do
+            curl --fail --silent http://127.0.0.1:8000/analysis/runtime >/dev/null && \
+              curl --fail --silent http://127.0.0.1:8080/api/gis/context?memoryId=ci-health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "Services did not become ready" >&2
+          exit 1
+      - name: Verify spatial analysis contract
+        run: python scripts/verify_spatial_analysis.py
+      - name: Show service logs on failure
+        if: failure()
+        run: |
+          cat /tmp/gis-python.log || true
+          cat /tmp/gis-java.log || true

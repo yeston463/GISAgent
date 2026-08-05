@@ -6,6 +6,7 @@ return plain dicts (or raise ValueError on bad input), so they are directly
 unit-testable and reusable from the router.
 """
 import json
+import heapq
 import math
 import os
 import time
@@ -29,6 +30,7 @@ SPATIAL_OPERATIONS = {
     "urban_metrics": "urban_metrics",
     "skyline": "skyline",
     "sunlight": "sunlight",
+    "flood": "flood",
 }
 
 
@@ -62,6 +64,8 @@ def execute_spatial_plan(payload):
             return calculate_skyline(args)
         if operation == "sunlight":
             return calculate_sunlight(args)
+        if operation == "flood":
+            return calculate_flood_risk(args)
     except Exception as exc:
         return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
     return {"status": "Error", "stage": "spatial_plan", "message": "Operation did not produce a result"}
@@ -478,6 +482,440 @@ def calculate_sunlight(payload):
         "dataSource": source, "limitations": result["limitations"],
     }})
     result["commands"] = commands
+    return result
+
+
+def _number_from_mapping(value, keys):
+    if not isinstance(value, dict):
+        return None
+    for key in keys:
+        try:
+            number = float(value.get(key))
+            if math.isfinite(number):
+                return number
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _dem_samples(dem):
+    samples = []
+    for feature in model._features_from_source(dem):
+        center = model._feature_centroid(feature)
+        elevation = _number_from_mapping(feature.get("properties") or {},
+                                         ("elevation_m", "elevation", "elev", "z", "value"))
+        if center and elevation is not None:
+            samples.append((center[0], center[1], elevation))
+    if isinstance(dem, dict):
+        for row in dem.get("samples", []):
+            if not isinstance(row, dict):
+                continue
+            lon = _number_from_mapping(row, ("longitude", "lon", "x"))
+            lat = _number_from_mapping(row, ("latitude", "lat", "y"))
+            elevation = _number_from_mapping(row, ("elevation_m", "elevation", "elev", "z", "value"))
+            if lon is not None and lat is not None and elevation is not None:
+                samples.append((lon, lat, elevation))
+        samples.extend(_raster_dem_samples(dem))
+    return samples
+
+
+def _raster_dem_samples(dem):
+    if not isinstance(dem, dict) or dem.get("kind") != "raster" or not dem.get("path"):
+        return []
+    root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
+    path = Path(str(dem["path"])).resolve()
+    if root not in path.parents or not path.is_file():
+        return []
+    suffix = path.suffix.lower()
+    if suffix == ".asc":
+        return _ascii_grid_samples(path)
+    if suffix in (".tif", ".tiff"):
+        return _geotiff_samples(path)
+    return []
+
+
+def _ascii_grid_samples(path):
+    try:
+        with path.open("r", encoding="utf-8-sig") as stream:
+            header = {}
+            for _ in range(6):
+                key, value = stream.readline().split(maxsplit=1)
+                header[key.lower()] = float(value)
+            ncols, nrows = int(header["ncols"]), int(header["nrows"])
+            x0, y0, cell_size = header["xllcorner"], header["yllcorner"], header["cellsize"]
+            no_data = header.get("nodata_value")
+            stride = max(1, int(math.sqrt(max(1, ncols * nrows / 1024))))
+            samples = []
+            for row_index, line in enumerate(stream):
+                if row_index % stride:
+                    continue
+                for column_index, value in enumerate(line.split()):
+                    if column_index % stride:
+                        continue
+                    elevation = float(value)
+                    if no_data is not None and elevation == no_data:
+                        continue
+                    longitude = x0 + (column_index + 0.5) * cell_size
+                    latitude = y0 + (nrows - row_index - 0.5) * cell_size
+                    samples.append((longitude, latitude, elevation))
+            return samples
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _geotiff_samples(path):
+    try:
+        import rasterio
+        from rasterio.warp import transform
+    except ImportError:
+        return []
+    try:
+        with rasterio.open(path) as dataset:
+            stride = max(1, int(math.sqrt(max(1, dataset.width * dataset.height / 1024))))
+            band = dataset.read(1, masked=True)
+            samples = []
+            for row in range(0, dataset.height, stride):
+                for column in range(0, dataset.width, stride):
+                    value = band[row, column]
+                    if getattr(value, "mask", False):
+                        continue
+                    x, y = dataset.xy(row, column)
+                    if dataset.crs and str(dataset.crs).upper() != "EPSG:4326":
+                        x, y = transform(dataset.crs, "EPSG:4326", [x], [y])
+                        x, y = x[0], y[0]
+                    samples.append((float(x), float(y), float(value)))
+            return samples
+    except Exception:
+        return []
+
+
+def _risk_cell(lon, lat, score, level, depth_m, elevation):
+    half_side_m = 28.0
+    lon_delta = half_side_m / (111320.0 * max(math.cos(math.radians(lat)), 0.01))
+    lat_delta = half_side_m / 111320.0
+    ring = [
+        [lon - lon_delta, lat - lat_delta], [lon + lon_delta, lat - lat_delta],
+        [lon + lon_delta, lat + lat_delta], [lon - lon_delta, lat + lat_delta],
+        [lon - lon_delta, lat - lat_delta],
+    ]
+    return {
+        "type": "Feature",
+        "properties": {
+            "name": f"{level.title()} flood risk cell",
+            "riskLevel": level,
+            "riskScore": round(score, 1),
+            "estimatedDepthM": round(depth_m, 3),
+            "elevationM": round(elevation, 2),
+        },
+        "geometry": {"type": "Polygon", "coordinates": [ring]},
+    }
+
+
+_D8_NEIGHBORS = ((-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1))
+
+
+def _ascii_grid(path):
+    """Read an ESRI ASCII DEM without discarding its cell topology."""
+    try:
+        with path.open("r", encoding="utf-8-sig") as stream:
+            header = {}
+            for _ in range(6):
+                key, value = stream.readline().split(maxsplit=1)
+                header[key.lower()] = float(value)
+            rows, columns = int(header["nrows"]), int(header["ncols"])
+            nodata = header.get("nodata_value")
+            values = []
+            for _ in range(rows):
+                row = [float(value) for value in stream.readline().split()]
+                if len(row) != columns:
+                    return None
+                values.append([None if nodata is not None and value == nodata else value for value in row])
+            return {
+                "values": values, "rows": rows, "columns": columns,
+                "x0": header["xllcorner"], "y0": header["yllcorner"],
+                "dx": header["cellsize"], "dy": header["cellsize"],
+                "source": "esri_ascii_grid", "derived": False,
+            }
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _geotiff_grid(path):
+    try:
+        import rasterio
+        from rasterio.warp import transform
+    except ImportError:
+        return None
+    try:
+        with rasterio.open(path) as dataset:
+            if dataset.width * dataset.height > 250000:
+                return None
+            band = dataset.read(1, masked=True)
+            # Hydrologic routing needs a regular grid. We retain the raster's
+            # topology and convert its centres to WGS84 only for rendering.
+            if not dataset.crs or str(dataset.crs).upper() == "EPSG:4326":
+                def coordinate(row, column):
+                    return dataset.xy(row, column)
+            else:
+                def coordinate(row, column):
+                    x, y = dataset.xy(row, column)
+                    lon, lat = transform(dataset.crs, "EPSG:4326", [x], [y])
+                    return lon[0], lat[0]
+            origin_x, origin_y = coordinate(0, 0)
+            x_next, _ = coordinate(0, min(1, dataset.width - 1))
+            _, y_next = coordinate(min(1, dataset.height - 1), 0)
+            values = [[None if getattr(band[row, column], "mask", False) else float(band[row, column])
+                       for column in range(dataset.width)] for row in range(dataset.height)]
+            return {
+                "values": values, "rows": dataset.height, "columns": dataset.width,
+                "x0": origin_x, "y0": origin_y,
+                "dx": abs(x_next - origin_x) or 1e-9, "dy": abs(y_next - origin_y) or 1e-9,
+                "source": "geotiff", "derived": False,
+            }
+    except Exception:
+        return None
+
+
+def _grid_from_samples(samples):
+    """Build a grid only when DEM samples are genuinely a regular lattice."""
+    if len(samples) < 9:
+        return None
+    xs = sorted({round(point[0], 10) for point in samples})
+    ys = sorted({round(point[1], 10) for point in samples}, reverse=True)
+    if len(xs) < 3 or len(ys) < 3 or len(xs) * len(ys) > 250000:
+        return None
+    dxs = [xs[index + 1] - xs[index] for index in range(len(xs) - 1)]
+    dys = [ys[index] - ys[index + 1] for index in range(len(ys) - 1)]
+    dx, dy = sum(dxs) / len(dxs), sum(dys) / len(dys)
+    if dx <= 0 or dy <= 0 or max(dxs) - min(dxs) > dx * 0.02 or max(dys) - min(dys) > dy * 0.02:
+        return None
+    lookup = {(round(x, 10), round(y, 10)): elevation for x, y, elevation in samples}
+    values = [[lookup.get((x, y)) for x in xs] for y in ys]
+    if sum(value is not None for row in values for value in row) < len(samples) * 0.95:
+        return None
+    return {"values": values, "rows": len(ys), "columns": len(xs), "x0": xs[0], "y0": ys[0],
+            "dx": dx, "dy": dy, "source": "regular_grid_reconstructed_from_dem_samples", "derived": True}
+
+
+def _hydrologic_grid(dem):
+    if isinstance(dem, dict) and dem.get("kind") == "raster" and dem.get("path"):
+        root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
+        path = Path(str(dem["path"])).resolve()
+        if root not in path.parents or not path.is_file():
+            return None
+        if path.suffix.lower() == ".asc":
+            return _ascii_grid(path)
+        if path.suffix.lower() in (".tif", ".tiff"):
+            return _geotiff_grid(path)
+    return _grid_from_samples(_dem_samples(dem))
+
+
+def _cell_coordinate(grid, row, column):
+    return grid["x0"] + column * grid["dx"], grid["y0"] - row * grid["dy"]
+
+
+def _fill_depressions(values):
+    """Priority-flood fill. Border cells drain; enclosed sinks rise to spill elevation."""
+    rows, columns = len(values), len(values[0])
+    filled = [[None for _ in range(columns)] for _ in range(rows)]
+    parents = [[None for _ in range(columns)] for _ in range(rows)]
+    visited, queue = set(), []
+    for row in range(rows):
+        for column in range(columns):
+            if row not in (0, rows - 1) and column not in (0, columns - 1):
+                continue
+            elevation = values[row][column]
+            if elevation is not None:
+                visited.add((row, column)); filled[row][column] = elevation
+                heapq.heappush(queue, (elevation, row, column))
+    while queue:
+        elevation, row, column = heapq.heappop(queue)
+        for dr, dc in _D8_NEIGHBORS:
+            nr, nc = row + dr, column + dc
+            if not (0 <= nr < rows and 0 <= nc < columns) or (nr, nc) in visited or values[nr][nc] is None:
+                continue
+            visited.add((nr, nc))
+            filled[nr][nc] = max(values[nr][nc], elevation)
+            parents[nr][nc] = (row, column)
+            heapq.heappush(queue, (filled[nr][nc], nr, nc))
+    return filled, parents
+
+
+def _flow_routing(filled, fill_parents=None):
+    rows, columns = len(filled), len(filled[0])
+    downstream = [[None for _ in range(columns)] for _ in range(rows)]
+    directions = [[None for _ in range(columns)] for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            elevation = filled[row][column]
+            if elevation is None:
+                continue
+            candidates = []
+            for code, (dr, dc) in enumerate(_D8_NEIGHBORS, 1):
+                nr, nc = row + dr, column + dc
+                if 0 <= nr < rows and 0 <= nc < columns and filled[nr][nc] is not None:
+                    distance = math.sqrt(2) if dr and dc else 1.0
+                    drop = (elevation - filled[nr][nc]) / distance
+                    if drop > 1e-9:
+                        candidates.append((drop, code, nr, nc))
+            if candidates:
+                _, code, nr, nc = max(candidates)
+                directions[row][column], downstream[row][column] = code, (nr, nc)
+            elif fill_parents and fill_parents[row][column]:
+                # Priority-flood establishes a spill path across flats.  Use
+                # that parent path when equal filled elevations have no strict
+                # D8 gradient, instead of leaving a filled sink disconnected.
+                nr, nc = fill_parents[row][column]
+                dr, dc = nr - row, nc - column
+                directions[row][column] = _D8_NEIGHBORS.index((dr, dc)) + 1
+                downstream[row][column] = (nr, nc)
+    accumulation = [[0 if filled[row][column] is None else 1 for column in range(columns)] for row in range(rows)]
+    cells = sorted(((filled[row][column], row, column) for row in range(rows) for column in range(columns)
+                    if filled[row][column] is not None), reverse=True)
+    for _, row, column in cells:
+        target = downstream[row][column]
+        if target:
+            accumulation[target[0]][target[1]] += accumulation[row][column]
+    return directions, accumulation
+
+
+def _drainage_reduction(grid, drainage_network):
+    lines = []
+    for feature in model._features_from_source(drainage_network):
+        geometry = feature.get("geometry") or {}
+        coordinates = list(model._iter_coordinates(geometry))
+        if not coordinates and geometry.get("type") in ("LineString", "MultiLineString"):
+            raw = geometry.get("coordinates") or []
+            if geometry.get("type") == "LineString":
+                coordinates = [(float(point[0]), float(point[1])) for point in raw if len(point) >= 2]
+            else:
+                coordinates = [(float(point[0]), float(point[1])) for line in raw for point in line if len(point) >= 2]
+        lines.extend(zip(coordinates, coordinates[1:]))
+    reductions = [[0.0 for _ in range(grid["columns"])] for _ in range(grid["rows"])]
+    if not lines:
+        return reductions, False
+    influence_m = max(grid["dx"] * 111320, grid["dy"] * 111320) * 2.5
+    for row in range(grid["rows"]):
+        for column in range(grid["columns"]):
+            point = _cell_coordinate(grid, row, column)
+            distance = min(min(model._distance_and_bearing(point, endpoint)[0] for endpoint in segment)
+                           for segment in lines)
+            reductions[row][column] = 0.55 * max(0.0, 1.0 - distance / max(influence_m, 1.0))
+    return reductions, True
+
+
+def calculate_flood_risk(payload):
+    """Hydrologic DEM screening: depression fill, D8 routing and drainage reduction."""
+    payload = payload or {}
+    if not model._features_from_source(payload.get("aoi")):
+        return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
+                "missing_data": ["aoi"], "message": "An AOI is required for flood risk screening."}
+    grid = _hydrologic_grid(payload.get("dem"))
+    if not grid or grid["rows"] < 3 or grid["columns"] < 3:
+        return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
+                "missing_data": ["hydrologic_dem_grid"],
+                "message": "A 3×3 or larger regular DEM grid is required. Upload ASC/GeoTIFF, or sample a regular ground grid."}
+    scenario = payload.get("rainfall_scenario")
+    rainfall_mm = _number_from_mapping(scenario, ("rainfallMm", "rainfall_mm", "rainfall", "depthMm"))
+    if rainfall_mm is None or rainfall_mm <= 0:
+        return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
+                "missing_data": ["rainfall_scenario"], "message": "A positive rainfall scenario is required."}
+
+    values = grid["values"]
+    elevations = [value for row in values for value in row if value is not None]
+    minimum, maximum = min(elevations), max(elevations)
+    filled, fill_parents = _fill_depressions(values)
+    directions, accumulation = _flow_routing(filled, fill_parents)
+    drainage, has_drainage = _drainage_reduction(grid, payload.get("drainage_network"))
+    valid_accumulation = sorted(accumulation[row][column] for row in range(grid["rows"])
+                                for column in range(grid["columns"]) if values[row][column] is not None)
+    accumulation_reference = valid_accumulation[len(valid_accumulation) // 2] or 1
+    dem_quality = {
+        "sample_count": len(elevations), "grid_rows": grid["rows"], "grid_columns": grid["columns"],
+        "minimum_elevation_m": round(minimum, 2),
+        "maximum_elevation_m": round(maximum, 2), "elevation_span_m": round(maximum - minimum, 3),
+        "source": grid["source"], "derived_grid": grid["derived"],
+    }
+    if maximum - minimum < 0.5:
+        dem_quality["warning"] = "Terrain relief is below 0.5 m across the sampled AOI; relative risk classes are sensitive to elevation noise."
+    risk_features, risk_by_sample = [], []
+    for row in range(grid["rows"]):
+        for column in range(grid["columns"]):
+            elevation = values[row][column]
+            if elevation is None:
+                continue
+            lon, lat = _cell_coordinate(grid, row, column)
+            depression_depth = max(0.0, filled[row][column] - elevation)
+            contributing_cells = accumulation[row][column]
+            routing_factor = min(2.5, 0.35 * math.log1p(contributing_cells / accumulation_reference))
+            runoff_depth = rainfall_mm / 1000.0 * 0.65 * (1.0 + routing_factor) * (1.0 - drainage[row][column])
+            # A filled depression denotes storage capacity, not instant water
+            # depth. Event runoff can only occupy that available capacity.
+            # This keeps a 120 mm storm from becoming a multi-metre depth just
+            # because a DEM contains a deep closed pit.
+            event_depth = runoff_depth * min(1.0, 0.20 + 0.16 * routing_factor)
+            depth_m = min(depression_depth, event_depth) if depression_depth > 0 else event_depth * 0.15
+            score = min(100.0, depth_m / 0.30 * 100.0)
+            level = "high" if depth_m >= 0.020 else "medium" if depth_m >= 0.008 else "low"
+            feature = _risk_cell(lon, lat, score, level, depth_m, elevation)
+            feature["properties"].update({"filledElevationM": round(filled[row][column], 3),
+                                             "depressionFillDepthM": round(depression_depth, 3),
+                                             "d8Direction": directions[row][column],
+                                             "flowAccumulationCells": contributing_cells,
+                                             "drainageReduction": round(drainage[row][column], 3)})
+            risk_features.append(feature)
+            risk_by_sample.append((lon, lat, score, level, depth_m))
+
+    affected_buildings = 0
+    exposed_buildings = []
+    for building in model._features_from_source(payload.get("buildings")):
+        center = model._feature_centroid(building)
+        if not center:
+            continue
+        nearest = min(risk_by_sample, key=lambda item: model._distance_and_bearing(center, item[:2])[0])
+        if nearest[3] in ("high", "medium"):
+            affected_buildings += 1
+            exposed = dict(building)
+            exposed["properties"] = dict(building.get("properties") or {})
+            exposed["properties"].update({
+                "name": exposed["properties"].get("name") or exposed["properties"].get("id") or "Affected building",
+                "floodExposure": nearest[3], "riskScore": round(nearest[2], 1),
+                "estimatedDepthM": round(nearest[4], 3),
+            })
+            exposed_buildings.append(exposed)
+    levels = [feature["properties"]["riskLevel"] for feature in risk_features]
+    risk_cells = model._feature_collection(risk_features)
+    scenario_name = scenario.get("name") if isinstance(scenario, dict) else None
+    return_period = int(payload.get("returnPeriodYears") or (scenario or {}).get("returnPeriodYears") or 20)
+    result = {
+        "status": "Success", "stage": "flood_analysis", "analysis_type": "flood",
+        "rainfall_mm": round(rainfall_mm, 1), "return_period_years": return_period,
+        "dem_sample_count": len(elevations), "high_risk_cell_count": levels.count("high"),
+        "medium_risk_cell_count": levels.count("medium"), "low_risk_cell_count": levels.count("low"),
+        "max_estimated_depth_m": round(max(feature["properties"]["estimatedDepthM"] for feature in risk_features), 3),
+        "affected_building_count": affected_buildings, "risk_cells": risk_cells,
+        "affected_buildings": model._feature_collection(exposed_buildings), "dem_quality": dem_quality,
+        "data_source": "current_context", "method": "hydrologic_dem_priority_flood_d8_flow_accumulation",
+        "hydrology": {"depressionFill": "priority_flood", "flowDirection": "D8",
+                       "drainageNetworkApplied": has_drainage, "runoffCoefficient": 0.65},
+        "limitations": "Hydrologic terrain screening uses DEM depression filling, D8 routing and proximity-based drainage reduction. It is not a calibrated 2D hydraulic model and does not represent pipe capacity, river stage, boundary inflow, roughness or time-varying inundation.",
+    }
+    result["commands"] = [{"action": "addGeoJsonLayer", "params": {
+        "layerId": "flood-risk-screening", "title": "Flood risk screening", "style": "floodRisk",
+        "visible": True, "data": risk_cells,
+    }}]
+    if exposed_buildings:
+        result["commands"].append({"action": "addGeoJsonLayer", "params": {
+            "layerId": "flood-exposed-buildings", "title": "Potentially affected buildings", "style": "floodExposure",
+            "visible": True, "data": result["affected_buildings"],
+        }})
+    result["commands"].append({"action": "showAdvancedAnalysis", "params": {
+        "analysisType": "flood", "title": "Flood risk screening", "rainfallMm": result["rainfall_mm"],
+        "returnPeriodYears": return_period, "highRiskCellCount": result["high_risk_cell_count"],
+        "mediumRiskCellCount": result["medium_risk_cell_count"], "affectedBuildingCount": affected_buildings,
+        "maxEstimatedDepthM": result["max_estimated_depth_m"], "scenarioName": scenario_name,
+        "demQuality": dem_quality, "hydrology": result["hydrology"], "limitations": result["limitations"],
+    }})
     return result
 
 

@@ -1,0 +1,7 @@
+[
+  {"utterance":"计算容积率", "capabilities":["urban_metrics"]},
+  {"utterance":"进行天际线分析", "capabilities":["skyline_analysis"]},
+  {"utterance":"日照与阴影筛查", "capabilities":["sunlight_analysis"]},
+  {"utterance":"洪水分析 80mm，24h，20年一遇", "capabilities":["flood_analysis"]},
+  {"utterance":"评估容积率、天际线、日照与阴影、洪水风险", "capabilities":["urban_metrics","skyline_analysis","sunlight_analysis","flood_analysis"]}
+]

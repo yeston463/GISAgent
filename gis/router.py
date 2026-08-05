@@ -61,6 +61,14 @@ class SunlightRequest(_BaseRequest):
     analysis_type: Optional[str] = None
 
 
+class FloodRequest(_BaseRequest):
+    aoi: Optional[dict] = None
+    buildings: Optional[Any] = None
+    dem: Optional[Any] = None
+    rainfall_scenario: Optional[Any] = None
+    returnPeriodYears: int = Field(default=20, ge=1, le=1000)
+
+
 class BufferRequest(_BaseRequest):
     lon: float = Field(..., ge=-180, le=180)
     lat: float = Field(..., ge=-90, le=90)
@@ -256,6 +264,15 @@ async def execute_sunlight_analysis(payload: SunlightRequest):
     except Exception as exc:
         print(f"sunlight analysis failed: {traceback.format_exc()}")
         return {"status": "Error", "stage": "sunlight_analysis", "analysis_type": "sunlight", "message": str(exc)}
+
+
+@app.post("/analysis/flood")
+async def execute_flood_analysis(payload: FloodRequest):
+    try:
+        return service.calculate_flood_risk(payload.model_dump())
+    except Exception as exc:
+        print(f"flood analysis failed: {traceback.format_exc()}")
+        return {"status": "Error", "stage": "flood_analysis", "analysis_type": "flood", "message": str(exc)}
 
 
 @app.post("/analysis/buffer")

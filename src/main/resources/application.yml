@@ -13,6 +13,7 @@ spring:
   servlet:
     multipart:
       max-file-size: 100MB
+      max-request-size: 110MB
   autoconfigure:
     exclude:
       # The project does not define Spring Data JDBC repositories. Keeping this
@@ -24,6 +25,21 @@ spring:
 ai:
   qwen:
     model-name: qwen3.7-flash-2026-07-15
+    # OpenAI-compatible DashScope endpoint; override when deploying in another region.
+    base-url: ${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+spatial:
+  atlas-mcp:
+    # Optional Atlas GIS MCP Streamable-HTTP endpoint. Empty means local source guidance only.
+    url: ${ATLAS_GIS_MCP_URL:}
+    search-tool: ${ATLAS_GIS_MCP_SEARCH_TOOL:search_data}
+  demo:
+    enabled: ${SPATIAL_DEMO_ENABLED:false}
+  knowledge-graph:
+    url: ${SPATIAL_KNOWLEDGE_GRAPH_URL:}
+    refresh-ttl-seconds: ${SPATIAL_KNOWLEDGE_GRAPH_REFRESH_TTL_SECONDS:300}
+    # local: only local requests may preview/publish/rollback; token: requires X-Spatial-Graph-Token.
+    admin-mode: ${SPATIAL_KNOWLEDGE_GRAPH_ADMIN_MODE:local}
+    admin-token: ${SPATIAL_KNOWLEDGE_GRAPH_ADMIN_TOKEN:}
 server:
   servlet:
     encoding:

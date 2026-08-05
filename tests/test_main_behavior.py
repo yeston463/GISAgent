@@ -20,7 +20,7 @@ import urllib.error
 import pytest
 
 import main
-from gis import adapter, model
+from gis import adapter, model, service
 
 
 # --------------------------------------------------------------------------- #
@@ -422,6 +422,98 @@ def test_calculate_sunlight_lock():
     assert result["sample_count"] == 5
     assert result["shadows"]["type"] == "FeatureCollection"
     assert result["max_shadow_length_m"] >= 0
+
+
+def test_calculate_flood_risk_lock():
+    aoi = {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[[121.47, 31.23], [121.471, 31.23], [121.471, 31.231], [121.47, 31.231], [121.47, 31.23]]]},
+        "properties": {},
+    }
+    dem = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [121.470 + col * .0004, 31.230 + row * .0004]},
+             "properties": {"elevation_m": 4 if row == 1 and col == 1 else 8}}
+            for row in range(3) for col in range(3)
+        ],
+    }
+    result = main.calculate_flood_risk({
+        "aoi": aoi, "dem": dem,
+        "rainfall_scenario": {"rainfallMm": 120, "returnPeriodYears": 20},
+    })
+
+    assert result["status"] == "Success"
+    assert result["analysis_type"] == "flood"
+    assert result["high_risk_cell_count"] >= 1
+    assert result["risk_cells"]["type"] == "FeatureCollection"
+    assert result["commands"][0]["action"] == "addGeoJsonLayer"
+    advanced = next(command for command in result["commands"] if command["action"] == "showAdvancedAnalysis")
+    assert advanced["params"]["analysisType"] == "flood"
+
+
+def test_flood_risk_classes_reduce_for_smaller_rainfall():
+    aoi = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[121.47, 31.23], [121.471, 31.23], [121.471, 31.231], [121.47, 31.231], [121.47, 31.23]]]}, "properties": {}}
+    dem = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [121.470 + col * .0004, 31.230 + row * .0004]},
+         "properties": {"elevation_m": 8 - row - col}}
+        for row in range(3) for col in range(3)
+    ]}
+    storm = main.calculate_flood_risk({"aoi": aoi, "dem": dem, "rainfall_scenario": {"rainfallMm": 120}})
+    light_rain = main.calculate_flood_risk({"aoi": aoi, "dem": dem, "rainfall_scenario": {"rainfallMm": 20}})
+
+    assert light_rain["max_estimated_depth_m"] < storm["max_estimated_depth_m"]
+    assert light_rain["high_risk_cell_count"] <= storm["high_risk_cell_count"]
+    assert light_rain["commands"][0]["params"]["style"] == "floodRisk"
+    assert "dem_quality" in light_rain
+
+
+def test_calculate_flood_risk_returns_structured_missing_data():
+    result = main.calculate_flood_risk({
+        "aoi": {"type": "Feature", "geometry": {"type": "Point", "coordinates": [121.47, 31.23]}, "properties": {}},
+    })
+
+    assert result["status"] == "NoData"
+    assert result["missing_data"] == ["hydrologic_dem_grid"]
+
+
+def test_ascii_grid_dem_is_accepted_for_flood_screening(tmp_path, monkeypatch):
+    raster_root = tmp_path / "gis-inputs"
+    raster_path = raster_root / "session" / "terrain.asc"
+    raster_path.parent.mkdir(parents=True)
+    raster_path.write_text(
+        "ncols 2\nnrows 2\nxllcorner 121.47\nyllcorner 31.23\ncellsize 0.0005\nNODATA_value -9999\n8 6\n4 5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIS_RASTER_ROOT", str(raster_root))
+
+    samples = service._dem_samples({"kind": "raster", "path": str(raster_path)})
+
+    assert len(samples) == 4
+    assert min(sample[2] for sample in samples) == 4.0
+
+
+def test_hydrologic_flood_uses_depression_fill_flow_and_drainage(tmp_path, monkeypatch):
+    raster_root = tmp_path / "gis-inputs"
+    raster_path = raster_root / "session" / "terrain.asc"
+    raster_path.parent.mkdir(parents=True)
+    raster_path.write_text(
+        "ncols 3\nnrows 3\nxllcorner 121.47\nyllcorner 31.23\ncellsize 0.0004\nNODATA_value -9999\n"
+        "8 8 8\n8 4 8\n8 8 8\n", encoding="utf-8")
+    monkeypatch.setenv("GIS_RASTER_ROOT", str(raster_root))
+    aoi = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [
+        [[121.47, 31.23], [121.4712, 31.23], [121.4712, 31.2312], [121.47, 31.2312], [121.47, 31.23]]]}, "properties": {}}
+    base = main.calculate_flood_risk({"aoi": aoi, "dem": {"kind": "raster", "path": str(raster_path)},
+                                       "rainfall_scenario": {"rainfallMm": 120}})
+    with_drainage = main.calculate_flood_risk({"aoi": aoi, "dem": {"kind": "raster", "path": str(raster_path)},
+        "rainfall_scenario": {"rainfallMm": 120}, "drainage_network": {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[121.47, 31.2304], [121.4708, 31.2304]]}, "properties": {}}]}})
+    centre = min(base["risk_cells"]["features"], key=lambda item: item["properties"]["elevationM"])
+    assert base["method"] == "hydrologic_dem_priority_flood_d8_flow_accumulation"
+    assert centre["properties"]["depressionFillDepthM"] == 4.0
+    assert "flowAccumulationCells" in centre["properties"]
+    assert with_drainage["hydrology"]["drainageNetworkApplied"] is True
+    assert with_drainage["max_estimated_depth_m"] < base["max_estimated_depth_m"]
 
 
 # --------------------------------------------------------------------------- #
