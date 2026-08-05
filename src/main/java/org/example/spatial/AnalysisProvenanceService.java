@@ -2,6 +2,8 @@ package org.example.spatial;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
+import org.example.service.GisContextService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -18,8 +20,18 @@ import java.util.UUID;
 
 @Component
 public class AnalysisProvenanceService {
-    private final Path file = Path.of(System.getProperty("user.dir"), "cityengine-workspace", "analysis-runs.json")
-            .toAbsolutePath().normalize();
+    private final GisContextService contextService;
+    private final Path file;
+
+    @Autowired
+    public AnalysisProvenanceService(GisContextService contextService) {
+        this(contextService, Path.of(System.getProperty("user.dir"), "cityengine-workspace", "analysis-runs.json"));
+    }
+
+    AnalysisProvenanceService(GisContextService contextService, Path file) {
+        this.contextService = contextService;
+        this.file = file.toAbsolutePath().normalize();
+    }
 
     public synchronized Map<String, Object> record(
             AnalysisPlan plan,
@@ -29,6 +41,7 @@ public class AnalysisProvenanceService {
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("runId", "run-" + UUID.randomUUID());
         record.put("recordedAt", Instant.now().toString());
+        record.put("memoryId", contextService.activeSessionId());
         record.put("planVersion", plan.planVersion());
         record.put("knowledgeGraphVersion", plan.planVersion());
         record.put("knowledgeGraphSource", plan.knowledgeGraphSource());
@@ -77,8 +90,11 @@ public class AnalysisProvenanceService {
     }
 
     public synchronized Map<String, Object> latestSuccessful(String memoryId) {
+        String expectedMemoryId = GisContextService.normalizeSession(memoryId);
         for (Map<String, Object> record : recent(200)) {
-            if ("Valid".equals(record.get("validation")) && "Success".equals(record.get("resultStatus"))) {
+            if (expectedMemoryId.equals(record.get("memoryId"))
+                    && "Valid".equals(record.get("validation"))
+                    && "Success".equals(record.get("resultStatus"))) {
                 return record;
             }
         }

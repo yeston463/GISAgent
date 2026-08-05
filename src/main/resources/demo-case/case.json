@@ -5,6 +5,14 @@
   "landUse": "R2",
   "landUseName": "二类居住用地",
   "description": "内嵌于程序资源的离线演示案例，用于在不依赖 OSM 等在线地图服务时，验证前端加载与指标分析流程。",
+  "dataIdentity": {
+    "synthetic": true,
+    "version": "1.0.0",
+    "generatedAt": "2026-08-05",
+    "license": "仅用于比赛评审演示。建筑轮廓、高度、层数为虚构合成数据，不代表任何真实地块；不得用于法定规划、土地审批或公开发布。",
+    "source": "程序内嵌合成演示数据集，非 OSM、测绘或权属数据",
+    "sha256": "1d7d4e798f167f8fc4abb70be30daa83373b4fa7923be37e72a88c6451537ee5"
+  },
   "aoi": {
     "type": "Feature",
     "properties": {"name": "演示地块范围"},

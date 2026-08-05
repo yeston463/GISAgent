@@ -5,6 +5,12 @@
   "landUseName": "二类居住用地",
   "effective": false,
   "source": "演示规则，正式使用前请替换为项目所在城市的现行控规文件",
+  "dataIdentity": {
+    "synthetic": true,
+    "version": "1.0.0",
+    "generatedAt": "2026-08-05",
+    "license": "演示规则，非正式控规；正式使用前须替换为项目所在城市现行法定规划文件。"
+  },
   "rules": {
     "far": {"max": 2.0, "unit": ""},
     "buildingDensity": {"max": 30.0, "unit": "%"},

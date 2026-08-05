@@ -30,7 +30,7 @@ public class GisContextService {
         this(resolveContextFile());
     }
 
-    GisContextService(Path contextFile) {
+    public GisContextService(Path contextFile) {
         this.contextFile = contextFile;
     }
 
@@ -58,6 +58,10 @@ public class GisContextService {
 
     public void activateSession(String sessionId) {
         activeSession.set(normalizeSession(sessionId));
+    }
+
+    public String activeSessionId() {
+        return activeSession.get();
     }
 
     public synchronized SaveResult saveGeoJson(String newJson) {
@@ -124,7 +128,7 @@ public class GisContextService {
         }
     }
 
-    private static String normalizeSession(String sessionId) {
+    public static String normalizeSession(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
             return DEFAULT_SESSION;
         }
