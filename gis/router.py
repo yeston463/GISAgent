@@ -125,6 +125,19 @@ class PublicDemRequest(_BaseRequest):
 app = FastAPI(title="Esri Cup Professional GIS Engine")
 
 
+def _server_error(stage: str, exc: Exception, **extra: Any) -> dict:
+    """Return a sanitized error payload to the client.
+
+    The full exception detail (traceback, paths, credentials) is only written
+    to the server log, never echoed to the caller. ``message`` carries a
+    generic, user-safe string so internal details are not leaked to the API.
+    """
+    print(f"{stage} failed: {traceback.format_exc()}")
+    response = {"status": "Error", "stage": stage, "message": "服务内部错误，请稍后重试。"}
+    response.update(extra)
+    return response
+
+
 def _cityengine_pipeline_terminal(result):
     status = str(result.get("status", "")).lower()
     if status in {"failed", "not_found", "error"}:
@@ -143,8 +156,7 @@ async def plan_current_context(payload: PlanContextRequest):
     try:
         return service.evaluate_context_case(payload.model_dump())
     except Exception as exc:
-        print(f"Context planning failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "context_planning", "message": str(exc)}
+        return _server_error("context_planning", exc)
 
 
 @app.post("/analysis/demo_case/evaluate")
@@ -152,8 +164,7 @@ async def evaluate_planning_demo(payload: DemoCaseRequest):
     try:
         return service.evaluate_demo_case(payload.requirements, payload.ragContext, payload.userRequest)
     except Exception as exc:
-        print(f"Demo case evaluation failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "planning_evaluation", "message": str(exc)}
+        return _server_error("planning_evaluation", exc)
 
 
 @app.get("/analysis/geoscene/publishing")
@@ -265,8 +276,7 @@ async def calculate_urban_metrics(payload: UrbanMetricsRequest):
     try:
         return service.calculate_metrics(payload.model_dump())
     except Exception as exc:
-        print(f"urban_metrics failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "urban_metrics", "far": 0, "message": str(exc)}
+        return _server_error("urban_metrics", exc, far=0)
 
 
 @app.post("/analysis/skyline")
@@ -274,8 +284,7 @@ async def execute_skyline_analysis(payload: SkylineRequest):
     try:
         return service.calculate_skyline(payload.model_dump())
     except Exception as exc:
-        print(f"skyline analysis failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "skyline_analysis", "analysis_type": "skyline", "message": str(exc)}
+        return _server_error("skyline_analysis", exc, analysis_type="skyline")
 
 
 @app.post("/analysis/sunlight")
@@ -283,8 +292,7 @@ async def execute_sunlight_analysis(payload: SunlightRequest):
     try:
         return service.calculate_sunlight(payload.model_dump())
     except Exception as exc:
-        print(f"sunlight analysis failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "sunlight_analysis", "analysis_type": "sunlight", "message": str(exc)}
+        return _server_error("sunlight_analysis", exc, analysis_type="sunlight")
 
 
 @app.post("/analysis/flood")
@@ -292,8 +300,7 @@ async def execute_flood_analysis(payload: FloodRequest):
     try:
         return service.calculate_flood_risk(payload.model_dump())
     except Exception as exc:
-        print(f"flood analysis failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "flood_analysis", "analysis_type": "flood", "message": str(exc)}
+        return _server_error("flood_analysis", exc, analysis_type="flood")
 
 
 @app.post("/analysis/site-selection")
@@ -301,8 +308,7 @@ async def execute_site_selection(payload: SiteSelectionRequest):
     try:
         return service.calculate_site_selection(payload.model_dump())
     except Exception as exc:
-        print(f"site selection failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "site_selection", "analysis_type": "site_selection", "message": str(exc)}
+        return _server_error("site_selection", exc, analysis_type="site_selection")
 
 
 @app.post("/analysis/dem/public-raster")
@@ -316,8 +322,7 @@ async def execute_buffer(payload: BufferRequest):
         feature = service.create_buffer_feature(payload.lon, payload.lat, payload.radius)
         return model._feature_collection([feature])
     except Exception as exc:
-        print(f"buffer failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "buffer", "message": str(exc)}
+        return _server_error("buffer", exc)
 
 
 @app.post("/analysis/execute")
@@ -326,8 +331,7 @@ async def execute_spatial_plan(payload: SpatialExecuteRequest):
     try:
         return service.execute_spatial_plan(payload.model_dump())
     except Exception as exc:
-        print(f"spatial plan failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
+        return _server_error("spatial_plan", exc)
 
 
 @app.post("/analysis/data/inspect")
@@ -357,8 +361,7 @@ async def fetch_buildings(payload: FetchBuildingsRequest):
             }
         return service.fetch_buildings_for_aoi(aoi)
     except Exception as exc:
-        print(f"fetch_buildings failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "fetch_buildings", "building_count": 0, "message": str(exc)}
+        return _server_error("fetch_buildings", exc, building_count=0)
 
 
 @app.post("/analysis/analyze_area")
@@ -419,5 +422,4 @@ async def analyze_area(payload: AnalyzeAreaRequest):
         })
         return fallback
     except Exception as exc:
-        print(f"analyze_area failed: {traceback.format_exc()}")
-        return {"status": "Error", "stage": "analyze_area", "far": 0, "building_count": 0, "message": str(exc)}
+        return _server_error("analyze_area", exc, far=0, building_count=0)
