@@ -1,0 +1,47 @@
+# 生产环境配置。由 compose-prod.yaml 以环境变量注入；仅供内部 Docker 网络使用，
+# 唯一公网入口为 Nginx（80/443），本服务不对外暴露端口。
+server:
+  # 容器内监听所有网卡（仅内网可达，Nginx 反代；无端口映射到宿主机）。
+  address: 0.0.0.0
+
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://pgvector:5432/vectordb}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+
+gis:
+  python-service-url: ${GIS_PYTHON_SERVICE_URL:http://python-gis:8000/analysis}
+
+frontend:
+  url: ${FRONTEND_URL:https://localhost}
+
+logging:
+  level:
+    root: info
+    dev.langchain4j: warn
+    dev.ai4j.openai4j: warn
+  pattern:
+    # 结构化单行日志，便于集中采集（可选 JSON appender，见 logback-prod.xml）
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never

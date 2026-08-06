@@ -1,14 +1,26 @@
 ﻿<template>
-  <div class="app-container">
+  <LoginView v-if="!auth.isAuthenticated" @login-success="onLoginSuccess" />
+  <div v-else class="app-container">
+    <!-- 会话栏 -->
+    <div class="session-bar">
+      <span class="session-user">
+        {{ auth.displayName }}
+        <el-tag v-if="auth.isAdmin" size="small" type="danger" effect="dark">管理员</el-tag>
+        <el-tag v-else size="small" type="info" effect="plain">普通用户</el-tag>
+      </span>
+      <el-button size="small" @click="handleLogout">退出登录</el-button>
+    </div>
+
     <!-- 1. 地理底座 -->
     <MapViewer @map-ready="handleMapReady" />
 
-    <!-- 2. 知识库管理（左侧） -->
+    <!-- 2. 知识库管理（左侧，上传仅管理员可见） -->
     <KnowledgeManager />
 
     <!-- 3. AI 聊天助手（右侧） -->
     <ChatAgent :mapView="mainView" />
-    <KnowledgeGraphWorkbench />
+    <!-- 能力图谱工作台仅管理员 -->
+    <KnowledgeGraphWorkbench v-if="auth.isAdmin" />
 
     <AnalysisDashboard :data="chartData"/>
     <CityEngineResultViewer />
@@ -17,6 +29,9 @@
 
 <script setup>
 import { ref ,onMounted} from 'vue';
+import { ElMessage } from 'element-plus';
+import { auth, logout } from './auth';
+import LoginView from './LoginView.vue';
 import MapViewer from './components/MapViewer.vue';
 import ChatAgent from './components/ChatAgent.vue';
 import KnowledgeManager from './components/KnowledgeManager.vue';
@@ -44,6 +59,15 @@ onMounted(() => {
     chartData.value = e.detail;
   });
 });
+
+const onLoginSuccess = () => {
+  // 登录成功由 auth 响应式状态驱动，自动切换到主界面
+};
+
+const handleLogout = () => {
+  logout();
+  ElMessage.info('已退出登录');
+};
 </script>
 
 <style>
@@ -60,5 +84,28 @@ html, body, #app {
   position: relative;
   width: 100vw;
   height: 100vh;
+}
+
+.session-bar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(6px);
+  border-radius: 8px;
+  padding: 6px 10px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.session-user {
+  font-size: 13px;
+  color: #0e2a45;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 </style>

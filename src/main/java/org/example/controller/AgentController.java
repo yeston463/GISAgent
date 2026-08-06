@@ -22,6 +22,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -166,6 +167,7 @@ public class AgentController {
     }
 
     @PostMapping("/execute")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> executeDynamic(@RequestBody ExecuteRequest request, HttpServletRequest httpRequest) {
         if (!executionGuard.isEnabled()) {
             return ResponseEntity.status(404)
@@ -209,6 +211,7 @@ public class AgentController {
     public Map<String, Object> refreshCapabilityGraph() { return spatialCapabilityCatalog.refresh(); }
 
     @PostMapping("/capabilities/candidates/preview")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> previewCapabilityGraph(@RequestBody CapabilityGraphRequest request, HttpServletRequest httpRequest) {
         if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("valid", false, "code", "graph_admin_forbidden"));
         try {
@@ -219,6 +222,7 @@ public class AgentController {
     }
 
     @PostMapping("/capabilities/publish")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> publishCapabilityGraph(@RequestBody CapabilityGraphRequest request, HttpServletRequest httpRequest) {
         if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("published", false, "code", "graph_admin_forbidden"));
         try {
@@ -234,6 +238,7 @@ public class AgentController {
     }
 
     @PostMapping("/capabilities/test-intents")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> testCapabilityIntents(@RequestBody CapabilityIntentTestRequest request, HttpServletRequest httpRequest) {
         if (!knowledgeGraphAdminGuard.authorize(httpRequest)) {
             return ResponseEntity.status(403).body(Map.of("code", "graph_admin_forbidden"));
@@ -258,6 +263,7 @@ public class AgentController {
     }
 
     @PostMapping("/capabilities/rollback/{version}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> rollbackCapabilityGraph(@PathVariable String version, HttpServletRequest httpRequest) {
         if (!knowledgeGraphAdminGuard.authorize(httpRequest)) return ResponseEntity.status(403).body(Map.of("rolledBack", false, "code", "graph_admin_forbidden"));
         try {
@@ -300,6 +306,7 @@ public class AgentController {
     }
 
     @DeleteMapping("/tools/{name}")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> removeDynamicTool(@PathVariable String name, HttpServletRequest httpRequest) {
         if (!executionGuard.isEnabled()) {
             return ResponseEntity.status(404)
@@ -317,6 +324,7 @@ public class AgentController {
     }
 
     @PostMapping("/tools/{name}/rollback")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> rollbackDynamicTool(
             @PathVariable String name, @RequestParam long version, HttpServletRequest httpRequest) {
         if (!executionGuard.isEnabled()) {

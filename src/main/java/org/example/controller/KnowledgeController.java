@@ -3,6 +3,7 @@ package org.example.controller;
 import org.example.service.KnowledgeService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import java.util.Locale;
@@ -23,6 +24,7 @@ public class KnowledgeController {
     private KnowledgeService knowledgeService;
 
     @PostMapping("/upload")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
         if (file == null || file.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("code", "file_required"));
@@ -67,6 +69,7 @@ public class KnowledgeController {
     }
 
     @PostMapping("/reload")
+    @PreAuthorize("hasRole('ADMIN')")
     public Map<String, Object> reload() {
         return knowledgeService.loadBundledContent();
     }

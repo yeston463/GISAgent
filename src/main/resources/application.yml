@@ -51,6 +51,34 @@ server:
       enabled: true
   # 仅绑定本机回环地址，配合动态执行的 local 鉴权模式，最小化暴露面。可用 SERVER_ADDRESS 切换。
   address: ${SERVER_ADDRESS:127.0.0.1}
+  # Nginx 反代场景下正确解析 X-Forwarded-* 头（真实客户端 IP / 协议）。
+  forward-headers-strategy: framework
+
+# ===== 全局登录鉴权（JWT）=====
+# AUTH_JWT_SECRET          JWT 签名密钥（>=32 字节随机串）。生产必须通过环境变量注入；
+#                          未配置时启动生成随机密钥并告警（重启后旧令牌失效）。
+# AUTH_JWT_TTL_MINUTES     令牌有效期（分钟），默认 12 小时。
+# AUTH_ADMIN_USERNAME      引导管理员用户名（.env / 环境变量），默认 admin。
+# AUTH_ADMIN_PASSWORD      引导管理员密码。生产必填；为空则启动时生成随机密码并告警。
+# AUTH_CORS_ORIGINS        允许的跨域来源（逗号分隔）。生产只填正式域名。
+app:
+  auth:
+    jwt-secret: ${AUTH_JWT_SECRET:}
+    jwt-ttl-minutes: ${AUTH_JWT_TTL_MINUTES:720}
+    jwt-issuer: lc4j-backend
+    admin-username: ${AUTH_ADMIN_USERNAME:admin}
+    admin-password: ${AUTH_ADMIN_PASSWORD:}
+    cors-allowed-origins: ${AUTH_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:7173,http://127.0.0.1:7173}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
 
 gis:
   python-service-url: ${GIS_PYTHON_SERVICE_URL:http://127.0.0.1:8000/analysis}
@@ -83,5 +111,5 @@ agent:
 
 logging:
   level:
-    dev.langchain4j: debug
-    dev.ai4j.openai4j: debug
+    dev.langchain4j: info
+    dev.ai4j.openai4j: info

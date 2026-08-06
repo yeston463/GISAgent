@@ -17,6 +17,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.security.test.context.support.WithMockUser;
 
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -257,6 +258,7 @@ class SpatialPlanningContractTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void vectorFileUploadStoresGeoJsonInTheRequestedDataset() {
         String memoryId = "vector-upload-" + UUID.randomUUID();
         MockMultipartFile file = new MockMultipartFile("file", "aoi.geojson", "application/geo+json", """

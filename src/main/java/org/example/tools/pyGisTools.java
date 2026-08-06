@@ -11,6 +11,7 @@ import org.example.agent.ScenarioResult;
 import org.example.service.GisContextService;
 import org.example.service.KnowledgeService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -34,6 +35,7 @@ public class pyGisTools {
     private KnowledgeService knowledgeService;
 
     @Autowired
+    @Lazy // 打破 AgentLoopService -> DynamicToolRegistry -> pyGisTools 的循环依赖，仅在工具方法运行时按需解析
     private AgentLoopService agentLoopService;
 
     @Value("${gis.python-service-url:http://127.0.0.1:8000/analysis}")

@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -74,7 +75,8 @@ public class GisDataController {
         return result;
     }
 
-    @PostMapping("/data-discovery/import")
+@PostMapping("/data-discovery/import")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> importDiscoveredData(@RequestBody DataImportRequest request) {
         if (!"osm_overpass".equals(request.source())) return ResponseEntity.badRequest().body(Map.of("code", "import_source_not_supported"));
         if (!Set.of("buildings", "roads", "waterways").contains(request.dataset())) return ResponseEntity.badRequest().body(Map.of("code", "osm_dataset_not_supported"));
@@ -149,7 +151,8 @@ public class GisDataController {
         return ResponseEntity.ok(response);
     }
 
-    @PostMapping(value = "/data-file", consumes = "multipart/form-data")
+@PostMapping(value = "/data-file", consumes = "multipart/form-data")
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> uploadSpatialData(
             @RequestParam("file") MultipartFile file,
             @RequestParam(defaultValue = "dem") String dataset,
