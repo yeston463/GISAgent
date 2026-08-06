@@ -1,0 +1,6 @@
+# 生产 GIS 镜像的可选开源几何引擎依赖（ArcPy 为 Windows 独占，容器内不可用）。
+# 这些库是可选的：本机 / CI 的确定性测试按"不安装它们"设计运行，
+# 详见 requirements-dev.txt 说明。仅 gis.Dockerfile 安装本文件。
+shapely>=2.0,<3
+geopandas>=0.14,<2
+pandas>=2.0,<3

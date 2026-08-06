@@ -11,6 +11,9 @@ RUN groupadd -r gis && useradd -r -g gis -d /workspace gis \
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# 开源 GIS 几何引擎（容器内无法用 ArcPy，OpenGeo 兜底需要这些库）
+COPY requirements-gis.txt ./
+RUN pip install --no-cache-dir -r requirements-gis.txt
 
 COPY --chown=gis:gis main.py cityengine_bridge.py geoscene_publisher.py ./
 COPY --chown=gis:gis gis ./gis

@@ -14,10 +14,13 @@ FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /build/target/lc4j-1-0.0.1-SNAPSHOT.jar /app/app.jar
 EXPOSE 8080
-# 生产禁止在容器内以 root 运行
-RUN groupadd -r app && useradd -r -g app -d /app app \
+# 安装健康检查探测工具（基础镜像默认不带 curl/wget）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r app && useradd -r -g app -d /app app \
     && mkdir -p /app/uploads && chown -R app:app /app
 USER app
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=12 \
-  CMD ["java","-cp","/app/app.jar","org.springframework.boot.loader.launch.JarLauncher"] || true
+  CMD ["curl","-fsS","http://127.0.0.1:8080/actuator/health"]
 ENTRYPOINT ["java","-XX:MaxRAMPercentage=75.0","-jar","/app/app.jar"]
