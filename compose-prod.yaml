@@ -1,0 +1,138 @@
+# 生产 / 预发布部署：Docker Compose。
+#
+# 拓扑（仅 Nginx 对外开放 80/443，其余全部在 internal 内网）：
+#   公网 -> HTTPS -> Nginx(静态前端 + 反代 /api、/analysis) -> backend(Java)
+#                                                          -> python-gis(FastAPI)
+#   backend -----> redis / pgvector（无端口映射）
+#
+# 例外：CityEngine / GeoScene 需要在宿主机原生运行，python-gis 通过
+#   host.docker.internal 反向访问宿主机的 CityEngine bridge / GeoScene 服务。
+#
+# 使用前（在服务器上）：
+#   1) cp .env.production.example .env 并填入全部密钥（AUTH_JWT_SECRET、POSTGRES_PASSWORD、
+#      REDIS_PASSWORD、QWEN-APIKEY、DEEPSEEK_API_KEY、AMAP_KEY、GEOSCENE_* 等）
+#   2) docker compose -f compose-prod.yaml build
+#   3) docker compose -f compose-prod.yaml up -d
+name: lc4j-prod
+
+services:
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/nginx.Dockerfile
+    restart: unless-stopped
+    # 唯一对外开放的端口：80 / 443
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # HTTPS 证书目录（宿主机：/etc/letsencrypt/live/<域名>/），按需挂载
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_ADDRESS: 0.0.0.0
+      POSTGRES_URL: jdbc:postgresql://pgvector:5432/vectordb
+      POSTGRES_HOST: pgvector
+      REDIS_HOST: redis
+      GIS_PYTHON_SERVICE_URL: http://python-gis:8000/analysis
+      FRONTEND_URL: ${FRONTEND_URL:-https://localhost}
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -O- http://127.0.0.1:8080/actuator/health || exit 1"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  python-gis:
+    build:
+      context: .
+      dockerfile: docker/gis.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 通过宿主机网关反向访问本机的 CityEngine / GeoScene
+      GIS_HOST_GATEWAY: host.docker.internal
+      GEOSCENE_PORTAL_URL: ${GEOSCENE_PORTAL_URL}
+      GEOSCENE_PORTAL_USERNAME: ${GEOSCENE_PORTAL_USERNAME}
+      GEOSCENE_PORTAL_PASSWORD: ${GEOSCENE_PORTAL_PASSWORD}
+      GEOSCENE_PORTAL_FOLDER: ${GEOSCENE_PORTAL_FOLDER:-GISAgent-CityEngine}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 与宿主机共享工作区，供本机 CityEngine/GeoScene 生产
+      - ./cityengine-workspace:/workspace/cityengine-workspace
+      - ./geoscene-upload-temp:/workspace/geoscene-upload-temp
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 无端口映射，仅内网
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 未设置}
+    volumes:
+      - redis-data:/data
+    command:
+      - sh
+      - -c
+      - 'redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"'
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pgvector:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    # 无端口映射，仅内网
+    environment:
+      POSTGRES_DB: vectordb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置}
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vectordb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  redis-data:
+  pgvector-data:
