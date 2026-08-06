@@ -12,9 +12,16 @@ if exist "!ROOT!.env" (
   )
 )
 
-set "PYTHON_REQUEST=python"
-if defined GIS_PYTHON_EXE set "PYTHON_REQUEST=%GIS_PYTHON_EXE%"
-set "PYTHON_REQUEST=%PYTHON_REQUEST:"=%"
+rem Candidate base interpreters, in preference order:
+rem   GIS_PYTHON_EXE -> GeoScene ArcPy runtime -> local .venv -> system python.
+set "PYTHON_REQUEST="
+if defined GIS_PYTHON_EXE if exist "%GIS_PYTHON_EXE%" set "PYTHON_REQUEST=%GIS_PYTHON_EXE%"
+if not defined PYTHON_REQUEST (
+  if exist "C:\Program Files\GeoScene\Pro\bin\Python\envs\arcgispro-py3\python.exe" set "PYTHON_REQUEST=C:\Program Files\GeoScene\Pro\bin\Python\envs\arcgispro-py3\python.exe"
+)
+if not defined PYTHON_REQUEST (
+  if exist "!ROOT!.venv\Scripts\python.exe" set "PYTHON_REQUEST=!ROOT!.venv\Scripts\python.exe"
+)
 
 if not defined CITYENGINE_RUNTIME_ROOT set "CITYENGINE_RUNTIME_ROOT=C:\GISAgentCityEngine"
 powershell.exe -NoProfile -Command "$p=$env:CITYENGINE_RUNTIME_ROOT; try {$null=[IO.Path]::GetFullPath($p)} catch {exit 1}; foreach($c in $p.ToCharArray()){if([int]$c -gt 127){exit 2}}" >nul
@@ -43,11 +50,15 @@ if not exist "!FRONTEND!\package.json" (
 
 if not exist "!ROOT!start-java-backend.ps1" (echo [ERROR] Java backend launcher not found.& exit /b 1)
 set "PYTHON_EXE="
-if exist "!PYTHON_REQUEST!" set "PYTHON_EXE=!PYTHON_REQUEST!"
+if defined PYTHON_REQUEST if exist "!PYTHON_REQUEST!" set "PYTHON_EXE=!PYTHON_REQUEST!"
 if not defined PYTHON_EXE (
-  for /f "delims=" %%P in ('where "!PYTHON_REQUEST!" 2^>nul') do if not defined PYTHON_EXE set "PYTHON_EXE=%%P"
+  rem .venv is preferred over system python when no explicit/GeoScene base exists.
+  if exist "!ROOT!.venv\Scripts\python.exe" set "PYTHON_EXE=!ROOT!.venv\Scripts\python.exe"
 )
-if not defined PYTHON_EXE (echo [ERROR] Python not found: !PYTHON_REQUEST!& exit /b 1)
+if not defined PYTHON_EXE (
+  for /f "delims=" %%P in ('where python 2^>nul') do if not defined PYTHON_EXE set "PYTHON_EXE=%%P"
+)
+if not defined PYTHON_EXE (echo [ERROR] Python not found. Set GIS_PYTHON_EXE in .env or install Python.& exit /b 1)
 where npm >nul 2>nul || (echo [ERROR] npm not found.& exit /b 1)
 
 if not exist "!FRONTEND!\node_modules" (

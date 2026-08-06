@@ -84,7 +84,7 @@ scripts\acceptance-offline.ps1
 |------|------|------|------|
 | **Vue 前端** | Vue 3 + Vite + @arcgis/core | `:5173` | 交互式地图 + 对话分析（独立 Vite 服务） |
 | **Java 后端** | Spring Boot 3.3 + LangChain4j | `:8080` | Agent 编排 / 工具注册 / 安全校验 / 溯源记录 |
-| **Python GIS** | FastAPI + Pydantic | `:8000` | 指标计算（GeoScene Enterprise 服务端优先，标准库降级兜底）/ 天际线 / 日照 / 取楼 |
+| **Python GIS** | FastAPI + Pydantic | `:8000` | 指标计算（ArcPy 优先，开源 GeoPandas/Shapely 兜底）/ 天际线 / 日照 / 取楼；GeoScene 仅三维展示/发布 |
 
 ## 能力目录
 
@@ -133,7 +133,7 @@ scripts\acceptance-offline.ps1
 | 方案比选可解释（含评分权重溯源） | ScenarioEvaluator 暴露 scoreBreakdown |
 | 多用户并发 + 编辑锁 + 版本冲突防护 | Java 并发/合同测试 |
 | 三维发布到 GeoScene（Feature/WebMap/WebScene） | mock Portal 端到端（网络边界替换为桩） |
-| GIS 指标空间计算可交由 GeoScene Enterprise 服务端 | mock Geometry Service（areasAndLengths/intersect/union）端到端，且与服务端逐项一致 |
+| GIS 指标计算优先 ArcPy 后端，开源 GeoPandas/Shapely 兜底 | 离线指标测试 + 契约测试（确定性锁定） |
 | 增量分析只算变化建筑 | 增量测试断言不规则即复用 |
 | 动态代码执行安全边界 | Java 动态执行防护测试（默认关闭） |
 
@@ -141,7 +141,7 @@ scripts\acceptance-offline.ps1
 
 | 层 | 命令 | 说明 |
 |----|------|------|
-| Python（确定性 + 契约 + 服务端） | `python -m pytest` | **125 项**（离线指标 12 / API 契约 16 / 主流程锁定 41 / CityEngine 几何 16 / GeoScene 发布 17 / 增量分析 10 / 发布目标幂等 8 / GeoScene 服务端分析 5 — 合计 `125`，均以 `pytest --collect-only` 校准） |
+| Python（确定性 + 契约） | `python -m pytest` | **125 项**（离线指标 12 / API 契约 16 / 主流程锁定 41 / CityEngine 几何 16 / GeoScene 发布 17 / 增量分析 10 / 发布目标幂等 8 / GIS 指标后端 5 — 合计 `125`，均以 `pytest --collect-only` 校准） |
 | Java（安全 + 合同） | `./mvnw -q test` | 动态执行防护 + 空间规划合同 + 溯源隔离 |
 | 前端 E2E | `cd frontend && npm run test:e2e` | 应用挂载 + 代理连通 |
 | 离线验收 | `scripts\acceptance-offline.ps1` | 启动 → 加载离线案例 → 指标比对 |

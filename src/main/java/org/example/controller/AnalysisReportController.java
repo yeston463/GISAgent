@@ -44,12 +44,12 @@ public class AnalysisReportController {
                 <style>body{font:14px 'Microsoft YaHei',Arial;color:#1f2937;max-width:900px;margin:36px auto;line-height:1.7}h1{color:#075985;border-bottom:2px solid #0ea5e9;padding-bottom:10px}h2{color:#0f766e;margin-top:28px}table{border-collapse:collapse;width:100%%}th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}th{width:32%%;background:#f1f5f9}.note{padding:12px;background:#fff7ed;border-left:4px solid #f59e0b}.muted{color:#64748b;font-size:12px}</style>
                 <h1>%s</h1><p class="muted">生成时间：%s　执行 ID：%s</p>
                 <h2>分析结论</h2><table><tr><th>能力</th><td>%s</td></tr><tr><th>执行状态</th><td>%s</td></tr><tr><th>高风险格网</th><td>%s</td></tr><tr><th>中风险格网</th><td>%s</td></tr><tr><th>最大筛查水深</th><td>%s m</td></tr><tr><th>受影响建筑</th><td>%s</td></tr></table>
-                <h2>输入与数据来源</h2><table><tr><th>降雨情景</th><td>%s</td></tr><tr><th>可用数据</th><td>%s</td></tr><tr><th>上下文版本</th><td>%s</td></tr><tr><th>数据来源</th><td>%s</td></tr></table>
+                <h2>输入与数据来源</h2><table><tr><th>降雨情景</th><td>%s</td></tr><tr><th>可用数据</th><td>%s</td></tr><tr><th>上下文版本</th><td>%s</td></tr><tr><th>数据来源</th><td>%s</td></tr><tr><th>GIS 计算后端</th><td>%s</td></tr></table>
                 <h2>方法与可追溯性</h2><p>处理链：%s</p><p>工具：%s；计划版本：%s；记录时间：%s。</p>
-                <h2>局限与使用说明</h2><p class="note">%s</p><p class="muted">本报告为系统自动生成的分析记录。可在浏览器中打开后选择“打印”为 PDF。</p></html>
+                <h2>局限与使用说明</h2><p class="note">%s</p><p class="muted">本报告为系统自动生成的分析记录。空间指标优先由专业 ArcPy 后端计算，开源 GeoPandas/Shapely 兜底；GeoScene 用于三维展示/发布；可在浏览器中打开后选择“打印”为 PDF。</p></html>
                 """.formatted(title, title, escape(OffsetDateTime.now().toString()), escape(String.valueOf(run.get("runId"))),
                 escape(String.valueOf(run.get("capabilityId"))), escape(String.valueOf(result.get("status"))), metric(result,"high_risk_cell_count"), metric(result,"medium_risk_cell_count"), metric(result,"max_estimated_depth_m"), metric(result,"affected_building_count"),
-                escape(JSON.toJSONString(context.get("rainfall_scenario"))), escape(String.valueOf(run.get("availableData"))), escape(String.valueOf(run.get("contextVersion"))), escape(String.valueOf(run.get("data_source"))),
+                escape(JSON.toJSONString(context.get("rainfall_scenario"))), escape(String.valueOf(run.get("availableData"))), escape(String.valueOf(run.get("contextVersion"))), escape(String.valueOf(run.get("data_source"))), escape(String.valueOf(run.get("gis_backend"))),
                 escape(String.valueOf(run.get("operations"))), escape(String.valueOf(run.get("tool"))), escape(String.valueOf(run.get("planVersion"))), escape(String.valueOf(run.get("recordedAt"))), escape(String.valueOf(run.get("limitations"))));
     }
     private String metric(JSONObject object, String key) { return escape(String.valueOf(object.getOrDefault(key, "—"))); }

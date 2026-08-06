@@ -610,20 +610,10 @@ def _calculate_metrics_arcpy(payload):
 def calculate_metrics(payload):
     fallback_errors = []
 
-    if adapter.HAS_GEOSCENE_SERVER:
-        try:
-            result = _calculate_metrics_geoscene_server(payload)
-            if result.get("status") == "Success" or (not adapter.HAS_ARCPY and not adapter.HAS_OPEN_SOURCE):
-                return result
-            fallback_errors.append(f"geoscene_server returned {result.get('status')}: {result.get('message')}")
-        except Exception as exc:
-            fallback_errors.append(f"geoscene_server: {exc}")
-            print(f"GeoScene server metrics failed, falling back: {traceback.format_exc()}")
-
     if adapter.HAS_ARCPY:
         try:
             result = _calculate_metrics_arcpy(payload)
-            if result.get("status") == "Success" or not adapter.HAS_OPEN_SOURCE:
+            if result.get("status") == "Success" or (not adapter.HAS_OPEN_SOURCE):
                 return result
             fallback_errors.append(f"geoscene_arcpy returned {result.get('status')}: {result.get('message')}")
         except Exception as exc:
@@ -633,12 +623,22 @@ def calculate_metrics(payload):
     if adapter.HAS_OPEN_SOURCE:
         try:
             result = _calculate_metrics_open_source(payload)
-            if fallback_errors:
-                result["fallback_errors"] = fallback_errors
-            return result
+            if result.get("status") == "Success":
+                return result
+            fallback_errors.append(f"open_source_geopandas returned {result.get('status')}: {result.get('message')}")
         except Exception as exc:
             fallback_errors.append(f"open_source_geopandas: {exc}")
-            print(f"GeoPandas metrics failed: {traceback.format_exc()}")
+            print(f"GeoPandas metrics failed, falling back: {traceback.format_exc()}")
+
+    if adapter.HAS_GEOSCENE_SERVER:
+        try:
+            result = _calculate_metrics_geoscene_server(payload)
+            if result.get("status") == "Success" or (not adapter.HAS_ARCPY and not adapter.HAS_OPEN_SOURCE):
+                return result
+            fallback_errors.append(f"geoscene_server returned {result.get('status')}: {result.get('message')}")
+        except Exception as exc:
+            fallback_errors.append(f"geoscene_server: {exc}")
+            print(f"GeoScene server metrics failed, falling back: {traceback.format_exc()}")
 
     try:
         result = extract_urban_metrics(payload.get("aoi"), payload.get("buildings"))
@@ -653,7 +653,7 @@ def calculate_metrics(payload):
         "stage": "urban_metrics",
         "far": 0,
         "building_count": 0,
-        "message": "No GIS geometry backend is available. Run this service with the GeoScene/ArcPy interpreter or install geopandas/shapely/pandas.",
+        "message": "No GIS geometry backend is available. Install geopandas/shapely/pandas, or run this service on the GeoScene/ArcPy interpreter.",
         "gis_backend": adapter._preferred_backend(),
         "fallback_errors": fallback_errors,
         "runtime": adapter.runtime_status(),

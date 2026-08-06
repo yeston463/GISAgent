@@ -175,9 +175,11 @@ def test_never_touches_the_network():
 def test_agrees_with_calculate_metrics_backend_path():
     """固定输入固定预期: pure stdlib and geopandas backends agree on the dataset.
 
-    calculate_metrics prefers arcpy, then geopandas (both optional). With the
-    standard interpreter only geopandas is present; this proves the sealed pure
-    path stays consistent with the backend the demo actually runs.
+        calculate_metrics tries arcpy first, then geopandas, then GeoScene Server
+    and finally the standard library. ArcPy/GeoScene Server are optional and
+    disabled by default; with the standard interpreter only geopandas is
+    present. This proves the sealed pure path stays consistent with the
+    backend the demo actually runs.
     """
     pytest.importorskip("geopandas")
     result = service.extract_urban_metrics(AOI, BUILDINGS)

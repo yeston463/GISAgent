@@ -126,8 +126,12 @@ GEOSCENE_GEOMETRY_SERVICE_URL = os.environ.get(
     "GEOSCENE_GEOMETRY_SERVICE_URL",
     f"{GEOSCENE_PORTAL_URL}/rest/services/Utilities/Geometry/GeometryServer",
 )
+GEOSCENE_SERVER_METRICS_ENABLED = os.environ.get(
+    "GEOSCENE_SERVER_METRICS_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
 HAS_GEOSCENE_SERVER = bool(
-    GEOSCENE_PORTAL_URL and GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD
+    GEOSCENE_SERVER_METRICS_ENABLED
+    and GEOSCENE_PORTAL_URL and GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD
 )
 
 if HAS_ARCPY:
@@ -138,14 +142,14 @@ if HAS_ARCPY:
 
 
 def _preferred_backend():
-    if HAS_GEOSCENE_SERVER:
-        return "geoscene_server"
     if HAS_ARCPY:
         return "geoscene_arcpy"
     if HAS_OPEN_SOURCE:
         return "open_source_geopandas"
     if HAS_ARCGIS:
         return "arcgis_python_api_metadata_only"
+    if HAS_GEOSCENE_SERVER:
+        return "geoscene_server"
     return "standard_library_limited"
 
 
@@ -172,7 +176,6 @@ def runtime_status():
         "python_version": __import__("sys").version,
         "preferred_backend": _preferred_backend(),
         "backend_priority": [
-            "geoscene_server",
             "geoscene_arcpy",
             "open_source_geopandas",
             "standard_library_limited",
@@ -180,8 +183,10 @@ def runtime_status():
         "capabilities": {
             "geoscene_server": {
                 "available": HAS_GEOSCENE_SERVER,
+                "role": "metrics_and_publishing",
                 "portal_url": GEOSCENE_PORTAL_URL,
                 "geometry_service_url": GEOSCENE_GEOMETRY_SERVICE_URL,
+                "metrics_enabled": GEOSCENE_SERVER_METRICS_ENABLED,
             },
             "arcpy": _module_status("arcpy", arcpy, ARCPY_IMPORT_ERROR),
             "arcgis": _module_status("arcgis", arcgis, ARCGIS_IMPORT_ERROR),
@@ -189,7 +194,7 @@ def runtime_status():
             "pandas": _module_status("pandas", pd, PANDAS_IMPORT_ERROR),
             "shapely": {"available": Point is not None, "error": SHAPELY_IMPORT_ERROR},
         },
-        "data_policy": "GeoScene Enterprise is preferred for server-side spatial math (Geometry Service clip/union/areasAndLengths). Local ArcPy and GeoPandas/Shapely are kept as fallbacks, and the pure standard library is the final offline fallback. OSM/Overpass HTTP remains the building-footprint acquisition source.",
+        "data_policy": "Metric computation prefers the professional ArcPy backend when available (ArcGIS Pro/GeoScene Pro interpreter), falling back to the open-source stack (GeoPandas/Shapely) and finally the pure standard library. GeoScene Enterprise serves as the display/publishing platform for hosted 3D scene services (SLPK/SceneServer) and is only used for metrics when explicitly enabled. OSM/Overpass HTTP remains the building-footprint acquisition source.",
     }
 
 

@@ -122,6 +122,7 @@
           <span>楼层数据可信度：{{ confidenceText }}</span>
           <span>高度数据可信度：{{ heightConfidenceText }}</span>
           <span>绿地率：普通建筑数据未包含绿地图层</span>
+          <span v-if="standardData.gis_backend">GIS 后端：{{ gisBackendLabel(standardData.gis_backend) }}</span>
         </div>
       </template>
       <div v-if="provenance.runId" class="provenance-row">
@@ -129,6 +130,7 @@
         <span>{{ provenance.tool || provenance.capabilityId }}</span>
         <span v-if="provenance.contextVersion !== undefined">上下文 v{{ provenance.contextVersion }}</span>
         <span v-if="provenance.data_source">{{ provenance.data_source }}</span>
+        <span v-if="provenance.gis_backend">GIS 后端：{{ gisBackendLabel(provenance.gis_backend) }}</span>
       </div>
     </section>
   </Transition>
@@ -148,6 +150,13 @@ const provenance = ref({});
 const scenarioResults = ref([]);
 const number = value => Number.isFinite(Number(value)) ? Number(value) : null;
 const format = (value, digits = 2, unit = '') => number(value) === null ? '未计算' : `${Number(value).toLocaleString('zh-CN',{minimumFractionDigits:digits,maximumFractionDigits:digits})}${unit}`;
+const gisBackendLabel = backend => ({
+  open_source_geopandas: '开源 GeoPandas/Shapely',
+  standard_library_metrics: '标准库（离线兜底）',
+  standard_library_bbox: '标准库（bbox 裁剪）',
+  geoscene_arcpy: 'ArcPy（专业后端・优先）',
+  geoscene_server: 'GeoScene 服务端',
+}[backend] || backend || '未知');
 const isComparison = computed(() => mode.value === 'comparison');
 const isAdvanced = computed(() => mode.value === 'advanced');
 const isScenarioMode = computed(() => mode.value === 'scenario' || (mode.value === 'standard' && activeTab.value === 'scenario' && scenarioResults.value.length > 0));
