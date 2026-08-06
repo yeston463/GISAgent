@@ -570,7 +570,7 @@ def calculate_metrics(payload):
 # --------------------------------------------------------------------------- #
 # Offline / deterministic urban metrics (pure standard library)
 # --------------------------------------------------------------------------- #
-def extract_urban_metrics(aoi, buildings=None):
+def extract_urban_metrics(aoi, buildings=None, include_records=False):
     """Compute urban metrics with the standard library only.
 
     Deterministic, offline path for the sealed-offline demo and for
@@ -589,6 +589,10 @@ def extract_urban_metrics(aoi, buildings=None):
       fallback adapter._clip_features_bbox).
     - buildings=None or an empty collection is tolerated -> NoData result.
     - unparseable input raises ValueError so the router can map it to an error.
+
+    When include_records=True, the returned dict carries a "building_records"
+    key (per-building records used to derive the metrics) so callers can cache
+    them and reuse them for incremental recomputation.
     """
     if aoi is None:
         raise ValueError("AOI is required to compute urban metrics")
@@ -640,15 +644,19 @@ def extract_urban_metrics(aoi, buildings=None):
         if footprint_area <= 0:
             continue
         records.append({
+            "id": _extract_building_id(feature),
             "properties": dict(feature.get("properties") or {}),
             "footprint_area": footprint_area,
         })
 
-    return model._build_metrics_result(
+    result = model._build_metrics_result(
         records, site_area=site_area, buffer_area=site_area,
         backend="standard_library_metrics",
         metric_crs=model._metric_crs_for_features(aoi_features),
     )
+    if include_records:
+        result["building_records"] = records
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -732,6 +740,7 @@ def _compute_building_records(buildings, aoi):
         if footprint_area <= 0:
             continue
         records.append({
+            "id": _extract_building_id(feature),
             "properties": dict(feature.get("properties") or {}),
             "footprint_area": footprint_area,
         })
@@ -739,11 +748,16 @@ def _compute_building_records(buildings, aoi):
 
 
 def _merge_delta_metrics(prev_buildings, curr_buildings, aoi, cached_records=None):
-    """Merge cached unchanged building records with delta-building records.
+    """Merge prior building records with only the delta-building records.
 
-    If cached_records is provided (from a previous extract_urban_metrics call),
-    unchanged buildings are not recomputed. Only added + modified buildings
-    go through _compute_building_records.
+    cached_records (from a previous extract_urban_metrics/compute_delta_metrics
+    call with the same AOI) lets unchanged buildings be reused without
+    recomputation. Only added + modified buildings go through
+    _compute_building_records. Records whose id is missing from the cache are
+    recomputed as a correctness fallback.
+
+    Returns (metrics, building_records) so the caller can persist the merged
+    records for the next incremental call.
     """
     aoi_features = model._features_from_source(aoi)
     if not aoi_features:
@@ -768,10 +782,28 @@ def _merge_delta_metrics(prev_buildings, curr_buildings, aoi, cached_records=Non
     changed_ids = {_extract_building_id(x) for x in delta["removed"]}
     changed_ids |= {_extract_building_id(x) for x in delta["modified"]}
 
-    if cached_records is not None:
-        unchanged_records = [r for r in cached_records if r.get("id") not in changed_ids]
+    unchanged_features = [
+        f for f in prev_features if _extract_building_id(f) not in changed_ids
+    ]
+
+    reused_count = 0
+    if cached_records:
+        cache_by_id = {
+            r.get("id"): r for r in cached_records if r.get("id") is not None
+        }
+        wanted = {_extract_building_id(f) for f in unchanged_features}
+        hit_ids = wanted & set(cache_by_id)
+        unchanged_records = [cache_by_id[i] for i in hit_ids]
+        reused_count = len(unchanged_records)
+        missing_ids = wanted - hit_ids
+        if missing_ids:
+            missing_features = [
+                f for f in unchanged_features if _extract_building_id(f) in missing_ids
+            ]
+            unchanged_records += _compute_building_records(
+                {"type": "FeatureCollection", "features": missing_features}, aoi
+            )
     else:
-        unchanged_features = [f for f in prev_features if _extract_building_id(f) not in changed_ids]
         unchanged_records = _compute_building_records(
             {"type": "FeatureCollection", "features": unchanged_features}, aoi
         )
@@ -783,11 +815,15 @@ def _merge_delta_metrics(prev_buildings, curr_buildings, aoi, cached_records=Non
 
     merged_records = unchanged_records + delta_records
 
-    return model._build_metrics_result(
+    metrics = model._build_metrics_result(
         merged_records, site_area=site_area, buffer_area=site_area,
         backend="standard_library_metrics",
         metric_crs=model._metric_crs_for_features(aoi_features),
     )
+    metrics["building_records"] = merged_records
+    metrics["incremental_reused"] = reused_count
+    metrics["incremental_computed"] = len(delta_records)
+    return metrics, merged_records
 
 
 def compute_delta_metrics(previous_state, current_state):
@@ -798,25 +834,33 @@ def compute_delta_metrics(previous_state, current_state):
             "aoi": {...},         # GeoJSON geometry or FeatureCollection
             "buildings": {...},   # GeoJSON FeatureCollection
             "metrics": {...},     # previous extract_urban_metrics output
+            "building_records": [...],  # optional; enables true incremental reuse
         }
+
+    The returned result carries a "building_records" key; the caller is
+    expected to persist it back into its state so the next incremental call
+    reuses unchanged buildings instead of recomputing them.
 
     Returns:
         {
             "status": "incremental" | "full",
             "metrics": {...},
             "delta": {"added": [...], "removed": [...], "modified": [...]},
-            "computationSaved": "75%"
+            "computationSaved": "86%",     # fraction of records reused, not fabricated
+            "building_records": [...],      # persist into state for next call
         }
     """
     if previous_state is None:
         metrics = extract_urban_metrics(
-            current_state.get("aoi"), current_state.get("buildings")
+            current_state.get("aoi"), current_state.get("buildings"),
+            include_records=True,
         )
         return {
             "status": "full",
             "metrics": metrics,
             "delta": {"added": [], "removed": [], "modified": []},
             "computationSaved": "0%",
+            "building_records": metrics.get("building_records", []),
         }
 
     prev_aoi = previous_state.get("aoi") or {}
@@ -833,32 +877,43 @@ def compute_delta_metrics(previous_state, current_state):
     delta = _diff_buildings(prev_features, curr_features)
 
     changed_count = len(delta["added"]) + len(delta["removed"]) + len(delta["modified"])
-    total_prev = max(len(prev_features), 1)
 
     if aoi_changed:
-        metrics = extract_urban_metrics(curr_aoi, curr_buildings)
+        metrics = extract_urban_metrics(curr_aoi, curr_buildings, include_records=True)
         return {
             "status": "full",
             "metrics": metrics,
             "delta": delta,
             "computationSaved": "0%",
+            "building_records": metrics.get("building_records", []),
         }
 
     if changed_count == 0:
+        prev_metrics = previous_state.get("metrics", {})
+        records = previous_state.get("building_records") or prev_metrics.get("building_records") or []
         return {
             "status": "incremental",
-            "metrics": previous_state.get("metrics", {}),
+            "metrics": prev_metrics,
             "delta": delta,
             "computationSaved": "100%",
+            "building_records": records,
         }
 
-    merged_metrics = _merge_delta_metrics(prev_buildings, curr_buildings, curr_aoi)
+    cached = previous_state.get("building_records")
+    merged_metrics, merged_records = _merge_delta_metrics(
+        prev_buildings, curr_buildings, curr_aoi, cached
+    )
+
+    total_records = len(merged_records) or 1
+    reused = len(merged_records) - merged_metrics.get("incremental_computed", 0)
+    saved_pct = round(reused / total_records * 100)
 
     return {
         "status": "incremental",
         "metrics": merged_metrics,
         "delta": delta,
-        "computationSaved": "deferred_to_cached_records",
+        "computationSaved": f"{saved_pct}%",
+        "building_records": merged_records,
     }
 
 

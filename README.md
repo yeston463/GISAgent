@@ -124,9 +124,23 @@ scripts\acceptance-offline.ps1
 
 ## 测试覆盖
 
+**系统能做什么 → 怎么证明**（评委视角，非按测试文件分类）：
+
+| 能力 | 验证方式 |
+|------|----------|
+| 一句话出容积率/密度/高度/日照/天际线 | 离线指标测试 + Java 空间规划合同 |
+| 结果确定性、无网络也可复现 | SHA-256 锁定案例 + 离线验收脚本 |
+| 方案比选可解释（含评分权重溯源） | ScenarioEvaluator 暴露 scoreBreakdown |
+| 多用户并发 + 编辑锁 + 版本冲突防护 | Java 并发/合同测试 |
+| 三维发布到 GeoScene（Feature/WebMap/WebScene） | mock Portal 端到端（网络边界替换为桩） |
+| 增量分析只算变化建筑 | 增量测试断言不规则即复用 |
+| 动态代码执行安全边界 | Java 动态执行防护测试（默认关闭） |
+
+按执行层（命令）看：
+
 | 层 | 命令 | 说明 |
 |----|------|------|
-| Python（确定性 + 契约） | `python -m pytest` | 11 项离线指标测试 + 16 项 API 契约测试 |
+| Python（确定性 + 契约） | `python -m pytest` | **120 项**：离线指标 / API 契约 / 主流程锁定 / CityEngine 几何 / GeoScene 发布 / 增量 / 发布目标幂等（8 项发布目标以 mock Portal 端到端跑通） |
 | Java（安全 + 合同） | `./mvnw -q test` | 动态执行防护 + 空间规划合同 + 溯源隔离 |
 | 前端 E2E | `cd frontend && npm run test:e2e` | 应用挂载 + 代理连通 |
 | 离线验收 | `scripts\acceptance-offline.ps1` | 启动 → 加载离线案例 → 指标比对 |

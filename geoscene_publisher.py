@@ -42,6 +42,17 @@ PORTAL_FOLDER = os.environ.get("GEOSCENE_PORTAL_FOLDER", "GISAgent-CityEngine")
 VERIFY_SSL = os.environ.get("GEOSCENE_VERIFY_SSL", "false").lower() in {"1", "true", "yes"}
 
 
+def _viewer_url(kind, item_id):
+    """Build a Portal viewer URL for a web map or web scene item.
+
+    kind must be one of "webmap" / "webscene". Centralising the query param
+    here prevents the param/kind mismatch that previously shipped (?webmap= on
+    a web scene URL and vice versa)."""
+    if kind not in ("webmap", "webscene"):
+        raise ValueError(f"unsupported viewer kind: {kind!r}")
+    return f"{PORTAL_URL}/home/{kind}/viewer.html?{kind}={item_id}"
+
+
 def _positive_int_env(name, default, minimum=1, maximum=None):
     """Read a bounded positive integer without making a bad .env block publishing."""
     try:
@@ -1375,7 +1386,7 @@ def create_webmap(aoi_geojson, feature_service_urls, title="GISAgent Analysis"):
             return {"status": "Error", "code": "add_item_rejected", "message": str(result)}
 
         item_id = result.get("id")
-        webmap_url = f"{PORTAL_URL}/home/webmap/viewer.html?webmap={item_id}"
+        webmap_url = _viewer_url("webmap", item_id)
         return {"status": "Success", "webmapUrl": webmap_url, "itemId": item_id}
 
     except Exception as exc:
@@ -1537,7 +1548,7 @@ def create_webscene(slpk_item_id, title="GISAgent 3D"):
             return {"status": "Error", "code": "add_item_rejected", "message": str(result)}
 
         item_id = result.get("id")
-        webscene_url = f"{PORTAL_URL}/home/webscene/viewer.html?webscene={item_id}"
+        webscene_url = _viewer_url("webscene", item_id)
         return {"status": "Success", "websceneUrl": webscene_url, "itemId": item_id}
 
     except Exception as exc:

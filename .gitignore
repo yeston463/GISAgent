@@ -40,6 +40,7 @@ __pycache__/
 .venv/
 .codex/
  .codex-temp-*/
+.codex-temp-*/
 .agents/
 /share/*.zip
 geoscene-services.log
@@ -69,6 +70,7 @@ python-gis-service.log.*
 *.out.log
 META-INF/
 powershell/
+powershell
 work/
 logs/
 geoscene-services.log

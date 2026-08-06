@@ -63,9 +63,15 @@ BUILDINGS_6 = {"type": "FeatureCollection", "features": [
 
 
 def _make_state(aoi, buildings):
-    """Build a state dict with pre-computed metrics."""
-    metrics = service.extract_urban_metrics(aoi, buildings)
-    return {"aoi": aoi, "buildings": buildings, "metrics": metrics}
+    """Build a state dict with pre-computed metrics and the building-records
+    cache so compute_delta_metrics can genuinely reuse unchanged buildings."""
+    metrics = service.extract_urban_metrics(aoi, buildings, include_records=True)
+    return {
+        "aoi": aoi,
+        "buildings": buildings,
+        "metrics": metrics,
+        "building_records": metrics.get("building_records", []),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +179,24 @@ class TestIncrementalAnalysis:
         assert result["status"] == "incremental"
         assert result["computationSaved"] == "100%"
         assert result["metrics"]["building_count"] == 6
+
+    def test_reuses_cached_records_does_not_recompute_unchanged(self):
+        """With a building-records cache, only the delta is recomputed."""
+        previous = _make_state(AOI, BUILDINGS_6)
+
+        new_buildings = {"type": "FeatureCollection", "features": list(BUILDINGS_6["features"]) + [
+            _rect(121.4751, 121.4759, 31.2322, 31.2328,
+                  {"id": "B7", "building:levels": 10, "height": 30.0, "building": "apartments"}),
+        ]}
+        current = _make_state(AOI, new_buildings)
+
+        result = service.compute_delta_metrics(previous, current)
+
+        assert result["status"] == "incremental"
+        assert result["metrics"]["incremental_reused"] == 6
+        assert result["metrics"]["incremental_computed"] == 1
+        assert result["computationSaved"] == "86%"
+        assert len(result["building_records"]) == 7
 
     def test_geometry_hash_deterministic(self):
         """Same geometry produces same hash."""
