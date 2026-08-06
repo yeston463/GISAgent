@@ -76,5 +76,6 @@ logs/
 geoscene-services.log
 geoscene-services.log.*
 .pytest_cache/
+.pytest-basetemp*/
 .ozone-default-generated.xml
 geoscene-upload-temp/
