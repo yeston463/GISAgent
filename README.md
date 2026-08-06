@@ -140,7 +140,7 @@ scripts\acceptance-offline.ps1
 
 | 层 | 命令 | 说明 |
 |----|------|------|
-| Python（确定性 + 契约） | `python -m pytest` | **120 项**：离线指标 / API 契约 / 主流程锁定 / CityEngine 几何 / GeoScene 发布 / 增量 / 发布目标幂等（8 项发布目标以 mock Portal 端到端跑通） |
+| Python（确定性 + 契约） | `python -m pytest` | **120 项**（离线指标 12 / API 契约 16 / 主流程锁定 41 / CityEngine 几何 16 / GeoScene 发布 17 / 增量分析 10 / 发布目标幂等 8 — 合计 `120`，均以 `pytest --collect-only` 校准） |
 | Java（安全 + 合同） | `./mvnw -q test` | 动态执行防护 + 空间规划合同 + 溯源隔离 |
 | 前端 E2E | `cd frontend && npm run test:e2e` | 应用挂载 + 代理连通 |
 | 离线验收 | `scripts\acceptance-offline.ps1` | 启动 → 加载离线案例 → 指标比对 |
