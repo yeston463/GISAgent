@@ -25,7 +25,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spatial.knowledge-graph.url=",
         "app.auth.admin-username=admin",
         "app.auth.admin-password=test-admin-pass-123",
-        "app.auth.jwt-secret=0123456789abcdef0123456789abcdef0123456789abcdef"
+        "app.auth.jwt-secret=0123456789abcdef0123456789abcdef0123456789abcdef",
+        "app.auth.rate-limit-enabled=false"
 })
 @AutoConfigureMockMvc
 class AuthIntegrationTest {

@@ -27,6 +27,18 @@ public class AuthProperties {
     /** 允许的跨域来源。生产只允许正式域名。 */
     private List<String> corsAllowedOrigins = new ArrayList<>();
 
+    /** 是否启用全局限流。 */
+    private boolean rateLimitEnabled = true;
+
+    /** 单 IP 在窗口内允许的最大请求数（全局限流）。 */
+    private int rateLimitMax = 300;
+
+    /** 限流窗口（秒）。 */
+    private long rateLimitWindowSeconds = 60;
+
+    /** 是否跳过健康检查端点的限流。 */
+    private boolean rateLimitExcludeHealthCheck = true;
+
     public String getJwtSecret() {
         return jwtSecret;
     }
@@ -73,6 +85,38 @@ public class AuthProperties {
 
     public void setCorsAllowedOrigins(List<String> corsAllowedOrigins) {
         this.corsAllowedOrigins = corsAllowedOrigins == null ? new ArrayList<>() : corsAllowedOrigins;
+    }
+
+    public boolean isRateLimitEnabled() {
+        return rateLimitEnabled;
+    }
+
+    public void setRateLimitEnabled(boolean rateLimitEnabled) {
+        this.rateLimitEnabled = rateLimitEnabled;
+    }
+
+    public int getRateLimitMax() {
+        return rateLimitMax;
+    }
+
+    public void setRateLimitMax(int rateLimitMax) {
+        this.rateLimitMax = Math.max(1, rateLimitMax);
+    }
+
+    public long getRateLimitWindowSeconds() {
+        return rateLimitWindowSeconds;
+    }
+
+    public void setRateLimitWindowSeconds(long rateLimitWindowSeconds) {
+        this.rateLimitWindowSeconds = Math.max(1, rateLimitWindowSeconds);
+    }
+
+    public boolean isRateLimitExcludeHealthCheck() {
+        return rateLimitExcludeHealthCheck;
+    }
+
+    public void setRateLimitExcludeHealthCheck(boolean rateLimitExcludeHealthCheck) {
+        this.rateLimitExcludeHealthCheck = rateLimitExcludeHealthCheck;
     }
 
     public boolean isBootstrapAdminConfigured() {

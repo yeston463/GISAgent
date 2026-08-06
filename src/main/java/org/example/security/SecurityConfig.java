@@ -31,13 +31,16 @@ public class SecurityConfig {
     private final ObjectMapper objectMapper;
     private final JwtService jwtService;
     private final AppUserDetailsService userDetailsService;
+    private final RateLimitFilter rateLimitFilter;
 
     public SecurityConfig(AuthProperties properties, ObjectMapper objectMapper,
-                          JwtService jwtService, AppUserDetailsService userDetailsService) {
+                          JwtService jwtService, AppUserDetailsService userDetailsService,
+                          RateLimitFilter rateLimitFilter) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.jwtService = jwtService;
         this.userDetailsService = userDetailsService;
+        this.rateLimitFilter = rateLimitFilter;
     }
 
     @Bean
@@ -94,7 +97,8 @@ public class SecurityConfig {
                                     "code", "forbidden",
                                     "message", "权限不足：该操作需要管理员角色。"));
                         }))
-                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(rateLimitFilter, JwtAuthenticationFilter.class);
 
         return http.build();
     }

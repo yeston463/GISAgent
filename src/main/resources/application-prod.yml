@@ -26,6 +26,14 @@ gis:
 frontend:
   url: ${FRONTEND_URL:https://localhost}
 
+app:
+  auth:
+    # 生产限流阈值显式指定，避免误调低导致误伤
+    rate-limit-enabled: ${AUTH_RATE_LIMIT_ENABLED:true}
+    rate-limit-max: ${AUTH_RATE_LIMIT_MAX:300}
+    rate-limit-window-seconds: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:60}
+    rate-limit-exclude-health-check: ${AUTH_RATE_LIMIT_EXCLUDE_HEALTH_CHECK:true}
+
 logging:
   level:
     root: info

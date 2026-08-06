@@ -69,6 +69,11 @@ app:
     admin-username: ${AUTH_ADMIN_USERNAME:admin}
     admin-password: ${AUTH_ADMIN_PASSWORD:}
     cors-allowed-origins: ${AUTH_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:7173,http://127.0.0.1:7173}
+    # 全局限流：单客户端（认证用户名优先，否则来源 IP）窗口内最大请求数
+    rate-limit-enabled: ${AUTH_RATE_LIMIT_ENABLED:true}
+    rate-limit-max: ${AUTH_RATE_LIMIT_MAX:300}
+    rate-limit-window-seconds: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:60}
+    rate-limit-exclude-health-check: ${AUTH_RATE_LIMIT_EXCLUDE_HEALTH_CHECK:true}
 
 management:
   endpoints:
