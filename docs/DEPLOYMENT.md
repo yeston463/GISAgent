@@ -134,9 +134,13 @@ docker compose -f compose-prod.yaml logs -f backend
 - [ ] `curl https://<域名>/analysis/runtime`（带 token）返回 python 运行信息
 - [ ] 直接访问 `:5432` / `:6379` / `:8080` / `:8000` 均超时或拒绝
 - [ ] 上传超大文件被 `client_max_body_size`（130m）拦截
+- [ ] 伪造后缀（文本改名 `.pdf`）上传返回 413 `pdf_magic_mismatch`
+- [ ] 短时间高频请求触发 429 + `Retry-After`（限流生效）
+- [ ] 无令牌访问 `/analysis/runtime` 返回 401（Python 不直接暴露）
 - [ ] `/actuator/*` 外部访问被 Nginx 拒绝（403）
 - [ ] 验证 GeoScene / CityEngine 经 `host.docker.internal` 可达
 - [ ] 日志中无明文密码、无 LLM debug 输出
+- [ ] 运行 `scripts/verify-security-hardening.ps1` 输出 `10 passed, 0 failed`
 
 ---
 
@@ -162,10 +166,32 @@ docker compose -f compose-prod.yaml down
 
 ## 9. 已知边界 / 尚未落地
 
-- **上传安全**：防病毒扫描、深格式校验、对象存储、配额、过期清理未实现（后续迭代）；
-- **限流**：仅有登录暴力破解锁定，未做全局限流；
-- **Python 异常脱敏**：接口异常仍可能回传 traceback，生产需前置过滤；
+- **上传安全**：已实现深格式校验（魔数）、可选 ClamAV 扫描、每用户/全局配额、
+  TTL 过期清理（`UPLOAD_*` 环境变量）。尚未落地对象存储与图片缩略图。
+- **限流**：已实现认证用户/IP 全局限流（`AUTH_RATE_LIMIT_*`）+ 登录暴力破解锁定，
+  429 响应带 `Retry-After`。
+- **Python 异常脱敏**：已实现 `_server_error` 统一脱敏，客户端仅收通用提示，
+  完整 traceback 仅落服务器日志。
 - **CityEngine / GeoScene**：宿主服务与容器之间的目录共享依赖 bind mount，
   路径需按服务器实际布局调整；
 - 本地 Windows 开发机无 Docker daemon，以上镜像未在本机实际构建验证；
   首次上云前请在服务器执行一次 `docker compose -f compose-prod.yaml build` 排障。
+
+---
+
+## 10. 验收脚本（本地联调 / 上线巡检可复用）
+
+后端（Java:8080）与 Python GIS（:8000）启动后，在开发机或服务器运行：
+
+```powershell
+# 从 .env 读取 AUTH_ADMIN_PASSWORD，全链路验收
+powershell -ExecutionPolicy Bypass -File scripts/verify-security-hardening.ps1
+
+# 指定密码 / 地址 / 附加限流 429 探测
+.\scripts\verify-security-hardening.bat -AdminPassword xxx -TestRateLimit
+```
+
+覆盖：401（无令牌）、错误密码登录、JWT 登录与 `/me`、RBAC（`/knowledge/reload`
+无令牌 401 / admin 200）、上传深检（伪造 PDF → 413 `pdf_magic_mismatch`、
+合法 `.md` → 200）、`/analysis/runtime` 代理（无令牌 401 / 带令牌 200）。
+默认全部通过输出 `10 passed, 0 failed`。

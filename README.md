@@ -150,10 +150,16 @@ CI（`.github/workflows/ci.yml`）：push/PR 自动跑 Java 测试 + Python 测�
 
 ## 安全设计
 
+- **认证与 RBAC**：Spring Security + JWT，admin/user 角色，错误密码登录锁定，API 未授权返回 401
+- **全局限流**：认证用户/IP 固定窗口计数，超阈值 429 + `Retry-After`（`AUTH_RATE_LIMIT_*`）
+- **上传安全**：深格式校验（魔数识别 PDF/ZIP/SHP/GPKG/TIFF 等，拒绝改后缀伪造）、可选 ClamAV 扫描、每用户/全局配额、TTL 过期清理（`UPLOAD_*`）
+- **Python 异常脱敏**：客户端仅收通用错误提示，traceback 只落服务器日志
 - **动态代码执行四层防护**（默认关闭）：开关 → 鉴权（token/local，fail-closed）→ GraalVM 沙箱 → 硬超时终止 + 输入/输出限制 + 并发限流
 - **FastAPI 全路由 Pydantic 校验**：非法请求体返回 `422`，不暴露内部错误
 - **会话隔离**：分析记录带 memoryId，跨会话不可见
 - **依赖扫描**：`pip-audit`（CI security 作业）
+- **生产部署**：Nginx 只暴露 80/443，Java/Python/Redis/Postgres 全在 Docker 内网；密钥、TLS、巡检清单见 `docs/DEPLOYMENT.md`
+- **安全验收脚本**：`scripts/verify-security-hardening.ps1`（401 / 登录 / JWT / RBAC / 上传深检 / 代理 / 限流，10 项断言）
 
 ## 已知限制
 
