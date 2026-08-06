@@ -327,8 +327,23 @@ def _geoscene_server_geometry_url():
     return GEOSCENE_GEOMETRY_SERVICE_URL
 
 
+def _to_server_geometry(geometry):
+    """Normalize a geometry to esri polygon JSON for the Geometry Service.
+
+    The GeoScene Enterprise Geometry Service parses esri polygon JSON
+    (``{"rings": [...]}``), not GeoJSON (``{"type": "Polygon",
+    "coordinates": [...]}``). Geometries that are already in esri ring form
+    (e.g. the results of a prior server union) pass through unchanged.
+    """
+    if not isinstance(geometry, dict):
+        return None
+    if "rings" in geometry:
+        return geometry
+    return _geojson_to_esri_json(geometry, 4326)
+
+
 def _server_area(geometry, out_crs=3395):
-    """Planar area (square metres) of a polygon computed by the server.
+    """Area (square metres) of a polygon computed by the server.
 
     geodesic=true makes areasAndLengths honour areaUnit regardless of the input
     spatial reference, so the value is meaningful for WGS84 input geometry.
@@ -338,6 +353,9 @@ def _server_area(geometry, out_crs=3395):
             "GeoScene Enterprise is not configured. Set GEOSCENE_PORTAL_URL, "
             "GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD."
         )
+    esri_geometry = _to_server_geometry(geometry)
+    if not esri_geometry:
+        return 0.0
     payload = _geoscene_request(
         f"{_geoscene_server_geometry_url()}/areasAndLengths",
         {
@@ -345,7 +363,7 @@ def _server_area(geometry, out_crs=3395):
             "f": "json",
             "geodesic": "true",
             "sr": 4326,
-            "polygons": json.dumps(geometry),
+            "polygons": json.dumps([esri_geometry]),
             "lengthUnit": "esriMeters",
             "areaUnit": "esriSquareMeters",
         },
@@ -361,14 +379,18 @@ def _server_intersect(geometry, clip_geometry):
     Returns a list of server-side intersection geometries (empty when the
     building does not overlap the AOI).
     """
+    esri_geometry = _to_server_geometry(geometry)
+    esri_clip = _to_server_geometry(clip_geometry)
+    if not esri_geometry or not esri_clip:
+        return []
     payload = _geoscene_request(
         f"{_geoscene_server_geometry_url()}/intersect",
         {
             "token": _geoscene_token(),
             "f": "json",
             "sr": 4326,
-            "geometries1": json.dumps([geometry]),
-            "geometries2": json.dumps([clip_geometry]),
+            "geometries1": json.dumps([esri_geometry]),
+            "geometries2": json.dumps([esri_clip]),
         },
         timeout=60,
     )
@@ -377,13 +399,16 @@ def _server_intersect(geometry, clip_geometry):
 
 def _server_union(geometries):
     """Ask the server to union multiple AOI polygons into one clip geometry."""
+    esri_geometries = [g for g in map(_to_server_geometry, geometries) if g]
+    if not esri_geometries:
+        return []
     payload = _geoscene_request(
         f"{_geoscene_server_geometry_url()}/union",
         {
             "token": _geoscene_token(),
             "f": "json",
             "sr": 4326,
-            "geometries": json.dumps(geometries),
+            "geometries": json.dumps(esri_geometries),
         },
         timeout=60,
     )

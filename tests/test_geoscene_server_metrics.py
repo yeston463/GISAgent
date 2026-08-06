@@ -52,6 +52,9 @@ def _ring_area(geom):
     """Match model._ring_area_sqm aggregation used by the stdlib path."""
     if not geom:
         return 0.0
+    if "rings" in geom:
+        rings = geom["rings"]
+        return model._ring_area_sqm(rings[0]) if rings else 0.0
     if geom.get("type") == "Polygon":
         return model._ring_area_sqm(geom["coordinates"][0])
     total = 0.0
@@ -70,9 +73,12 @@ def _extent_of(geom):
 
 
 def _points(geom):
-    """Flatten a geometry's coordinates into [lon, lat] points."""
+    """Flatten a geometry (GeoJSON or esri rings) into [lon, lat] points."""
+    if not geom:
+        return []
+    source = geom.get("rings") if "rings" in geom else geom.get("coordinates")
     out = []
-    for c in geom.get("coordinates") or []:
+    for c in source or []:
         if isinstance(c, (int, float)):
             continue
         if len(c) == 2 and isinstance(c[0], (int, float)) and isinstance(c[1], (int, float)):
@@ -93,7 +99,9 @@ def _fake_server(url, fields=None, file_path=None, timeout=300):
     op = url.rstrip("/").split("/")[-1].split("?")[0]
     fields = fields or {}
     if op == "areasAndLengths":
-        return {"areas": [_ring_area(json.loads(fields["polygons"]))]}
+        polys = json.loads(fields["polygons"])
+        poly = polys[0] if isinstance(polys, list) else polys
+        return {"areas": [_ring_area(poly)]}
     if op == "intersect":
         g1, g2 = json.loads(fields["geometries1"])[0], json.loads(fields["geometries2"])[0]
         return {"geometries": [g1]} if _overlaps(g1, g2) else {"geometries": []}
@@ -164,9 +172,12 @@ class TestGeosceneServerMetrics:
 
     def test_server_issues_geometry_requests_against_geometry_service(self):
         urls = []
+        area_fields = {}
 
         def record(url, fields=None, file_path=None, timeout=300):
             urls.append(url)
+            if url.rstrip("/").split("/")[-1].startswith("areasAndLengths"):
+                area_fields.update(fields or {})
             return _fake_server(url, fields, file_path, timeout)
 
         with patch.object(adapter, "HAS_GEOSCENE_SERVER", True), \
@@ -178,3 +189,13 @@ class TestGeosceneServerMetrics:
         assert all("GeometryServer" in u for u in urls)
         assert any(u.endswith("areasAndLengths") for u in urls)
         assert any(u.endswith("intersect") for u in urls)
+
+        # the server speaks esri polygon JSON, not GeoJSON
+        polygons = json.loads(area_fields["polygons"])
+        assert isinstance(polygons, list)
+        esri_geometry = polygons[0]
+        assert "rings" in esri_geometry and "coordinates" not in esri_geometry
+        assert esri_geometry["spatialReference"]["wkid"] == 4326
+        assert any(u.endswith("areasAndLengths") for u in urls)
+        assert area_fields.get("geodesic") == "true"
+        assert area_fields.get("areaUnit") == "esriSquareMeters"
