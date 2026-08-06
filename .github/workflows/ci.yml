@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: 'share/**/frontend-arcgis1/package-lock.json'
+          cache-dependency-path: 'frontend/package-lock.json'
       - name: Build frontend
         run: bash scripts/build-frontend.sh
 

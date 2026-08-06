@@ -183,7 +183,7 @@ def runtime_status():
         "capabilities": {
             "geoscene_server": {
                 "available": HAS_GEOSCENE_SERVER,
-                "role": "metrics_and_publishing",
+                "role": "display_publishing",
                 "portal_url": GEOSCENE_PORTAL_URL,
                 "geometry_service_url": GEOSCENE_GEOMETRY_SERVICE_URL,
                 "metrics_enabled": GEOSCENE_SERVER_METRICS_ENABLED,
