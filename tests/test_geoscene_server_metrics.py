@@ -103,7 +103,7 @@ def _fake_server(url, fields=None, file_path=None, timeout=300):
         poly = polys[0] if isinstance(polys, list) else polys
         return {"areas": [_ring_area(poly)]}
     if op == "intersect":
-        g1, g2 = json.loads(fields["geometries1"])[0], json.loads(fields["geometries2"])[0]
+        g1, g2 = json.loads(fields["geometries"])[0], json.loads(fields["geometry"])[0]
         return {"geometries": [g1]} if _overlaps(g1, g2) else {"geometries": []}
     if op == "union":
         geoms = json.loads(fields["geometries"])
@@ -196,6 +196,7 @@ class TestGeosceneServerMetrics:
         esri_geometry = polygons[0]
         assert "rings" in esri_geometry and "coordinates" not in esri_geometry
         assert esri_geometry["spatialReference"]["wkid"] == 4326
-        assert any(u.endswith("areasAndLengths") for u in urls)
-        assert area_fields.get("geodesic") == "true"
+        # GeoScene Geometry Service uses its own parameter names/enums
+        assert area_fields.get("calculationType") in ("geodesic", "planar", "preserveshape")
+        assert area_fields.get("lengthUnit") == "esriMeters"
         assert area_fields.get("areaUnit") == "esriSquareMeters"

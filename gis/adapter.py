@@ -345,8 +345,9 @@ def _to_server_geometry(geometry):
 def _server_area(geometry, out_crs=3395):
     """Area (square metres) of a polygon computed by the server.
 
-    geodesic=true makes areasAndLengths honour areaUnit regardless of the input
-    spatial reference, so the value is meaningful for WGS84 input geometry.
+    GeoScene's Enterprise Geometry Service uses a ``calculationType`` enum
+    (``geodesic`` / ``planar`` / ``preserveshape``) rather than ArcGIS's boolean
+    ``geodesic`` flag, and it parses esri polygon JSON (``{rings: [...]}``).
     """
     if not HAS_GEOSCENE_SERVER:
         raise RuntimeError(
@@ -361,8 +362,7 @@ def _server_area(geometry, out_crs=3395):
         {
             "token": _geoscene_token(),
             "f": "json",
-            "geodesic": "true",
-            "sr": 4326,
+            "calculationType": "geodesic",
             "polygons": json.dumps([esri_geometry]),
             "lengthUnit": "esriMeters",
             "areaUnit": "esriSquareMeters",
@@ -377,7 +377,9 @@ def _server_intersect(geometry, clip_geometry):
     """Ask the server to clip a building geometry against the AOI geometry.
 
     Returns a list of server-side intersection geometries (empty when the
-    building does not overlap the AOI).
+    building does not overlap the AOI). GeoScene's Geometry Service names these
+    parameters ``geometries`` (input) and ``geometry`` (overlay), not ArcGIS's
+    ``geometries1``/``geometries2``.
     """
     esri_geometry = _to_server_geometry(geometry)
     esri_clip = _to_server_geometry(clip_geometry)
@@ -389,8 +391,8 @@ def _server_intersect(geometry, clip_geometry):
             "token": _geoscene_token(),
             "f": "json",
             "sr": 4326,
-            "geometries1": json.dumps([esri_geometry]),
-            "geometries2": json.dumps([esri_clip]),
+            "geometries": json.dumps([esri_geometry]),
+            "geometry": json.dumps([esri_clip]),
         },
         timeout=60,
     )
