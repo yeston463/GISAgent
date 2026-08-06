@@ -1,9 +1,11 @@
 package org.example.controller;
 
+import org.example.security.UploadSecurityService;
 import org.example.service.KnowledgeService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import java.util.Locale;
@@ -23,9 +25,12 @@ public class KnowledgeController {
     @Autowired
     private KnowledgeService knowledgeService;
 
+    @Autowired
+    private UploadSecurityService uploadSecurityService;
+
     @PostMapping("/upload")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file, Authentication authentication) {
         if (file == null || file.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("code", "file_required"));
         }
@@ -33,10 +38,13 @@ public class KnowledgeController {
             return ResponseEntity.status(413).body(Map.of("code", "file_too_large", "maxBytes", MAX_UPLOAD_BYTES));
         }
         String fileName = safeFileName(file.getOriginalFilename());
-        if (!SUPPORTED_EXTENSIONS.contains(extension(fileName))) {
+        String fileExtension = extension(fileName);
+        if (!SUPPORTED_EXTENSIONS.contains(fileExtension)) {
             return ResponseEntity.badRequest().body(Map.of("code", "unsupported_file_type", "supported", SUPPORTED_EXTENSIONS));
         }
         try {
+            // 上传安全加固：深度格式校验 + 病毒扫描 + 配额
+            uploadSecurityService.check(file, fileExtension, clientKey(authentication), file.getSize());
             // 调用服务层进行 RAG 入库
             knowledgeService.ingestDocument(file);
 
@@ -46,10 +54,17 @@ public class KnowledgeController {
                     "id", UUID.randomUUID().toString(),
                     "status", "success"
             ));
+        } catch (UploadSecurityService.UploadRejectedException rejected) {
+            return ResponseEntity.status(413).body(Map.of(
+                    "code", rejected.getCode(), "message", rejected.getMessage()));
         } catch (Exception e) {
             log.warn("Knowledge upload failed for {}", fileName, e);
             return ResponseEntity.status(500).body(Map.of("code", "knowledge_ingest_failed"));
         }
+    }
+
+    private String clientKey(Authentication authentication) {
+        return authentication == null || authentication.getName() == null ? "anonymous" : authentication.getName();
     }
 
     private String safeFileName(String originalName) {

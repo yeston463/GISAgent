@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.example.service.GisContextService;
+import org.example.security.UploadSecurityService;
 import org.example.spatial.SpatialDemoContext;
 import org.example.spatial.SpatialDataPreprocessor;
 import org.example.spatial.GeoDataDiscoveryAgent;
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -54,6 +56,9 @@ public class GisDataController {
     private SpatialDataPreprocessor spatialDataPreprocessor;
     @Autowired
     private GeoDataDiscoveryAgent geoDataDiscoveryAgent;
+
+    @Autowired
+    private UploadSecurityService uploadSecurityService;
 
     @Value("${spatial.demo.enabled:false}")
     private boolean spatialDemoEnabled;
@@ -158,7 +163,8 @@ public class GisDataController {
             @RequestParam(defaultValue = "dem") String dataset,
             @RequestParam(defaultValue = "default") String memoryId,
             @RequestParam(defaultValue = "-1") long contextVersion,
-            @RequestParam(defaultValue = "") String sourceCrs) {
+            @RequestParam(defaultValue = "") String sourceCrs,
+            Authentication authentication) {
         if (file == null || file.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("status", "InvalidData", "code", "file_required"));
         }
@@ -169,6 +175,13 @@ public class GisDataController {
         }
         String fileName = file.getOriginalFilename() == null ? "spatial-data" : file.getOriginalFilename();
         String extension = extension(fileName);
+        // 上传安全加固：深度格式 + 病毒扫描 + 配额（在落盘/入库前统一执行）
+        try {
+            uploadSecurityService.check(file, extension, clientKey(authentication), file.getSize());
+        } catch (UploadSecurityService.UploadRejectedException rejected) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "InvalidData", "code", rejected.getCode(), "message", rejected.getMessage()));
+        }
         if (VECTOR_EXTENSIONS.contains(extension)) {
             return storeVectorFile(file, normalizedDataset, memoryId, contextVersion, fileName, extension, sourceCrs);
         }
@@ -178,6 +191,10 @@ public class GisDataController {
         return ResponseEntity.badRequest().body(Map.of(
                 "status", "InvalidData", "code", "unsupported_spatial_format",
                 "supported", List.of(".geojson", ".json", ".zip (Shapefile)", ".shp", ".gpkg", ".asc", ".tif", ".tiff")));
+    }
+
+    private String clientKey(Authentication authentication) {
+        return authentication == null || authentication.getName() == null ? "anonymous" : authentication.getName();
     }
 
     @PostMapping("/ground-dem")

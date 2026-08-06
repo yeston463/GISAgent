@@ -74,6 +74,17 @@ app:
     rate-limit-max: ${AUTH_RATE_LIMIT_MAX:300}
     rate-limit-window-seconds: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:60}
     rate-limit-exclude-health-check: ${AUTH_RATE_LIMIT_EXCLUDE_HEALTH_CHECK:true}
+  upload:
+    # 上传安全加固：深度格式校验始终生效；AV 扫描需配置 UPLOAD_AV_URL 后启用
+    antivirus-enabled: ${UPLOAD_AV_ENABLED:false}
+    antivirus-url: ${UPLOAD_AV_URL:}
+    antivirus-timeout-ms: ${UPLOAD_AV_TIMEOUT_MS:4000}
+    global-quota-bytes: ${UPLOAD_GLOBAL_QUOTA_BYTES:-1}
+    per-user-quota-bytes: ${UPLOAD_PER_USER_QUOTA_BYTES:-1}
+    quota-window-seconds: ${UPLOAD_QUOTA_WINDOW_SECONDS:3600}
+    file-retention-seconds: ${UPLOAD_FILE_RETENTION_SECONDS:86400}
+    cleanup-enabled: ${UPLOAD_CLEANUP_ENABLED:true}
+    cleanup-interval-seconds: ${UPLOAD_CLEANUP_INTERVAL_SECONDS:3600}
 
 management:
   endpoints:

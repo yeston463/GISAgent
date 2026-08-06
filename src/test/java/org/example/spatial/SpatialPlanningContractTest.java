@@ -266,7 +266,7 @@ class SpatialPlanningContractTest {
                 """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
         ResponseEntity<Map<String, Object>> response = gisDataController.uploadSpatialData(
-                file, "aoi", memoryId, 0, "EPSG:4326");
+                file, "aoi", memoryId, 0, "EPSG:4326", new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("admin", "pass", java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ADMIN"))));
 
         assertTrue(response.getStatusCode().is2xxSuccessful());
         assertEquals("Success", response.getBody().get("status"));
