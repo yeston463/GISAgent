@@ -475,6 +475,81 @@ def _calculate_metrics_open_source(payload):
     return model._build_metrics_result(records, site_area, buffer_area, "open_source_geopandas", metric_crs=metric)
 
 
+def _calculate_metrics_geoscene_server(payload):
+    """Urban metrics whose spatial math runs on the GeoScene Enterprise server.
+
+    AOI area, AOI union and building-to-AOI clipping are delegated to the
+    Enterprise Geometry Service (areasAndLengths / intersect / union); the
+    aggregation formula stays in model._build_metrics_result. An intersecting
+    building contributes its full footprint, mirroring the standard-library
+    bbox-clip semantics, so results are identical across backends
+    (determinism guarantee, verified by mock tests).
+    """
+    if not adapter.HAS_GEOSCENE_SERVER:
+        raise RuntimeError(
+            "GeoScene Enterprise is not configured. Set GEOSCENE_PORTAL_URL, "
+            "GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD."
+        )
+
+    buildings_raw = payload.get("buildings")
+    aoi_raw = payload.get("aoi")
+    building_features = model._features_from_source(buildings_raw)
+    if not building_features:
+        return {
+            "status": "Fail",
+            "stage": "urban_metrics",
+            "far": 0,
+            "building_count": 0,
+            "message": "No valid building polygons were provided.",
+            "gis_backend": "geoscene_server",
+        }
+
+    aoi_features = model._features_from_source(aoi_raw) if aoi_raw else []
+    metric = model._metric_crs_for_features(aoi_features or building_features)
+
+    site_area = 0.0
+    aoi_parts = []
+    for feature in aoi_features:
+        geometry = feature.get("geometry") or {}
+        site_area += adapter._server_area(geometry, metric)
+        if geometry.get("type") == "MultiPolygon":
+            aoi_parts.extend(geometry.get("coordinates") or [])
+        else:
+            aoi_parts.append(geometry)
+
+    clip_geometry = None
+    if len(aoi_parts) == 1:
+        clip_geometry = aoi_parts[0]
+    elif len(aoi_parts) > 1:
+        merged = adapter._server_union(aoi_parts)
+        clip_geometry = merged[0] if merged else None
+
+    records = []
+    for feature in building_features:
+        geometry = feature.get("geometry") or {}
+        footprint_area = 0.0
+        if clip_geometry is not None:
+            parts = adapter._server_intersect(geometry, clip_geometry)
+            if not parts:
+                continue
+            footprint_area = adapter._server_area(geometry, metric)
+        else:
+            footprint_area = adapter._server_area(geometry, metric)
+        if footprint_area <= 0:
+            continue
+        records.append({
+            "id": _extract_building_id(feature),
+            "properties": dict(feature.get("properties") or {}),
+            "footprint_area": footprint_area,
+        })
+
+    return model._build_metrics_result(
+        records, site_area=site_area, buffer_area=site_area,
+        backend="geoscene_server",
+        metric_crs=metric,
+    )
+
+
 def _calculate_metrics_arcpy(payload):
     if not adapter.HAS_ARCPY:
         raise RuntimeError("ArcPy is not available.")
@@ -535,6 +610,16 @@ def _calculate_metrics_arcpy(payload):
 def calculate_metrics(payload):
     fallback_errors = []
 
+    if adapter.HAS_GEOSCENE_SERVER:
+        try:
+            result = _calculate_metrics_geoscene_server(payload)
+            if result.get("status") == "Success" or (not adapter.HAS_ARCPY and not adapter.HAS_OPEN_SOURCE):
+                return result
+            fallback_errors.append(f"geoscene_server returned {result.get('status')}: {result.get('message')}")
+        except Exception as exc:
+            fallback_errors.append(f"geoscene_server: {exc}")
+            print(f"GeoScene server metrics failed, falling back: {traceback.format_exc()}")
+
     if adapter.HAS_ARCPY:
         try:
             result = _calculate_metrics_arcpy(payload)
@@ -554,6 +639,14 @@ def calculate_metrics(payload):
         except Exception as exc:
             fallback_errors.append(f"open_source_geopandas: {exc}")
             print(f"GeoPandas metrics failed: {traceback.format_exc()}")
+
+    try:
+        result = extract_urban_metrics(payload.get("aoi"), payload.get("buildings"))
+        if fallback_errors:
+            result["fallback_errors"] = fallback_errors
+        return result
+    except Exception as exc:
+        fallback_errors.append(f"standard_library: {exc}")
 
     return {
         "status": "Fail",

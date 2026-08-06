@@ -27,6 +27,8 @@ from cityengine_bridge import runtime_status as cityengine_runtime_status
 from cityengine_bridge import submit_planning_job
 from cityengine_bridge import write_job_result as write_cityengine_job_result
 from geoscene_publisher import inspect_publication, publish_slpk, publishing_status, share_publication, verify_scene_service
+from geoscene_publisher import _request_json as _geoscene_request
+from geoscene_publisher import _token as _geoscene_token
 
 from . import model
 
@@ -117,6 +119,17 @@ HAS_ARCPY = arcpy is not None
 HAS_ARCGIS = arcgis is not None
 HAS_OPEN_SOURCE = pd is not None and gpd is not None and Point is not None and Polygon is not None
 
+GEOSCENE_PORTAL_URL = os.environ.get("GEOSCENE_PORTAL_URL", "").rstrip("/")
+GEOSCENE_PORTAL_USERNAME = os.environ.get("GEOSCENE_PORTAL_USERNAME", "")
+GEOSCENE_PORTAL_PASSWORD = os.environ.get("GEOSCENE_PORTAL_PASSWORD", "")
+GEOSCENE_GEOMETRY_SERVICE_URL = os.environ.get(
+    "GEOSCENE_GEOMETRY_SERVICE_URL",
+    f"{GEOSCENE_PORTAL_URL}/rest/services/Utilities/Geometry/GeometryServer",
+)
+HAS_GEOSCENE_SERVER = bool(
+    GEOSCENE_PORTAL_URL and GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD
+)
+
 if HAS_ARCPY:
     try:
         arcpy.env.overwriteOutput = True
@@ -125,6 +138,8 @@ if HAS_ARCPY:
 
 
 def _preferred_backend():
+    if HAS_GEOSCENE_SERVER:
+        return "geoscene_server"
     if HAS_ARCPY:
         return "geoscene_arcpy"
     if HAS_OPEN_SOURCE:
@@ -157,18 +172,24 @@ def runtime_status():
         "python_version": __import__("sys").version,
         "preferred_backend": _preferred_backend(),
         "backend_priority": [
+            "geoscene_server",
             "geoscene_arcpy",
             "open_source_geopandas",
             "standard_library_limited",
         ],
         "capabilities": {
+            "geoscene_server": {
+                "available": HAS_GEOSCENE_SERVER,
+                "portal_url": GEOSCENE_PORTAL_URL,
+                "geometry_service_url": GEOSCENE_GEOMETRY_SERVICE_URL,
+            },
             "arcpy": _module_status("arcpy", arcpy, ARCPY_IMPORT_ERROR),
             "arcgis": _module_status("arcgis", arcgis, ARCGIS_IMPORT_ERROR),
             "geopandas": _module_status("geopandas", gpd, GEOPANDAS_IMPORT_ERROR),
             "pandas": _module_status("pandas", pd, PANDAS_IMPORT_ERROR),
             "shapely": {"available": Point is not None, "error": SHAPELY_IMPORT_ERROR},
         },
-        "data_policy": "ArcPy/GeoScene is preferred for local geometry work. OSM/Overpass HTTP remains the building-footprint acquisition source, with GeoPandas/Shapely kept as fallback.",
+        "data_policy": "GeoScene Enterprise is preferred for server-side spatial math (Geometry Service clip/union/areasAndLengths). Local ArcPy and GeoPandas/Shapely are kept as fallbacks, and the pure standard library is the final offline fallback. OSM/Overpass HTTP remains the building-footprint acquisition source.",
     }
 
 
@@ -289,6 +310,84 @@ def _clip_features_open_source(raw_features, aoi_geojson):
         return []
     clipped = clipped.to_crs("EPSG:4326")
     return json.loads(clipped.to_json()).get("features", [])
+
+
+# --------------------------------------------------------------------------- #
+# GeoScene Enterprise server adapter (Geometry Service)
+# --------------------------------------------------------------------------- #
+# The spatial math below is executed on the GeoScene Enterprise server through
+# its stock Geometry Service (areasAndLengths / intersect / union). This makes
+# the server the authority for geometry, not the local interpreter. The result
+# structure mirrors adapter._clip_features_bbox semantics (an intersecting
+# building contributes its full footprint) so downstream aggregation and the
+# determinism guarantee stay identical to the standard-library path.
+
+
+def _geoscene_server_geometry_url():
+    return GEOSCENE_GEOMETRY_SERVICE_URL
+
+
+def _server_area(geometry, out_crs=3395):
+    """Planar area (square metres) of a polygon computed by the server.
+
+    geodesic=true makes areasAndLengths honour areaUnit regardless of the input
+    spatial reference, so the value is meaningful for WGS84 input geometry.
+    """
+    if not HAS_GEOSCENE_SERVER:
+        raise RuntimeError(
+            "GeoScene Enterprise is not configured. Set GEOSCENE_PORTAL_URL, "
+            "GEOSCENE_PORTAL_USERNAME and GEOSCENE_PORTAL_PASSWORD."
+        )
+    payload = _geoscene_request(
+        f"{_geoscene_server_geometry_url()}/areasAndLengths",
+        {
+            "token": _geoscene_token(),
+            "f": "json",
+            "geodesic": "true",
+            "sr": 4326,
+            "polygons": json.dumps(geometry),
+            "lengthUnit": "esriMeters",
+            "areaUnit": "esriSquareMeters",
+        },
+        timeout=60,
+    )
+    areas = (payload or {}).get("areas") or []
+    return float(areas[0]) if areas else 0.0
+
+
+def _server_intersect(geometry, clip_geometry):
+    """Ask the server to clip a building geometry against the AOI geometry.
+
+    Returns a list of server-side intersection geometries (empty when the
+    building does not overlap the AOI).
+    """
+    payload = _geoscene_request(
+        f"{_geoscene_server_geometry_url()}/intersect",
+        {
+            "token": _geoscene_token(),
+            "f": "json",
+            "sr": 4326,
+            "geometries1": json.dumps([geometry]),
+            "geometries2": json.dumps([clip_geometry]),
+        },
+        timeout=60,
+    )
+    return (payload or {}).get("geometries") or []
+
+
+def _server_union(geometries):
+    """Ask the server to union multiple AOI polygons into one clip geometry."""
+    payload = _geoscene_request(
+        f"{_geoscene_server_geometry_url()}/union",
+        {
+            "token": _geoscene_token(),
+            "f": "json",
+            "sr": 4326,
+            "geometries": json.dumps(geometries),
+        },
+        timeout=60,
+    )
+    return (payload or {}).get("geometries") or []
 
 
 # --------------------------------------------------------------------------- #
