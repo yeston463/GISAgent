@@ -65,8 +65,13 @@ certbot certonly --standalone -d gis.example.com --non-interactive \
 ```
 
 Nginx 容器通过 `compose-prod.yaml` 里的卷挂载读取：
-`/etc/letsencrypt:/etc/letsencrypt:ro`。若用其它证书，请同步修改
+`/etc/letsencrypt:/etc/letsencrypt`。若用其它证书，请同步修改
 `docker/nginx/nginx.conf` 中的 `ssl_certificate` 路径，并挂载对应目录。
+
+> **无证书也能启动**：镜像内置自签占位证书。`docker/nginx/entrypoint.sh` 启动时
+> 检测 `/etc/letsencrypt/live/gis.example.com/fullchain.pem` 是否存在——不存在则
+> 自动复制自签证书兜底（HTTPS 可访问但浏览器提示不受信）。挂载需**可写**（非 `:ro`），
+> 否则兜底写入失败。申请到正式证书后无需改动，自动使用真实证书。
 
 > 证书有效期约 90 天，配置 crontab 自动续期：
 > `0 3 * * 1 certbot renew --quiet --deploy-hook 'docker compose -f compose-prod.yaml restart nginx'`
@@ -92,11 +97,33 @@ docker compose -f compose-prod.yaml ps
 docker compose -f compose-prod.yaml logs -f backend
 ```
 
+### 4.1 国内网络构建加速（拉 Docker Hub / npm 不通时）
+
+- **镜像加速**：在 `.env` 里把 `NODE_IMAGE` / `NGINX_IMAGE` / `MAVEN_IMAGE` /
+  `JRE_IMAGE` / `PYTHON_IMAGE` 指到可达加速器前缀，例如
+  `JRE_IMAGE=docker.m.daocloud.io/library/eclipse-temurin:17-jre`。
+  Dockerfile 用 `ARG` + `FROM ${IMAGE}` 支持运行时注入（见各 Dockerfile 顶部注释）。
+- **Maven 依赖**：在 `.env` 设 `MAVEN_MIRROR_URL=https://maven.aliyun.com/repository/public`，
+  Dockerfile 会自动生成 settings.xml 使用该镜像，并把 `/root/.m2` 挂为 BuildKit 缓存
+  （重复构建不重下依赖）。
+- **npm 依赖**：`NPM_REGISTRY` 默认 `https://registry.npmmirror.com`，可改回官方源。
+- **走代理构建**（国内服务器 / 开发机挂代理时）：Docker Desktop 的 `docker pull` 会自动
+  用引擎代理，但 **BuildKit 构建仍需显式环境变量**，否则拉 registry token 会直连被墙 IP：
+
+  ```bash
+  export HTTPS_PROXY=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897
+  docker compose -f compose-prod.yaml build
+  ```
+
+- **本机已验证**：backend / nginx / python-gis 三个镜像在 Docker Desktop 上全部构建 +
+  运行通过；`docker compose up` 全栈 healthy；验收脚本 10/10（见第 10 节）。
+
 ---
 
 ## 5. 首次启动引导
 
-1. 等 `backend` healthy（healthcheck 命中 `/actuator/health`）；
+1. 等 `backend` healthy（healthcheck 命中 `/actuator/health`，backend 镜像内置 curl 探测）
+   与 `python-gis` healthy（`/health` 端点，见 `gis/router.py`）；
 2. 用 `.env` 里 `AUTH_ADMIN_USERNAME/AUTH_ADMIN_PASSWORD` 登录（引导管理员，
    不落库，来源标记为 `bootstrap`）；
 3. 登录后 `POST /api/auth/users`（admin）创建正式管理员 / 普通用户；
@@ -174,8 +201,9 @@ docker compose -f compose-prod.yaml down
   完整 traceback 仅落服务器日志。
 - **CityEngine / GeoScene**：宿主服务与容器之间的目录共享依赖 bind mount，
   路径需按服务器实际布局调整；
-- 本地 Windows 开发机无 Docker daemon，以上镜像未在本机实际构建验证；
-  首次上云前请在服务器执行一次 `docker compose -f compose-prod.yaml build` 排障。
+- 三个镜像（backend / nginx / python-gis）已在 Docker Desktop 本机构建并运行验证，
+  编排全栈 healthy；Docker 生态其余细节（数据卷备份、证书续期、灰度更新）首次上云前
+  建议在服务器完整演练一遍。
 
 ---
 
@@ -184,12 +212,18 @@ docker compose -f compose-prod.yaml down
 后端（Java:8080）与 Python GIS（:8000）启动后，在开发机或服务器运行：
 
 ```powershell
-# 从 .env 读取 AUTH_ADMIN_PASSWORD，全链路验收
+# 从 .env 读取 AUTH_ADMIN_PASSWORD，全链路验收（开发机直连 backend:8080）
 powershell -ExecutionPolicy Bypass -File scripts/verify-security-hardening.ps1
 
 # 指定密码 / 地址 / 附加限流 429 探测
 .\scripts\verify-security-hardening.bat -AdminPassword xxx -TestRateLimit
+
+# 生产：经 Nginx HTTPS 全链路验收（须可访问 127.0.0.1 上的 nginx）
+.\scripts\verify-security-hardening.bat -JavaUrl "https://127.0.0.1" -AdminPassword xxx
 ```
+
+脚本已处理系统代理与自签证书：用底层 `HttpWebRequest`（显式禁用代理 + 跳过证书校验），
+本地 HTTPS 联调无需额外配置。
 
 覆盖：401（无令牌）、错误密码登录、JWT 登录与 `/me`、RBAC（`/knowledge/reload`
 无令牌 401 / admin 200）、上传深检（伪造 PDF → 413 `pdf_magic_mismatch`、
