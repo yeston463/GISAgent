@@ -116,7 +116,7 @@ docker compose -f compose-prod.yaml logs -f backend
   ```
 
 - **本机已验证**：backend / nginx / python-gis 三个镜像在 Docker Desktop 上全部构建 +
-  运行通过；`docker compose up` 全栈 healthy；验收脚本 10/10（见第 10 节）。
+  运行通过；`docker compose up` 全栈 healthy；验收脚本 10/10（见第 11 节）。
 
 ---
 
@@ -181,9 +181,8 @@ docker compose -f compose-prod.yaml up -d backend python-gis
 # 查看日志
 docker compose -f compose-prod.yaml logs -f --tail=100 backend
 
-# 备份 pgvector 数据卷
-docker run --rm -v lc4j-prod_pgvector-data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/pgvector-$(date +%F).tgz -C /data .
+# 备份（完整：pg_dump + Redis RDB + 上传目录，见第 9.5 节）
+bash scripts/backup-prod.sh ./backups 7
 
 # 清理
 docker compose -f compose-prod.yaml down
@@ -191,7 +190,84 @@ docker compose -f compose-prod.yaml down
 
 ---
 
-## 9. 已知边界 / 尚未落地
+## 9. 上线前硬条件 · 逐项准备
+
+> 以下每项对应一个"能否上线"的硬门槛，按顺序逐项完成。
+
+### 9.1 独立生产密钥（模板默认留空）
+
+```powershell
+# 服务器/开发机执行：自动生成 JWT/PG/Redis/管理员密码并写入 .env
+cp .env.production.example .env
+powershell -ExecutionPolicy Bypass -File scripts/gen-prod-secrets.ps1
+```
+
+脚本会写 JWT 密钥 + PG/Redis/管理员密码（URL-safe 强随机），并提示仍需**人工填写**
+的生产专用值：`GEOSCENE_PORTAL_PASSWORD`、`QWEN-APIKEY`、`DEEPSEEK_API_KEY`、`AMAP_KEY`
+（绝不复用开发环境的 Key / 账号密码）。
+
+### 9.2 域名与证书
+
+```powershell
+# 把占位域名换成正式域名（同步改 nginx.conf + entrypoint.sh，保留 .bak）
+powershell -ExecutionPolicy Bypass -File scripts/set-domain.ps1 -Domain gis.yourdomain.com
+```
+
+- 域名必须已解析到服务器公网 IP；国内服务器需 ICP 备案，否则 80/443 被运营商拦截。
+- 证书：certbot 申请（见第 3 节）。**申请前**容器用自签占位证书兜底可先跑通
+  HTTPS 全链路（浏览器提示不受信属预期）；申请后无需改动自动用真实证书。
+
+### 9.3 CityEngine / GeoScene 部署模式（二选一）
+
+| 模式 | 是否需 GeoScene/CityEngine | 说明 |
+|------|---------------------------|------|
+| **A. 只做指标分析**（推荐起步） | 否 | 全部 `GEOSCENE_*` / `CITYENGINE_*` 留空；python-gis 自动回退开源 GIS 后端（容器内已装 GeoPandas/Shapely）。适合普通云服务器直接跑。 |
+| **B. 含三维发布** | 是 | 需单独一台装 GeoScene Enterprise（或 Windows + CityEngine/ArcGIS Pro）的宿主，python-gis 容器经 `host.docker.internal` 访问；门户凭据用生产专用账号，`GEOSCENE_VERIFY_SSL=true`。 |
+
+### 9.4 生产安全参数（上线前必须从宽松默认收紧）
+
+编辑 `.env` 确认：
+
+- `GEOSCENE_VERIFY_SSL=true`（模板已改为 true，非自建内网门户不得回退 false）；
+- `UPLOAD_AV_ENABLED=true` + 部署 ClamAV 容器，并配置 `UPLOAD_AV_URL`（病毒扫描 fail-closed）；
+- `UPLOAD_GLOBAL_QUOTA_BYTES` / `UPLOAD_PER_USER_QUOTA_BYTES` 从 `-1` 改为实际上限
+  （如全局 `2147483648`=2GB、每用户 `209715200`=200MB），防止磁盘被写满；
+- `AUTH_RATE_LIMIT_MAX` 从 300 按真实容量下调（如 120）。
+
+### 9.5 数据备份 / 恢复 / 监控
+
+```bash
+# 备份（pg_dump + Redis RDB + 上传目录），默认 ./backups 保留 7 天
+bash scripts/backup-prod.sh ./backups 7
+
+# 恢复
+bash scripts/restore-prod.sh backups/<备份时间戳目录>
+
+# 定时备份（crontab，每天 03:00）
+0 3 * * * cd /srv/gisagent && bash scripts/backup-prod.sh ./backups 14 >> logs/backup.log 2>&1
+```
+
+建议同时：
+- 把 `./backups` 同步到异地（rsync / 对象存储），备份出服务器；
+- 定期做一次恢复演练（新起一台容器，用 `restore-prod.sh` 验证可回滚）；
+- 监控告警：`docker compose ps` 任一非 healthy 即告警（可挂 uptime-kuma / 脚本 + 钉钉/企微机器人）；
+  磁盘使用率 > 80% 告警。
+
+### 9.6 服务器规格（建议）
+
+| 部署模式 | 内存 | 说明 |
+|----------|------|------|
+| A. 只指标分析 | ≥ 8GB | Java + Postgres + Redis + Nginx 已实测在 Docker Desktop（7.6GB）全栈 healthy |
+| B. 含三维发布 | ≥ 16GB | 额外承担 GeoScene/CityEngine 宿主负载 |
+
+- 系统：Linux x86_64（Ubuntu 22.04 / Debian 12 均可）；
+- 安装 Docker + Compose plugin（`docker compose version`）；
+- 安全组只开放 **22 / 80 / 443**，其余端口一律不放行（内部服务无端口映射，公网不可达）；
+- 数据盘建议单独挂载（备份、上传目录、数据卷落盘用）。
+
+---
+
+## 10. 已知边界 / 尚未落地
 
 - **上传安全**：已实现深格式校验（魔数）、可选 ClamAV 扫描、每用户/全局配额、
   TTL 过期清理（`UPLOAD_*` 环境变量）。尚未落地对象存储与图片缩略图。
@@ -207,7 +283,7 @@ docker compose -f compose-prod.yaml down
 
 ---
 
-## 10. 验收脚本（本地联调 / 上线巡检可复用）
+## 11. 验收脚本（本地联调 / 上线巡检可复用）
 
 后端（Java:8080）与 Python GIS（:8000）启动后，在开发机或服务器运行：
 
