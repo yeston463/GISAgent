@@ -30,8 +30,9 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      # HTTPS 证书目录（宿主机：/etc/letsencrypt/live/<域名>/），按需挂载
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # HTTPS 证书目录（宿主机：/etc/letsencrypt/live/<域名>/）。若宿主机无证书
+      # （或未挂载），entrypoint 会自动用镜像内置自签占位证书兜底。
+      - /etc/letsencrypt:/etc/letsencrypt
     depends_on:
       backend:
         condition: service_healthy

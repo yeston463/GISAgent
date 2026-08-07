@@ -22,15 +22,18 @@ FROM ${NGINX_IMAGE}
 RUN rm -f /usr/share/nginx/html/*.html
 COPY --from=frontend-build /frontend/dist /usr/share/nginx/html
 COPY docker/nginx/nginx.conf /etc/nginx/conf.d/default.conf
-# 生成自签占位证书：无真实证书时 nginx 也能启动（HTTPS 会提示不受信）；
-# 生产用 compose-prod.yaml 挂载 certbot 真实证书到 /etc/letsencrypt 自动覆盖。
-# 部署时若使用其它域名，请同步修改本行域名与 nginx.conf 中的路径。
+# 生成自签占位证书：无真实证书时 nginx 也能启动（HTTPS 会提示不受信）。
+# 生产用 compose-prod.yaml 挂载 certbot 真实证书到 /etc/letsencrypt，entrypoint
+# 检测到真实证书存在则使用之，否则复制占位证书兜底。
+# 部署时若使用其它域名，请同步修改 nginx.conf 中的证书路径。
 RUN apk add --no-cache openssl \
-    && mkdir -p /etc/letsencrypt/live/gis.example.com \
+    && mkdir -p /etc/nginx/self-signed \
     && openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
-        -keyout /etc/letsencrypt/live/gis.example.com/privkey.pem \
-        -out /etc/letsencrypt/live/gis.example.com/fullchain.pem \
-        -subj "/CN=gis.example.com" \
-    && rm -rf /etc/nginx/certs
+        -keyout /etc/nginx/self-signed/privkey.pem \
+        -out /etc/nginx/self-signed/fullchain.pem \
+        -subj "/CN=localhost"
+# 启动前：若 /etc/letsencrypt 下无真实证书（宿主未挂载），用自签占位兜底
+COPY docker/nginx/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 EXPOSE 80 443
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/entrypoint.sh"]

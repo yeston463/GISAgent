@@ -16,32 +16,59 @@ $failed = 0
 function Pass([string]$message) { $script:passed++; Write-Host "[PASS] $message" -ForegroundColor Green }
 function Fail([string]$message) { $script:failed++; Write-Host "[FAIL] $message" -ForegroundColor Red }
 
-# 执行请求并返回 HTTP 状态码。所有响应码（含 4xx/5xx）都原样返回；
-# 网络级失败（无法连接）返回 -1。
-function Get-Status([string]$method, [string]$uri, [hashtable]$headers = @{}, [string]$body = $null, [int]$timeout = 20) {
+# 用 HttpWebRequest 发起请求：显式禁用代理、容忍自签证书，返回
+# (StatusCode, Body)。所有 2xx/4xx/5xx 都原样返回；网络级失败返回 (-1, $null)。
+function Send-WebRequest([string]$method, [string]$uri, [hashtable]$headers = @{}, [string]$body = $null, [int]$timeout = 20) {
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    $req = [System.Net.HttpWebRequest]::Create($uri)
+    $req.Method = $method
+    $req.Timeout = $timeout * 1000
+    $req.ReadWriteTimeout = $timeout * 1000
+    $req.Proxy = $null
+    $req.ContentType = "application/json"
+    foreach ($k in $headers.Keys) { $req.Headers[$k] = $headers[$k] }
+    $respBody = $null
     try {
-        $p = @{ Uri = $uri; Method = $method; TimeoutSec = $timeout; UseBasicParsing = $true }
-        if ($headers.Count -gt 0) { $p.Headers = $headers }
-        if (-not [string]::IsNullOrEmpty($body)) { $p.Body = $body; $p.ContentType = "application/json" }
-        return (Invoke-WebRequest @p).StatusCode
+        if (-not [string]::IsNullOrEmpty($body)) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+            $reqStream = $req.GetRequestStream()
+            $reqStream.Write($bytes, 0, $bytes.Length)
+            $reqStream.Close()
+        }
+        $resp = $req.GetResponse()
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $respBody = $reader.ReadToEnd()
+        $code = [int]$resp.StatusCode
+        $reader.Close()
+        $resp.Close()
+        return @($code, $respBody)
+    } catch [System.Net.WebException] {
+        $webErr = $_.Exception
+        if ($webErr.Response) {
+            $errResp = $webErr.Response
+            try {
+                $errReader = New-Object System.IO.StreamReader($errResp.GetResponseStream())
+                $respBody = $errReader.ReadToEnd()
+                $errReader.Close()
+            } catch { $respBody = $null }
+            return @([int]$errResp.StatusCode, $respBody)
+        }
+        return @(-1, $null)
     } catch {
-        if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }
-        return -1
+        return @(-1, $null)
     }
 }
 
-# 请求并返回原始响应体（供登录/me 等需要解析内容时使用）；
-# 4xx/5xx 时返回响应体文本（若为空则返回错误码），网络级失败返回空串。
+# 执行请求并返回 HTTP 状态码。网络级失败返回 -1。
+function Get-Status([string]$method, [string]$uri, [hashtable]$headers = @{}, [string]$body = $null, [int]$timeout = 20) {
+    return (Send-WebRequest $method $uri $headers $body $timeout)[0]
+}
+
+# 请求并返回原始响应体；网络级失败返回空串。
 function Invoke-Json([string]$method, [string]$uri, [hashtable]$headers = @{}, [string]$body = $null, [int]$timeout = 20) {
-    try {
-        $p = @{ Uri = $uri; Method = $method; Headers = $headers; UseBasicParsing = $true; TimeoutSec = $timeout }
-        if (-not [string]::IsNullOrEmpty($body)) { $p.Body = $body; $p.ContentType = "application/json" }
-        $resp = Invoke-WebRequest @p
-        return $resp.Content
-    } catch {
-        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { return $_.ErrorDetails.Message }
-        return ""
-    }
+    $result = Send-WebRequest $method $uri $headers $body $timeout
+    if ($null -eq $result[1]) { return "" }
+    return $result[1]
 }
 
 if ([string]::IsNullOrWhiteSpace($AdminPassword)) {
@@ -113,7 +140,7 @@ Write-Host "`n== 上传安全 ==" -ForegroundColor Cyan
 if ($token) {
     $tmpPdf = Join-Path $env:TEMP "fake-$(Get-Random).pdf"
     "this is not a real pdf, just text content" | Set-Content -LiteralPath $tmpPdf -Encoding UTF8
-    $pdfCode = & curl.exe -s -o - -w "|%{http_code}" -X POST "$JavaUrl/api/knowledge/upload" -H "Authorization: Bearer $token" -F "file=@$tmpPdf" 2>$null
+    $pdfCode = & curl.exe -sk -o - -w "|%{http_code}" -X POST "$JavaUrl/api/knowledge/upload" -H "Authorization: Bearer $token" -F "file=@$tmpPdf" 2>$null
     if ($pdfCode -match 'pdf_magic_mismatch' -and $pdfCode -match '\|413') {
         Pass "伪造 PDF (文本改后缀) 被深度格式校验拦截 (413 pdf_magic_mismatch)"
     } else {
@@ -123,7 +150,7 @@ if ($token) {
 
     $tmpMd = Join-Path $env:TEMP "notes-$(Get-Random).md"
     "# Title`nSome markdown text" | Set-Content -LiteralPath $tmpMd -Encoding UTF8
-    $mdResp = & curl.exe -s -o - -w "|%{http_code}" -X POST "$JavaUrl/api/knowledge/upload" -H "Authorization: Bearer $token" -F "file=@$tmpMd" 2>$null
+    $mdResp = & curl.exe -sk -o - -w "|%{http_code}" -X POST "$JavaUrl/api/knowledge/upload" -H "Authorization: Bearer $token" -F "file=@$tmpMd" 2>$null
     if ($mdResp -match '\|200' -and $mdResp -match 'success') {
         Pass "合法 .md 上传通过 -> 200 success"
     } else {
@@ -143,10 +170,11 @@ $code = Get-Status GET "$JavaUrl/analysis/runtime"
 if ($code -eq 401) { Pass "/analysis/runtime 无令牌 -> 401" } else { Fail "/analysis/runtime 无令牌期望 401 实得 $code" }
 
 if ($token) {
+    $runtimeRaw = Invoke-Json GET "$JavaUrl/analysis/runtime" $headers $null 20
     try {
-        $runtime = Invoke-RestMethod -Uri "$JavaUrl/analysis/runtime" -Headers $headers -TimeoutSec 20
+        $runtime = $runtimeRaw | ConvertFrom-Json
         if ($runtime.status -eq "Success") { Pass "/analysis/runtime 有令牌 -> 200 (backend=$($runtime.preferred_backend))" } else { Fail "/analysis/runtime 返回 $($runtime.status)" }
-    } catch { Fail "/analysis/runtime 调用失败: $($_.Exception.Message)" }
+    } catch { Fail "/analysis/runtime 解析失败: $runtimeRaw" }
 }
 
 # ---------------------------------------------------------------------------
