@@ -1,14 +1,23 @@
 # 前端静态站点 + Nginx 反代镜像。
 # 1) 构建前端（Vite 已通过） -> 产物拷贝到 Nginx web 根
 # 2) 拷贝 Nginx 配置
-FROM node:20-alpine AS frontend-build
+# 国内网络拉 Docker Hub 不通时，可用加速器前缀：
+#   docker compose -f compose-prod.yaml build --build-arg NODE_IMAGE=docker.m.daocloud.io/library/node:20-alpine --build-arg NGINX_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
+ARG NODE_IMAGE=node:20-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
+# npm registry：国内拉 npmjs 不通时用 npmmirror；留空则用 npm 默认官方源。
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+FROM ${NODE_IMAGE} AS frontend-build
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --no-audit --no-fund
+RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+    && npm ci --no-audit --no-fund
 COPY frontend ./
+# 容器内默认 JS heap 偏小，vite 打包容易 OOM，显式放大
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
-FROM nginx:1.27-alpine
+FROM ${NGINX_IMAGE}
 # 轻量健康检查映像检查（busybox wget）
 RUN rm -f /usr/share/nginx/html/*.html
 COPY --from=frontend-build /frontend/dist /usr/share/nginx/html

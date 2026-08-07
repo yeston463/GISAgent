@@ -1,7 +1,10 @@
 # Python GIS / 分析服务镜像
 # 说明：容器内运行 FastAPI。CityEngine / GeoScene 在宿主机原生运行，
 #       本容器通过 host.docker.internal 反向访问（见 compose-prod.yaml）。
-FROM python:3.11-slim
+# 国内网络拉 Docker Hub 不通时，可用加速器前缀：
+#   docker compose -f compose-prod.yaml build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.11-slim
+ARG PYTHON_IMAGE=python:3.11-slim
+FROM ${PYTHON_IMAGE}
 
 WORKDIR /workspace
 

@@ -20,6 +20,10 @@ services:
     build:
       context: .
       dockerfile: docker/nginx.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     restart: unless-stopped
     # 唯一对外开放的端口：80 / 443
     ports:
@@ -38,6 +42,10 @@ services:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
+      args:
+        MAVEN_IMAGE: ${MAVEN_IMAGE:-maven:3.9-eclipse-temurin-17}
+        JRE_IMAGE: ${JRE_IMAGE:-eclipse-temurin:17-jre}
+        MAVEN_MIRROR_URL: ${MAVEN_MIRROR_URL:-}
     restart: unless-stopped
     env_file:
       - .env
@@ -69,6 +77,8 @@ services:
     build:
       context: .
       dockerfile: docker/gis.Dockerfile
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
     restart: unless-stopped
     env_file:
       - .env

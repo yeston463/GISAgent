@@ -151,6 +151,12 @@ def _cityengine_pipeline_terminal(result):
     return bool(result.get("sceneServiceUrl")) or progress.get("status") == "error"
 
 
+@app.get("/health")
+async def health():
+    """容器健康检查用：进程存活即返回 200，不做重量级后端探测。"""
+    return {"status": "ok"}
+
+
 @app.post("/analysis/cityengine/plan-context")
 async def plan_current_context(payload: PlanContextRequest):
     try:
