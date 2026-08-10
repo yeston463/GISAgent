@@ -23,7 +23,7 @@ services:
       retries: 20
 
   pgvector:
-    image: pgvector/pgvector:pg16
+    image: docker.m.daocloud.io/pgvector/pgvector:pg16
     restart: unless-stopped
     # 仅本机可见，不暴露到局域网/公网
     ports:

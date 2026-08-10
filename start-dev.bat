@@ -60,6 +60,46 @@ if not defined PYTHON_EXE (
 )
 if not defined PYTHON_EXE (echo [ERROR] Python not found. Set GIS_PYTHON_EXE in .env or install Python.& exit /b 1)
 where npm >nul 2>nul || (echo [ERROR] npm not found.& exit /b 1)
+where docker >nul 2>nul || (echo [ERROR] Docker CLI not found.& exit /b 1)
+
+if not defined GIS_AUTO_START_DOCKER set "GIS_AUTO_START_DOCKER=1"
+if /I "%GIS_AUTO_START_DOCKER%"=="0" (
+  echo [INFO] Docker startup skipped by GIS_AUTO_START_DOCKER=0.
+) else (
+  echo Starting Redis and pgvector with Docker Compose ...
+  docker info >nul 2>nul
+  if errorlevel 1 (
+    set "DOCKER_DESKTOP_EXE=C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    if exist "!DOCKER_DESKTOP_EXE!" (
+      echo [INFO] Starting Docker Desktop ...
+      start "Docker Desktop" "!DOCKER_DESKTOP_EXE!"
+      call :wait_docker 90
+    )
+    docker info >nul 2>nul
+    if errorlevel 1 (
+      echo [ERROR] Docker Desktop did not become ready within 90 seconds.
+      echo         Open Docker Desktop, wait for "Engine running", then retry.
+      pause
+      exit /b 1
+    )
+  )
+  docker compose -p lc4j -f "!ROOT!compose.yaml" up -d --wait
+  if errorlevel 1 (
+    echo [ERROR] Redis or pgvector failed to become healthy.
+    exit /b 1
+  )
+  docker compose -p lc4j -f "!ROOT!compose.yaml" exec -T redis redis-cli ping >nul
+  if errorlevel 1 (
+    echo [ERROR] Redis health verification failed.
+    exit /b 1
+  )
+  docker compose -p lc4j -f "!ROOT!compose.yaml" exec -T pgvector pg_isready -U postgres -d vectordb >nul
+  if errorlevel 1 (
+    echo [ERROR] pgvector health verification failed.
+    exit /b 1
+  )
+  echo [INFO] Redis and pgvector are healthy.
+)
 
 if not exist "!FRONTEND!\node_modules" (
   echo Installing frontend dependencies ...
@@ -70,7 +110,7 @@ if not exist "!FRONTEND!\node_modules" (
 )
 
 set "PYTHON_RUNTIME_EXE=!PYTHON_EXE!"
-call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn" >nul 2>nul
+call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn,rasterio" >nul 2>nul
 if errorlevel 1 (
   set "PYTHON_VENV=!ROOT!.venv"
   set "PYTHON_RUNTIME_EXE=!PYTHON_VENV!\Scripts\python.exe"
@@ -84,40 +124,8 @@ if errorlevel 1 (
   if errorlevel 1 (echo [ERROR] Python dependency installation failed.& exit /b 1)
 )
 
-call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn" >nul 2>nul
+call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn,rasterio" >nul 2>nul
 if errorlevel 1 (echo [ERROR] Python GIS runtime dependencies are unavailable.& exit /b 1)
-
-set "DOCKER_READY=0"
-where docker >nul 2>nul
-if not errorlevel 1 (
-  docker info >nul 2>nul
-  if not errorlevel 1 set "DOCKER_READY=1"
-  if "!DOCKER_READY!"=="0" if /i "!GIS_AUTO_START_DOCKER!"=="1" (
-    echo Docker engine is not running. Trying to start Docker Desktop ...
-    if exist "%ProgramFiles%\Docker\Docker\Docker Desktop.exe" start "" "%ProgramFiles%\Docker\Docker\Docker Desktop.exe"
-    if exist "%LocalAppData%\Docker\Docker Desktop.exe" start "" "%LocalAppData%\Docker\Docker Desktop.exe"
-    for /l %%I in (1,1,60) do (
-      docker info >nul 2>nul
-      if not errorlevel 1 (set "DOCKER_READY=1"& goto docker_ready)
-      timeout /t 2 /nobreak >nul
-    )
-  )
-  if "!DOCKER_READY!"=="0" if /i not "!GIS_AUTO_START_DOCKER!"=="1" (
-    echo [WARN] Docker is not running and automatic startup is disabled to preserve memory for GeoScene.
-    echo        Set GIS_AUTO_START_DOCKER=1 in .env only when Redis/pgvector containers are required.
-  )
-) else (
-  echo [WARN] Docker CLI not found; continuing with local service fallback.
-)
-
-:docker_ready
-if "!DOCKER_READY!"=="1" if exist "!ROOT!compose.yaml" (
-  echo Starting Redis and pgvector ...
-  docker compose -p lc4j -f "!ROOT!compose.yaml" up -d --wait --wait-timeout 90
-  if errorlevel 1 echo [WARN] Database containers did not become ready; application fallback remains available.
-) else (
-  echo [WARN] Redis/pgvector not started. PostgreSQL memory and Redis features may be degraded.
-)
 
 echo Verifying Java backend classes ...
 pushd "!ROOT!"
@@ -199,3 +207,12 @@ for /l %%I in (1,1,!WAIT_LIMIT!) do (
 )
 echo [WARN] Service did not answer in time: !WAIT_URL!
 exit /b 0
+
+:wait_docker
+set /a DOCKER_WAIT_LIMIT=%~1
+for /l %%I in (1,1,!DOCKER_WAIT_LIMIT!) do (
+  docker info >nul 2>nul
+  if not errorlevel 1 exit /b 0
+  ping 127.0.0.1 -n 2 >nul
+)
+exit /b 1

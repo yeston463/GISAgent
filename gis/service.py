@@ -1718,7 +1718,10 @@ def calculate_flood_risk(payload):
     result["commands"].append({"action": "showAdvancedAnalysis", "params": {
         "analysisType": "flood", "title": "Flood risk screening", "rainfallMm": result["rainfall_mm"],
         "returnPeriodYears": return_period, "highRiskCellCount": result["high_risk_cell_count"],
-        "mediumRiskCellCount": result["medium_risk_cell_count"], "affectedBuildingCount": affected_buildings,
+        "mediumRiskCellCount": result["medium_risk_cell_count"],
+        # Do not collapse missing building data into a zero-exposure claim.
+        "affectedBuildingCount": result["affected_building_count"],
+        "buildingExposureAvailable": building_exposure_available,
         "maxEstimatedDepthM": result["max_estimated_depth_m"], "scenarioName": scenario_name,
         "demQuality": dem_quality, "hydrology": result["hydrology"], "limitations": result["limitations"],
     }})
@@ -1860,16 +1863,55 @@ def evaluate_demo_case(requirements=None, rag_context="", user_request=""):
     }
 
 
+CITYENGINE_MIN_CONTEXT_BUILDINGS = 3
+
+
+def _resolve_cityengine_context_buildings(aoi, buildings):
+    """Recover a complete footprint set before creating a CityEngine job.
+
+    SceneLayer queries are viewport/tile dependent.  A small, otherwise valid
+    result must not silently become a sparse CityEngine scene, so low-count
+    contexts are checked against the AOI-wide OSM footprint source.
+    """
+    context_features, _ = model._filter_usable_building_footprints(
+        model._features_from_source(buildings)
+    )
+    context_buildings = model._feature_collection(context_features)
+    context_count = len(context_features)
+    if context_count >= CITYENGINE_MIN_CONTEXT_BUILDINGS:
+        return context_buildings, {
+            "source": "current_map_context",
+            "contextBuildingCount": context_count,
+            "recoveryAttempted": False,
+        }
+
+    fetched = fetch_buildings_for_aoi(aoi)
+    fetched_features = (fetched.get("buildings") or {}).get("features") or []
+    fetched_count = len(fetched_features) if fetched.get("status") == "Success" else 0
+    if fetched_count > context_count:
+        return fetched["buildings"], {
+            "source": "openstreetmap_overpass_recovery",
+            "contextBuildingCount": context_count,
+            "recoveredBuildingCount": fetched_count,
+            "recoveryAttempted": True,
+        }
+
+    source_status = fetched.get("status", "Error")
+    source_message = fetched.get("message", "no additional usable footprints")
+    raise ValueError(
+        "当前三维上下文仅有 " + str(context_count) + " 栋有效建筑；"
+        "已核验 AOI 全量建筑数据但未发现更多可用轮廓（" + source_status + ": "
+        + str(source_message) + "）。已停止生成，避免导出退化的少量建筑成果。"
+        "请扩大或重新绘制 AOI 后重试。"
+    )
+
+
 def evaluate_context_case(payload):
     aoi = payload.get("aoi")
     buildings = payload.get("buildings")
     if not aoi:
         raise ValueError("当前地图上下文缺少 AOI，请先绘制地块或选择地点周边范围")
-    if not buildings or not buildings.get("features"):
-        fetched = fetch_buildings_for_aoi(aoi)
-        if fetched.get("status") != "Success" or not (fetched.get("buildings") or {}).get("features"):
-            raise ValueError("当前 AOI 内没有可用于 CityEngine 的建筑轮廓")
-        buildings = fetched["buildings"]
+    buildings, building_context = _resolve_cityengine_context_buildings(aoi, buildings)
 
     current_metrics = calculate_metrics({"aoi": aoi, "buildings": buildings})
     if current_metrics.get("status") != "Success":
@@ -1920,9 +1962,10 @@ def evaluate_context_case(payload):
         "commands": [],
         "dataQuality": {
             "mode": "runtime_context",
-            "source": "current map context",
+            "source": building_context["source"],
             "estimatedFields": [],
             "warning": rule_set["source"],
+            "buildingContext": building_context,
         },
         "message": "当前地图 AOI 与真实建筑已提交给 CityEngine。",
     }

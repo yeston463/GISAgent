@@ -453,6 +453,8 @@ def test_calculate_flood_risk_lock():
     assert result["commands"][0]["action"] == "addGeoJsonLayer"
     advanced = next(command for command in result["commands"] if command["action"] == "showAdvancedAnalysis")
     assert advanced["params"]["analysisType"] == "flood"
+    assert advanced["params"]["buildingExposureAvailable"] is False
+    assert advanced["params"]["affectedBuildingCount"] is None
 
 
 def test_flood_risk_classes_reduce_for_smaller_rainfall():
@@ -581,6 +583,47 @@ def test_ensure_cityengine_published_early_returns():
         "publication": {"sharedWithEveryone": True, "itemDetails": {"a": 1}},
     }
     assert main.ensure_cityengine_published("j2", shared) is shared
+
+
+def _cityengine_context_feature(index):
+    west = 116.390 + index * 0.002
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[
+            [west, 39.900], [west + 0.001, 39.900], [west + 0.001, 39.901],
+            [west, 39.901], [west, 39.900],
+        ]]},
+        "properties": {"id": f"building-{index}"},
+    }
+
+
+def test_cityengine_low_count_context_recovers_full_aoi_footprints(monkeypatch):
+    local = {"type": "FeatureCollection", "features": [_cityengine_context_feature(1), _cityengine_context_feature(2)]}
+    recovered = {"type": "FeatureCollection", "features": [_cityengine_context_feature(index) for index in range(5)]}
+    monkeypatch.setattr(
+        service,
+        "fetch_buildings_for_aoi",
+        lambda _aoi: {"status": "Success", "buildings": recovered},
+    )
+
+    buildings, quality = service._resolve_cityengine_context_buildings({"type": "Feature", "geometry": local["features"][0]["geometry"]}, local)
+
+    assert buildings == recovered
+    assert quality["source"] == "openstreetmap_overpass_recovery"
+    assert quality["contextBuildingCount"] == 2
+    assert quality["recoveredBuildingCount"] == 5
+
+
+def test_cityengine_rejects_unverified_sparse_context(monkeypatch):
+    local = {"type": "FeatureCollection", "features": [_cityengine_context_feature(1), _cityengine_context_feature(2)]}
+    monkeypatch.setattr(
+        service,
+        "fetch_buildings_for_aoi",
+        lambda _aoi: {"status": "NoData", "message": "Overpass returned no building footprints"},
+    )
+
+    with pytest.raises(ValueError, match="仅有 2 栋有效建筑"):
+        service._resolve_cityengine_context_buildings({"type": "Feature", "geometry": local["features"][0]["geometry"]}, local)
 
 
 # --------------------------------------------------------------------------- #

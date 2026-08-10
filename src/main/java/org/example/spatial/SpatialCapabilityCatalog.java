@@ -168,11 +168,10 @@ public class SpatialCapabilityCatalog {
         Snapshot remote = parse(raw, source, fallbackVersion);
         Map<String, Capability> merged = new LinkedHashMap<>(bundledSnapshot.capabilities());
         for (Map.Entry<String, Capability> entry : remote.capabilities().entrySet()) {
-            if (!bundledSnapshot.capabilities().containsKey(entry.getKey())) {
-                throw new IllegalArgumentException("remote_capability_not_in_baseline:" + entry.getKey());
-            }
             Capability baseline = bundledSnapshot.capabilities().get(entry.getKey());
-            merged.put(entry.getKey(), overlay(baseline, entry.getValue()));
+            merged.put(entry.getKey(), baseline == null
+                    ? extension(entry.getValue())
+                    : overlay(baseline, entry.getValue()));
         }
         return new Snapshot(remote.version(), source, Instant.now(), Map.copyOf(merged));
     }
@@ -215,6 +214,23 @@ public class SpatialCapabilityCatalog {
         return new Capability(baseline.id(), baseline.enabled(), remote.aliases(), baseline.requires(), baseline.optional(),
                 baseline.operations(), baseline.tool(), baseline.outputs(), baseline.rendererKinds(),
                 remote.dataRequirements(), remote.knowledge(), baseline.constraints(), baseline.relations());
+    }
+
+    /** New capabilities may reuse, but never extend, an approved executable contract. */
+    private Capability extension(Capability candidate) {
+        Capability contract = bundledSnapshot.capabilities().values().stream()
+                .filter(baseline -> baseline.tool().equals(candidate.tool())
+                        && baseline.operations().equals(candidate.operations())
+                        && baseline.outputs().equals(candidate.outputs())
+                        && baseline.rendererKinds().equals(candidate.rendererKinds())
+                        && baseline.requires().equals(candidate.requires())
+                        && baseline.optional().equals(candidate.optional()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "new_capability_execution_contract_not_allowlisted:" + candidate.id()));
+        return new Capability(candidate.id(), candidate.enabled(), candidate.aliases(), contract.requires(), contract.optional(),
+                contract.operations(), contract.tool(), contract.outputs(), contract.rendererKinds(),
+                candidate.dataRequirements(), candidate.knowledge(), candidate.constraints(), candidate.relations());
     }
 
     private Capability capability(JSONObject item) {

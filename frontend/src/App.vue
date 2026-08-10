@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { ref ,onMounted} from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { auth, logout } from './auth';
 import LoginView from './LoginView.vue';
@@ -46,6 +46,29 @@ const handleMapReady = (view) => {
   mainView.value = view;
 };
 
+const hasComputedMetrics = (payload) => {
+  const metrics = payload?.metrics || payload || {};
+  const status = String(metrics.status || '').toLowerCase();
+  return status !== 'error'
+    && Number.isFinite(Number(metrics.far))
+    && Number(metrics.site_area ?? metrics.site_area_sqm) > 0
+    && Number(metrics.building_count) > 0;
+};
+
+const handleGisCharts = (event) => {
+  if (!hasComputedMetrics(event.detail)) {
+    console.warn('⚠️ 忽略未完成的 GIS 指标，避免展示空分析面板。');
+    chartData.value = {};
+    return;
+  }
+  console.log('📊 App.vue 接收到已完成图表指令:', event.detail);
+  chartData.value = event.detail;
+};
+
+const clearGisCharts = () => {
+  chartData.value = {};
+};
+
 const chatRef = ref(null);
 // 接收到地图点击的属性后，直接塞给聊天组件执行发送
 const handleSpatialClick = (context) => {
@@ -54,10 +77,12 @@ const handleSpatialClick = (context) => {
   }
 };
 onMounted(() => {
-  window.addEventListener("show-gis-charts", (e) => {
-    console.log("📊 App.vue 接收到图表指令:", e.detail);
-    chartData.value = e.detail;
-  });
+  window.addEventListener('show-gis-charts', handleGisCharts);
+  window.addEventListener('clear-gis-charts', clearGisCharts);
+});
+onUnmounted(() => {
+  window.removeEventListener('show-gis-charts', handleGisCharts);
+  window.removeEventListener('clear-gis-charts', clearGisCharts);
 });
 
 const onLoginSuccess = () => {

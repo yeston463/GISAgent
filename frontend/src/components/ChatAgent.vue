@@ -487,6 +487,7 @@ const handleUserSend = () => {
     scrollToBottom();
     return;
   }
+  window.dispatchEvent(new Event('clear-gis-charts'));
   window.lastGisResult = {
     far: 0,
     site_area: 0,
@@ -508,7 +509,7 @@ const processAiChat = async (userInput, isHidden = false) => {
   loadingStatusText.value = isHidden ? '正在同步分析...' : 'Agent 正在抓取有效数据...';
 
   try {
-    const data = await streamAgentChat(userInput);
+    const data = await agentChat(userInput);
     await refreshContextStatus();
     let responseTrace = Array.isArray(data.trace) ? [...data.trace] : [...activeTrace.value];
     activeTrace.value = responseTrace;
@@ -662,69 +663,16 @@ const openCityEngineResult = (detail, trace) => {
   });
 };
 
-const streamAgentChat = async (userInput) => {
-  const response = await fetch('/api/agent/chat/stream', {
+const agentChat = async (userInput) => {
+  const response = await fetch('/api/agent/chat/agentic', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ message: userInput, memoryId: memoryId.value })
   });
-  if (!response.ok || !response.body) {
-    throw new Error(`Agent 流式接口不可用（${response.status}）`);
+  if (!response.ok) {
+    throw new Error(`Agent 接口不可用（${response.status}）`);
   }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-  let result = null;
-  const consume = block => {
-    let eventName = 'message';
-    const dataLines = [];
-    block.split('\n').forEach(line => {
-      if (line.startsWith('event:')) eventName = line.slice(6).trim();
-      if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
-    });
-    if (!dataLines.length) return;
-    try {
-      const payload = JSON.parse(dataLines.join('\n'));
-      if (eventName === 'trace') {
-        const existingIndex = activeTrace.value.findIndex(step =>
-          step.round === payload.round && step.title === payload.title
-        );
-        if (existingIndex >= 0) {
-          activeTrace.value = activeTrace.value.map((step, index) =>
-            index === existingIndex ? payload : step
-          );
-        } else {
-          activeTrace.value = [...activeTrace.value, payload];
-        }
-        scrollToBottom();
-        const phaseLabels = { action: '正在调用 GIS 工具...', observation: '正在校验工具结果...', fallback: '正在尝试降级策略...' };
-        loadingStatusText.value = phaseLabels[payload.phase] || payload.title || 'Agent 正在分析...';
-      } else if (eventName === 'result') {
-        result = payload;
-      } else if (eventName === 'error') {
-        throw new Error(payload.message || 'Agent 流式任务失败');
-      }
-    } catch (error) {
-      if (eventName === 'error') throw error;
-      console.warn('忽略无法解析的 SSE 事件:', error);
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done }).replace(/\r\n/g, '\n');
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary >= 0) {
-      consume(buffer.slice(0, boundary));
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf('\n\n');
-    }
-    if (done) break;
-  }
-  if (buffer.trim()) consume(buffer.trim());
-  if (!result) throw new Error('Agent 未返回最终结果');
-  return result;
+  return response.json();
 };
 
 const waitForGisDataReady = () => {

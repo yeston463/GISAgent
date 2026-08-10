@@ -1,7 +1,9 @@
 package org.example.controller;
 
 import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.example.agent.AgentLoopService;
 import org.example.agent.AgentTaskService;
 import org.example.agent.DynamicCodeGenerator;
@@ -38,8 +40,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.io.IOException;
-import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/agent")
@@ -85,6 +85,9 @@ public class AgentController {
     private AnalysisPlanCompiler analysisPlanCompiler;
 
     @Autowired
+    private ChatLanguageModel chatLanguageModel;
+
+    @Autowired
     private SpatialRoutingTelemetry spatialRoutingTelemetry;
 
     @PostMapping("/chat/agentic")
@@ -128,29 +131,12 @@ public class AgentController {
         return "NotFound".equals(task.get("status")) ? ResponseEntity.notFound().build() : ResponseEntity.accepted().body(task);
     }
 
-    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter agenticChatStream(@RequestBody ChatRequest request) {
+    @PostMapping("/chat/stream")
+    public ResponseEntity<Map<String, Object>> agenticChatStream(@RequestBody ChatRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
-        SseEmitter emitter = new SseEmitter(900_000L);
-        emitter.onTimeout(emitter::complete);
-        CompletableFuture.runAsync(() -> {
-            try {
-                AgentLoopService.AgentResult result = agentLoopService.execute(
-                        request.message(), userId(memoryId), memoryId,
-                        trace -> sendTrace(emitter, trace));
-                emitter.send(SseEmitter.event().name("result").data(buildResponse(result, memoryId)));
-                emitter.complete();
-            } catch (Exception e) {
-                try {
-                    emitter.send(SseEmitter.event().name("error")
-                            .data(Map.of("message", "Agent 流式任务失败: " + e.getMessage())));
-                } catch (IOException ignored) {
-                    // The browser may have closed the connection.
-                }
-                emitter.completeWithError(e);
-            }
-        });
-        return emitter;
+        AgentLoopService.AgentResult result = agentLoopService.execute(
+                request.message(), userId(memoryId), memoryId);
+        return ResponseEntity.ok(buildResponse(result, memoryId));
     }
 
     @PostMapping("/preference")
@@ -221,6 +207,21 @@ public class AgentController {
         }
     }
 
+    @PostMapping("/capabilities/candidates/ai-generate")
+    public ResponseEntity<Map<String, Object>> generateCapabilityGraphCandidate(
+            @RequestBody CapabilityGraphAiRequest request, HttpServletRequest httpRequest) {
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) {
+            return ResponseEntity.status(403).body(Map.of("code", "graph_admin_forbidden"));
+        }
+        try {
+            return ResponseEntity.ok(generateAiCapabilityCandidate(request));
+        } catch (IllegalArgumentException error) {
+            return ResponseEntity.badRequest().body(Map.of("code", "graph_generation_rejected", "message", error.getMessage()));
+        } catch (Exception error) {
+            return ResponseEntity.status(502).body(Map.of("code", "graph_generation_failed", "message", "AI graph generation failed: " + safeGraphError(error)));
+        }
+    }
+
     @PostMapping("/capabilities/publish")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<Map<String, Object>> publishCapabilityGraph(@RequestBody CapabilityGraphRequest request, HttpServletRequest httpRequest) {
@@ -271,6 +272,99 @@ public class AgentController {
         } catch (IllegalArgumentException error) {
             return ResponseEntity.status(404).body(Map.of("rolledBack", false, "code", "revision_not_found", "message", error.getMessage()));
         }
+    }
+
+    private Map<String, Object> generateAiCapabilityCandidate(CapabilityGraphAiRequest request) {
+        if (request == null || request.capabilityId() == null || request.capabilityId().isBlank()) {
+            throw new IllegalArgumentException("capability_id_required");
+        }
+        String capabilityId = request.capabilityId().trim();
+        if (!capabilityId.matches("[a-z][a-z0-9_]{1,80}")) throw new IllegalArgumentException("invalid_capability_id");
+        List<Map<String, Object>> registered = spatialCapabilityCatalog.descriptors();
+        Map<String, Object> requestedCapability = registered.stream()
+                .filter(item -> capabilityId.equals(item.get("id")))
+                .findFirst()
+                .orElse(null);
+        String userRequest = request.request() == null ? "" : request.request().trim();
+        if (userRequest.isBlank()) throw new IllegalArgumentException("generation_request_required");
+        if (userRequest.length() > 4000) throw new IllegalArgumentException("generation_request_too_long");
+
+        String prompt = """
+                你是空间知识图谱编辑助手。为已注册能力生成语义草稿。
+                只返回 JSON，不要 Markdown，不要解释。JSON 格式严格为：
+                {"version":"候选版本","baseCapabilityId":"执行基准能力 ID","aliases":["至少一个中文别名"],"purpose":"知识说明","acceptanceUtterances":["能匹配别名的中文验收语句"]}
+                不得生成 tool、operations、requires、outputs、rendererKinds、dataRequirements。
+                候选能力 ID：%s。若它是新能力，必须从已注册能力中选择最匹配的 baseCapabilityId；
+                系统只会复用该基准的已批准执行契约，不能新增工具或操作。
+                已注册能力：%s
+                用户需求：%s
+                """.formatted(capabilityId, JSON.toJSONString(registered), userRequest);
+        String raw = chatLanguageModel.generate(prompt);
+        if (raw == null || raw.isBlank()) throw new IllegalArgumentException("ai_returned_empty_response");
+        raw = raw.trim().replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
+        JSONObject semantic = JSON.parseObject(raw);
+        if (semantic == null) throw new IllegalArgumentException("ai_returned_invalid_json");
+
+        String baseCapabilityId = requestedCapability == null ? semantic.getString("baseCapabilityId") : capabilityId;
+        if (baseCapabilityId == null || baseCapabilityId.isBlank()) throw new IllegalArgumentException("ai_candidate_requires_base_capability");
+        Map<String, Object> baseline = registered.stream()
+                .filter(item -> baseCapabilityId.trim().equals(item.get("id")))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("base_capability_not_registered:" + baseCapabilityId));
+
+        List<String> aliases = graphStrings(semantic.getJSONArray("aliases"));
+        List<String> utterances = graphStrings(semantic.getJSONArray("acceptanceUtterances"));
+        String purpose = semantic.getString("purpose");
+        if (aliases.isEmpty() || aliases.stream().noneMatch(alias -> alias.matches(".*[\\u4e00-\\u9fff].*"))) {
+            throw new IllegalArgumentException("ai_candidate_requires_chinese_alias");
+        }
+        if (utterances.isEmpty()) throw new IllegalArgumentException("ai_candidate_requires_acceptance_utterance");
+        if (purpose == null || purpose.isBlank()) throw new IllegalArgumentException("ai_candidate_requires_purpose");
+
+        String version = request.candidateVersion() == null ? "" : request.candidateVersion().trim();
+        if (version.isBlank()) version = semantic.getString("version");
+        if (version == null || version.isBlank()) version = "ai-" + System.currentTimeMillis();
+        if (!version.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,80}")) throw new IllegalArgumentException("invalid_candidate_version");
+
+        JSONObject edited = JSON.parseObject(JSON.toJSONString(baseline));
+        edited.put("id", capabilityId);
+        edited.put("aliases", aliases);
+        JSONObject knowledge = edited.getJSONObject("knowledge");
+        if (knowledge == null) knowledge = new JSONObject();
+        knowledge.put("purpose", purpose.trim());
+        edited.put("knowledge", knowledge);
+        JSONObject graph = new JSONObject();
+        graph.put("version", version);
+        JSONArray capabilities = new JSONArray();
+        capabilities.add(edited);
+        graph.put("capabilities", capabilities);
+        String graphJson = graph.toJSONString();
+        Map<String, List<String>> acceptanceTests = Map.of(capabilityId, utterances);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("version", version);
+        result.put("aliases", aliases);
+        result.put("purpose", purpose.trim());
+        result.put("acceptanceUtterances", utterances);
+        result.put("graph", graphJson);
+        result.put("preview", knowledgeGraphRevisionService.preview(graphJson, acceptanceTests));
+        return result;
+    }
+
+    private List<String> graphStrings(JSONArray values) {
+        if (values == null) return List.of();
+        return values.toJavaList(String.class).stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(String::trim)
+                .distinct()
+                .limit(20)
+                .toList();
+    }
+
+    private String safeGraphError(Exception error) {
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) return error.getClass().getSimpleName();
+        String compact = message.replace('\r', ' ').replace('\n', ' ').trim();
+        return compact.substring(0, Math.min(compact.length(), 180));
     }
 
     @GetMapping("/runs")
@@ -349,6 +443,8 @@ public class AgentController {
 
     public record CapabilityGraphRequest(String graph, String author, String note, Map<String, List<String>> acceptanceTests) {}
 
+    public record CapabilityGraphAiRequest(String capabilityId, String request, String candidateVersion) {}
+
     public record CapabilityIntentTestRequest(List<String> utterances) {}
 
     private Map<String, Object> buildResponse(AgentLoopService.AgentResult result, String memoryId) {
@@ -404,14 +500,6 @@ public class AgentController {
 
     private String userId(String memoryId) {
         return memoryId == null || memoryId.isBlank() ? "default" : memoryId;
-    }
-
-    private void sendTrace(SseEmitter emitter, AgentLoopService.ExecutionTrace trace) {
-        try {
-            emitter.send(SseEmitter.event().name("trace").data(trace));
-        } catch (IOException ignored) {
-            // A disconnected client should not abort the backend analysis.
-        }
     }
 
     private void appendAgentCommands(JSONArray commands, List<Map<String, Object>> agentCommands) {

@@ -683,10 +683,14 @@ export function useCommandExecutor(viewRef) {
           };
         }
 
-        // 只要场景图层轮廓不完整，就优先用 AOI 内整套 OSM footprint，避免漏楼或重复楼。
+        // SceneLayer 查询受瓦片加载和当前视图影响。少量返回值即使几何完整，
+        // 也可能只是已加载的一小部分；三维建模必须先核验 AOI 全量 footprint。
         const hasApproximateFootprints = features.some(feature => feature.properties?.geometryApproximation);
-        if (features.length === 0 || geometryDecisions.length > 0 || hasApproximateFootprints) {
-          console.warn("⚠️ 场景图层的建筑面不完整，正在从 OSM 获取 AOI 内原始轮廓...");
+        const requiresCompleteFootprints = features.length < 3
+          || geometryDecisions.length > 0
+          || hasApproximateFootprints;
+        if (requiresCompleteFootprints) {
+          console.warn("⚠️ 场景图层建筑数量或轮廓不完整，正在从 OSM 获取 AOI 内原始轮廓...");
           try {
             const aoiFeature = { type: "Feature", geometry: aoiGeometry, properties: {} };
             const footprintResponse = await axios.post("/analysis/fetch_buildings", { aoi: aoiFeature });
@@ -716,7 +720,7 @@ export function useCommandExecutor(viewRef) {
             geometryDecisions.push({
               buildingId: "OSM-fallback",
               decision: "replace_incomplete_scene_footprints",
-              reason: `SceneLayer 轮廓不完整，已改用 OSM 的 ${features.length} 个真实建筑面。`
+              reason: `SceneLayer 返回 ${bufferResult.features.length} 栋或轮廓不完整，已改用 OSM 的 ${features.length} 个真实建筑面。`
             });
           } catch (error) {
             const fallbackDetail = error?.response?.data?.message
@@ -728,8 +732,8 @@ export function useCommandExecutor(viewRef) {
               decision: "osm_fallback_failed",
               reason: `OSM 真实轮廓回退失败：${fallbackDetail}`
             });
-            if (features.length === 0) {
-              throw new Error(`没有可用的真实建筑面，已停止生成以避免四棱柱近似。${fallbackDetail}`);
+            if (features.length < 3) {
+              throw new Error(`建筑上下文不完整：SceneLayer 仅返回 ${features.length} 栋，且无法取得 AOI 全量真实建筑面。已停止同步以避免生成退化的少量建筑成果。${fallbackDetail}`);
             }
             console.warn("⚠️ OSM 回退失败，将仅使用场景图层中已有的真实 rings:", error);
           }
@@ -781,19 +785,21 @@ export function useCommandExecutor(viewRef) {
       // 1. 获取真值（来自后端计算）
       const realFar = window.lastGisResult.far;
 
-      // 2. 获取 AI 传过来的值（可能包含幻觉）
-      const aiFar = params.far || params.FAR || (params.metrics && (params.metrics.far || params.metrics.FAR));
-
-      // 3. 【核心防伪逻辑】
-      // 如果真值是 0，说明 Python 还没算出来或者该地块确实没建筑
-      // 此时如果 AI 传了 2.18 或 3.32 等非零值，判定为幻觉，强制纠正回 0
-      let finalFar = 0;
-      if (realFar > 0) {
-        finalFar = realFar; // 优先信 Python
-      } else {
-        console.warn("⚠️ Python 没算出来或为 0，AI 可能在瞎编。");
-        finalFar = 0;
+      const hasComputedMetrics = window.lastGisResult.status === "Success"
+        && Number.isFinite(Number(realFar))
+        && Number.isFinite(Number(window.lastGisResult.site_area))
+        && Number(window.lastGisResult.site_area) > 0
+        && Number.isFinite(Number(window.lastGisResult.building_count))
+        && Number(window.lastGisResult.building_count) > 0;
+      if (!hasComputedMetrics) {
+        // Never render a pending upload/import as an apparently completed report.
+        console.warn("⚠️ 指标尚未计算完成，已阻止打开空分析面板。");
+        window.dispatchEvent(new Event("clear-gis-charts"));
+        return false;
       }
+
+      // 2. 只展示服务端已完成计算的指标，忽略模型传入的数值。
+      const finalFar = Number(realFar);
 
       const finalData = {
         ...window.lastGisResult,

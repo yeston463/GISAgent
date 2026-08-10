@@ -60,16 +60,26 @@ public class GisMapTools {
             return "{\"status\":\"error\",\"message\":\"AMAP_KEY environment variable is not configured\"}";
         }
         try {
-            String queryName = locationName.trim().replaceFirst("^.+?市", "");
-            String keyword = URLEncoder.encode(queryName, StandardCharsets.UTF_8);
-            java.net.URI url = java.net.URI.create("https://restapi.amap.com/v3/config/district"
-                    + "?key=" + URLEncoder.encode(amapKey, StandardCharsets.UTF_8)
-                    + "&keywords=" + keyword + "&subdistrict=0&extensions=all");
-            String response = restTemplate.getForObject(url, String.class);
-            JsonNode district = objectMapper.readTree(response).path("districts").path(0);
+            String queryName = locationName.trim();
+            JsonNode district = com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+            String providerQuery = "";
+            for (String candidateQuery : boundarySearchQueries(queryName)) {
+                district = selectDistrictWithAi(fetchDistrictCandidates(candidateQuery), queryName);
+                if (!district.isMissingNode()) {
+                    providerQuery = candidateQuery;
+                    break;
+                }
+            }
+            if (district.isMissingNode()) {
+                String geocodedAdcode = geocodeAdministrativeAdcode(queryName);
+                if (!geocodedAdcode.isBlank()) {
+                    district = selectDistrictWithAi(fetchDistrictCandidates(geocodedAdcode), queryName);
+                    providerQuery = district.isMissingNode() ? "" : "adcode:" + geocodedAdcode;
+                }
+            }
             String boundary = district.path("polyline").asText("");
             if (district.isMissingNode() || boundary.isBlank()) {
-                return "{\"status\":\"error\",\"message\":\"未返回可用行政区边界\"}";
+                return "{\"status\":\"error\",\"message\":\"No AI-validated administrative boundary candidate was returned\"}";
             }
             ArrayNode polygons = objectMapper.createArrayNode();
             for (String rawRing : boundary.split(java.util.regex.Pattern.quote("|"))) {
@@ -90,6 +100,8 @@ public class GisMapTools {
             String[] center = district.path("center").asText().split(",");
             ObjectNode result = objectMapper.createObjectNode();
             result.put("status", "success"); result.put("source", "amap_district");
+            result.put("requestedLocation", queryName);
+            result.put("providerQuery", providerQuery);
             result.put("location", district.path("name").asText(locationName.trim()));
             result.put("adcode", district.path("adcode").asText(""));
             if (center.length == 2) {
@@ -105,6 +117,139 @@ public class GisMapTools {
         } catch (Exception error) {
             return "{\"status\":\"error\",\"message\":\"行政区边界查询失败\"}";
         }
+    }
+
+    private JsonNode fetchDistrictCandidates(String query) throws Exception {
+        String keyword = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        java.net.URI url = java.net.URI.create("https://restapi.amap.com/v3/config/district"
+                + "?key=" + URLEncoder.encode(amapKey, StandardCharsets.UTF_8)
+                + "&keywords=" + keyword + "&subdistrict=0&extensions=all");
+        String response = restTemplate.getForObject(url, String.class);
+        return objectMapper.readTree(response).path("districts");
+    }
+
+    private String geocodeAdministrativeAdcode(String locationName) throws Exception {
+        java.net.URI url = java.net.URI.create("https://restapi.amap.com/v3/geocode/geo"
+                + "?key=" + URLEncoder.encode(amapKey, StandardCharsets.UTF_8)
+                + "&address=" + URLEncoder.encode(locationName, StandardCharsets.UTF_8));
+        String response = restTemplate.getForObject(url, String.class);
+        JsonNode geocodes = objectMapper.readTree(response).path("geocodes");
+        if (!geocodes.isArray() || geocodes.isEmpty()) {
+            return "";
+        }
+        return geocodes.get(0).path("adcode").asText("").trim();
+    }
+
+    private List<String> boundarySearchQueries(String locationName) {
+        List<String> queries = new ArrayList<>();
+        queries.add(locationName);
+        String prompt = """
+                You prepare administrative-boundary searches for a GIS provider.
+                Convert the user's full place expression into up to two concise provider search terms.
+                Preserve the intended city or district. Do not invent a place, province, or country.
+                Include a shorter administrative name only when the full expression would not be a provider keyword.
+                Reply with JSON only: {"queries":["term one","term two"]}.
+                User location: %s
+                """.formatted(locationName);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                JsonNode plan = parseAiJson(chatLanguageModel.generate(prompt));
+                JsonNode plannedQueries = plan.path("queries");
+                if (!plannedQueries.isArray()) {
+                    continue;
+                }
+                for (JsonNode item : plannedQueries) {
+                    String query = item.asText("").trim();
+                    if (!query.isBlank() && query.length() <= 80 && !queries.contains(query)) {
+                        queries.add(query);
+                    }
+                }
+                if (queries.size() > 1) {
+                    break;
+                }
+            } catch (Exception ignored) {
+                // The original location remains the only safe provider query.
+            }
+        }
+        return queries;
+    }
+
+    private JsonNode selectDistrictWithAi(JsonNode districts, String requestedLocation) {
+        if (districts == null || !districts.isArray()) {
+            return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+        }
+
+        ArrayNode candidates = objectMapper.createArrayNode();
+        for (JsonNode district : districts) {
+            String adcode = district.path("adcode").asText("").trim();
+            String boundary = district.path("polyline").asText("").trim();
+            if (adcode.isBlank() || boundary.isBlank() || "100000".equals(adcode)) {
+                continue;
+            }
+            ObjectNode candidate = candidates.addObject();
+            candidate.put("adcode", adcode);
+            candidate.put("name", district.path("name").asText(""));
+            candidate.put("level", district.path("level").asText(""));
+            candidate.put("center", district.path("center").asText(""));
+        }
+        if (candidates.isEmpty()) {
+            return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+        }
+        if (candidates.size() == 1) {
+            return districtForAdcode(districts, candidates.get(0).path("adcode").asText());
+        }
+
+        String prompt = """
+                You select one administrative boundary for a GIS operation.
+                Select only from the provider candidates below. Do not infer, rename, or invent an adcode.
+                Choose the candidate that exactly represents the user's requested administrative area.
+                Return exactly one JSON object: {\"adcode\":\"one provided adcode\"}.
+                Return {\"adcode\":\"\"} when no candidate is reliable.
+                User request: %s
+                Provider candidates: %s
+                """.formatted(requestedLocation, candidates);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                JsonNode selection = parseAiJson(chatLanguageModel.generate(prompt));
+                String selectedAdcode = selection.path("adcode").asText("").trim();
+                if (!selectedAdcode.isBlank()) {
+                    JsonNode selected = districtForAdcode(districts, selectedAdcode);
+                    if (!selected.isMissingNode()) {
+                        return selected;
+                    }
+                }
+            } catch (Exception ignored) {
+                // A model failure must not widen the requested AOI.
+            }
+        }
+        return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+    }
+
+    private JsonNode parseAiJson(String answer) throws Exception {
+        String text = answer == null ? "" : answer.trim();
+        if (text.startsWith("```")) {
+            int firstLine = text.indexOf('\n');
+            if (firstLine < 0 || !text.endsWith("```")) {
+                return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+            }
+            text = text.substring(firstLine + 1, text.length() - 3).trim();
+        }
+        if (!text.startsWith("{") || !text.endsWith("}")) {
+            return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+        }
+        return objectMapper.readTree(text);
+    }
+
+    static JsonNode districtForAdcode(JsonNode districts, String adcode) {
+        if (districts == null || !districts.isArray()) return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+        for (JsonNode candidate : districts) {
+            if (adcode != null && adcode.equals(candidate.path("adcode").asText())
+                    && !"100000".equals(adcode)
+                    && !candidate.path("polyline").asText("").isBlank()) {
+                return candidate;
+            }
+        }
+        return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
     }
 
     private static boolean isInChina(double lng, double lat) {

@@ -94,6 +94,7 @@ public class LlmSpatialRouter {
                 Route the requested analysis even when its input data is missing. Do not ask for rainfall, DEM, radius, or other data here; the data validator runs after routing.
                 Select ground_dem when the user asks to obtain, sample, load, or query DEM/elevation from the current map or current AOI. This action needs no analysis radius or metric selection.
                 A request for flood analysis, 洪水分析, 进行洪水分析, 内涝分析, or 淹没分析 must select the catalog ID flood_analysis. A request for skyline or sunlight analysis must select its matching catalog ID.
+                Requests to generate, publish, download, or view a CityEngine, GeoScene, or SLPK 3D deliverable are not spatial analysis routes. Select none so the dedicated 3D pipeline can handle them.
                 Select discovery only to search external data candidates. Select import_osm only when the user explicitly confirms importing an OSM dataset. Select none for requests unrelated to GIS routing.
                 Catalog capability IDs: %s
                 """.formatted(String.join(", ", capabilityIds));
@@ -116,14 +117,19 @@ public class LlmSpatialRouter {
             }
             try {
                 AiMessage compatibilityResponse = llm.generate(List.of(
-                        SystemMessage.from(instructions + " Return exactly one JSON object with the route fields if tool calls are unavailable."),
+                        SystemMessage.from(instructions + """
+                                Tool calls are unavailable. Reply with JSON only, with no prose or Markdown.
+                                Use one of these shapes:
+                                {"kind":"analysis","capabilityIds":["one catalog ID"],"location":""}
+                                {"kind":"ground_dem","location":"exact user-named location or empty"}
+                                {"kind":"discovery","datasets":["dem"]}
+                                {"kind":"import_osm","dataset":"buildings"}
+                                {"kind":"none"}
+                                This is a structured-output retry. Never describe a route in natural language.
+                                """),
                         UserMessage.from(request == null ? "" : request))).content();
                 Route route = parseJsonResponse(compatibilityResponse);
                 if (route != null && !"none".equals(route.kind())) {
-                    return route;
-                }
-                route = parseSingleCatalogMention(compatibilityResponse);
-                if (route != null) {
                     return route;
                 }
                 failure = "invalid_json_response";
@@ -241,16 +247,6 @@ public class LlmSpatialRouter {
         } catch (RuntimeException error) {
             return null;
         }
-    }
-
-    private Route parseSingleCatalogMention(AiMessage response) {
-        if (response == null || response.text() == null) return null;
-        String answer = response.text();
-        List<String> matches = catalog.capabilities().stream()
-                .filter(capability -> answer.contains(capability.id()) || capability.aliases().stream().anyMatch(answer::contains))
-                .map(SpatialCapabilityCatalog.Capability::id)
-                .toList();
-        return matches.size() == 1 ? parseCatalogRoute(matches.get(0)) : null;
     }
 
     private String diagnostic(RuntimeException error) {

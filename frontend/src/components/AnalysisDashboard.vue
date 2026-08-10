@@ -72,7 +72,7 @@
       <template v-else-if="isAdvanced">
         <div class="status-strip">
           <span class="status-dot"></span><span>方案筛查模型计算完成</span>
-          <strong>{{ advancedData.buildingCount || 0 }} 栋建筑</strong>
+          <strong>{{ advancedBuildingStatus }}</strong>
         </div>
         <div v-if="advancedData.analysisType === 'skyline'" class="skyline-wrap">
           <div class="advanced-summary">
@@ -89,7 +89,7 @@
         <div v-else-if="advancedData.analysisType === 'flood'" class="flood-grid">
           <article class="flood-card danger"><span>High risk cells</span><strong>{{ advancedData.highRiskCellCount || 0 }}</strong></article>
           <article class="flood-card"><span>Medium risk cells</span><strong>{{ advancedData.mediumRiskCellCount || 0 }}</strong></article>
-          <article class="flood-card"><span>Affected buildings</span><strong>{{ advancedData.affectedBuildingCount || 0 }}</strong></article>
+          <article class="flood-card"><span>Affected buildings</span><strong>{{ floodExposureStatus }}</strong></article>
           <article class="flood-card"><span>Max relative depth</span><strong>{{ format(advancedData.maxEstimatedDepthM, 3, ' m') }}</strong></article>
           <div class="advanced-summary full"><span>Rainfall {{ format(advancedData.rainfallMm, 0, ' mm') }}</span><span>{{ advancedData.returnPeriodYears || 20 }} year scenario</span></div>
           <div v-if="advancedData.demQuality" class="dem-quality">DEM {{ advancedData.demQuality.sample_count }} samples · {{ format(advancedData.demQuality.minimum_elevation_m, 2, ' m') }}–{{ format(advancedData.demQuality.maximum_elevation_m, 2, ' m') }} · relief {{ format(advancedData.demQuality.elevation_span_m, 3, ' m') }}<span v-if="advancedData.demQuality.warning"> · {{ advancedData.demQuality.warning }}</span></div>
@@ -193,6 +193,23 @@ const comparisonRows = computed(() => {
 });
 const improvedCount = computed(() => comparisonRows.value.filter(item=>item.improved).length);
 const advancedProfile = computed(() => Array.isArray(advancedData.value.profile) ? advancedData.value.profile : []);
+const hasComputedMetrics = payload => {
+  const data = payload?.metrics || payload || {};
+  const status = String(data.status || '').toLowerCase();
+  return status !== 'error'
+    && Number.isFinite(Number(data.far))
+    && Number(data.site_area ?? data.site_area_sqm) > 0
+    && Number(data.building_count) > 0;
+};
+const buildingExposureAvailable = computed(() => advancedData.value.buildingExposureAvailable !== false);
+const advancedBuildingStatus = computed(() =>
+  advancedData.value.analysisType === 'flood' && !buildingExposureAvailable.value
+    ? '建筑暴露未评估'
+    : `${advancedData.value.buildingCount || 0} 栋建筑`
+);
+const floodExposureStatus = computed(() =>
+  !buildingExposureAvailable.value ? '未评估' : (advancedData.value.affectedBuildingCount ?? 0)
+);
 const skylineMax = computed(() => Math.max(1, ...advancedProfile.value.map(item => Number(item.height) || 0)));
 const skylineHeight = value => Math.max(2, Math.min(100, (Number(value) || 0) / skylineMax.value * 100));
 const handleComparison = event => { comparison.value=event.detail||{}; mode.value='comparison'; visible.value=true; };
@@ -202,7 +219,21 @@ const switchScenario = scenario => {
   window.dispatchEvent(new CustomEvent('request-planning-scenario-switch', { detail: { scenario } }));
 };
 const handleScenarioChanged = event => { activeScenario.value = event.detail?.scenario || 'existing'; };
-const handleStandard = event => { standardData.value=event.detail?.metrics||event.detail||{}; mode.value='standard'; visible.value=true; };
+const handleStandard = event => {
+  const data = event.detail?.metrics || event.detail || {};
+  if (!hasComputedMetrics(data)) {
+    standardData.value = {};
+    if (mode.value === 'standard') visible.value = false;
+    return;
+  }
+  standardData.value = data;
+  mode.value = 'standard';
+  visible.value = true;
+};
+const clearStandard = () => {
+  if (mode.value === 'standard') visible.value = false;
+  standardData.value = {};
+};
 const handleProvenance = event => { provenance.value = event.detail || {}; };
 const handleScenarioResults = event => {
   const results = event.detail?.results || [];
@@ -217,7 +248,7 @@ const selectScenario = scenarioId => {
 };
 watch(()=>props.data,value=>{ if(value&&Object.keys(value).length) handleStandard({detail:value}); },{deep:true});
 onMounted(()=>{ window.addEventListener('show-planning-comparison',handleComparison); window.addEventListener('show-gis-charts',handleStandard); window.addEventListener('show-advanced-analysis',handleAdvanced); window.addEventListener('planning-scenario-changed',handleScenarioChanged); window.addEventListener('show-analysis-provenance',handleProvenance); window.addEventListener('show-scenario-results',handleScenarioResults); });
-onUnmounted(()=>{ window.removeEventListener('show-planning-comparison',handleComparison); window.removeEventListener('show-gis-charts',handleStandard); window.removeEventListener('show-advanced-analysis',handleAdvanced); window.removeEventListener('planning-scenario-changed',handleScenarioChanged); window.removeEventListener('show-analysis-provenance',handleProvenance); window.removeEventListener('show-scenario-results',handleScenarioResults); });
+onUnmounted(()=>{ window.removeEventListener('show-planning-comparison',handleComparison); window.removeEventListener('show-gis-charts',handleStandard); window.removeEventListener('clear-gis-charts',clearStandard); window.removeEventListener('show-advanced-analysis',handleAdvanced); window.removeEventListener('planning-scenario-changed',handleScenarioChanged); window.removeEventListener('show-analysis-provenance',handleProvenance); window.removeEventListener('show-scenario-results',handleScenarioResults); });
 </script>
 
 <style scoped>

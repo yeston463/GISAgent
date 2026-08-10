@@ -1,0 +1,22 @@
+{
+  "version": "remote-2026-08-10",
+  "capabilities": [
+    {
+      "id": "skyline_analysis",
+      "enabled": true,
+      "aliases": ["天际线", "skyline", "城市轮廓"],
+      "requires": ["aoi", "buildings"],
+      "optional": [],
+      "operations": ["directional_height_profile"],
+      "tool": "skylineAnalysis",
+      "outputs": ["chart", "metric"],
+      "rendererKinds": ["chart", "metric"],
+      "dataRequirements": [],
+      "knowledge": {
+        "purpose": "Compare directional building-height profiles inside the current AOI.",
+        "sourceGuidance": "Use verified AOI boundaries and complete building footprints.",
+        "limitations": "This is a planning-screening result, not a statutory view-corridor assessment."
+      }
+    }
+  ]
+}

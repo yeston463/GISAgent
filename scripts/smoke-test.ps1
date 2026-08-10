@@ -3,6 +3,7 @@ param(
     [string]$PythonUrl = "http://127.0.0.1:8000",
     [string]$JavaUrl = "http://127.0.0.1:8080",
     [int]$AnalyzeTimeoutSeconds = 20,
+    [switch]$SkipDocker,
     [switch]$SkipAgent,
     [switch]$SkipCityEngine,
     [switch]$RequireLiveOsm
@@ -34,6 +35,28 @@ function Invoke-Json([string]$method, [string]$uri, $body, [int]$timeoutSeconds 
         }
     }
     return Invoke-RestMethod @params
+}
+
+function Invoke-Docker([string[]]$arguments) {
+    $output = & docker @arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ($output | Out-String)
+    }
+    return $output
+}
+
+if (-not $SkipDocker) {
+    try {
+        Invoke-Docker @("info", "--format", "{{.ServerVersion}}") | Out-Null
+        $redisPing = Invoke-Docker @("compose", "-p", "lc4j", "-f", (Join-Path $root "compose.yaml"), "exec", "-T", "redis", "redis-cli", "ping")
+        if (($redisPing | Out-String).Trim() -ne "PONG") {
+            throw "Redis did not return PONG"
+        }
+        Invoke-Docker @("compose", "-p", "lc4j", "-f", (Join-Path $root "compose.yaml"), "exec", "-T", "pgvector", "pg_isready", "-U", "postgres", "-d", "vectordb") | Out-Null
+        Pass "Docker Redis and pgvector are healthy"
+    } catch {
+        Fail "Docker Redis/pgvector health check failed: $($_.Exception.Message)"
+    }
 }
 
 try {

@@ -4,7 +4,6 @@ chcp 65001 >nul
 
 rem Start only the FastAPI GIS engine. Keep this window open to retain logs.
 set "ROOT=%~dp0"
-
 rem Load .env if present so GIS_PYTHON_EXE can be read from it.
 if exist "!ROOT!.env" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in ("!ROOT!.env") do (
@@ -52,7 +51,7 @@ exit /b 0
 
 :try_python
 if not defined PYTHON_EXE if exist "%~1" (
-  "%~1" -c "import fastapi,uvicorn" >nul 2>nul
+  "%~1" -c "import fastapi,uvicorn,rasterio" >nul 2>nul
   if not errorlevel 1 set "PYTHON_EXE=%~1"
 )
 goto :eof

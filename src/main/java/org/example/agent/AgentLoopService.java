@@ -117,6 +117,10 @@ public class AgentLoopService {
             Consumer<ExecutionTrace> traceListener) {
         gisContextService.activateSession(memoryId);
         List<ExecutionTrace> trace = new ArrayList<>();
+        if (isCurrentContextPlanningRequest(userMessage)) {
+            return executePlanningDemo(userMessage, userId,
+                    new TaskPlan(Intent.MODEL, Subject.CURRENT_CONTEXT, null), trace, traceListener);
+        }
         if (llmRoutingEnabled) { AgentResult routed = executeLlmSpatialRoute(userMessage, userId, memoryId, trace, traceListener); if (routed != null) return routed; }
         if (!llmRoutingEnabled) {
             AgentResult confirmedImport = executeConfirmedDataImport(userMessage, trace, traceListener);
@@ -352,11 +356,10 @@ public class AgentLoopService {
             return false;
         }
         String lower = userMessage.toLowerCase();
-        return lower.contains("cityengine")
-                && (lower.contains("geoscene")
-                || lower.contains("slpk")
-                || lower.contains("publish")
-                || lower.contains("generate"));
+        boolean cityEngineTarget = lower.contains("cityengine") || lower.contains("geoscene") || lower.contains("slpk");
+        boolean modelAction = lower.contains("publish") || lower.contains("generate")
+                || userMessage.contains("三维") || userMessage.contains("建模") || userMessage.contains("发布");
+        return cityEngineTarget && modelAction;
     }
 
     private boolean isFloodAnalysisRequest(String userMessage) {
@@ -469,7 +472,19 @@ public class AgentLoopService {
                     false, Map.of("source", "osm_overpass", "dataset", target, "featureCount", count), List.of(), trace,
                     Map.of("status", "Success", "analysisType", "data_import", "source", "osm_overpass", "dataset", target));
         } catch (IllegalArgumentException error) {
-            return new AgentResult(null, null, "OSM 导入失败：" + error.getMessage(), true, null, List.of(), trace,
+            JSONObject existingBuildings = contextObject("buildings");
+            int existingBuildingCount = existingBuildings == null || existingBuildings.getJSONArray("features") == null
+                    ? 0 : existingBuildings.getJSONArray("features").size();
+            String detail = "OSM 导入失败：" + error.getMessage();
+            addTrace(trace, listener, 2, "error", "OSM 数据未导入", detail, "error");
+            if (existingBuildingCount > 0) {
+                return new AgentResult(detail + "。当前会话已有 " + existingBuildingCount
+                                + " 个建筑要素，未被本次失败覆盖；可直接执行建筑指标分析，或稍后重试 OSM 导入。",
+                        List.of("执行建筑指标分析", "重试导入 OSM 建筑"), null, false, null, List.of(), trace,
+                        Map.of("status", "PartialSuccess", "code", error.getMessage(),
+                                "source", "current_context", "buildingCount", existingBuildingCount));
+            }
+            return new AgentResult(null, null, detail, true, null, List.of(), trace,
                     Map.of("status", "NeedsClarification", "code", error.getMessage()));
         }
     }
@@ -1808,12 +1823,16 @@ public class AgentLoopService {
                     getDouble(result, "mean_height", 0));
         }
         if ("flood".equalsIgnoreCase(type)) {
+            boolean buildingExposureAvailable = Boolean.TRUE.equals(result.get("building_exposure_available"));
+            String buildingExposure = buildingExposureAvailable
+                    ? String.format("%d potentially affected buildings", getInt(result, "affected_building_count", 0))
+                    : "building exposure was not evaluated because no complete building dataset is available";
             return String.format(
-                    "Flood hydrologic terrain screening completed: %d high-risk cells, %d medium-risk cells, and %d potentially affected buildings. "
+                    "Flood hydrologic terrain screening completed: %d high-risk cells, %d medium-risk cells, and %s. "
                             + "Under %.0f mm rainfall, the maximum screened depth is %.3f m (DEM depression fill, D8 routing, and drainage reduction).",
                     getInt(result, "high_risk_cell_count", 0),
                     getInt(result, "medium_risk_cell_count", 0),
-                    getInt(result, "affected_building_count", 0),
+                    buildingExposure,
                     getDouble(result, "rainfall_mm", 0),
                     getDouble(result, "max_estimated_depth_m", 0));
         }
