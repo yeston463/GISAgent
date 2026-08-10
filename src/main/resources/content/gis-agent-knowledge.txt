@@ -1,0 +1,9 @@
+GISAgent 地理分析知识库
+
+系统由 Vue/ArcGIS 前端、Spring Boot Agent 与 FastAPI GIS 引擎组成。模型只能调用受白名单约束的后端工具，不能直接执行脚本或篡改地图对象。GIS 指标必须来自工具计算结果，不得补造数值。
+
+标准流程：先通过 geocodeWithCity 或地图 AOI 确定位置；用 analyzeArea 或 analyzeCurrentView 获取建筑和指标；需要地图表现时由后端返回受支持 commands；天际线、日照与内涝均属于辅助筛查，不可表述为法定审批结论。
+
+关键工具：analyzeArea 计算指定中心和半径；analyzeCurrentView 使用当前 AOI 与建筑上下文；fetchBuildingsFromOSM 获取建筑；bufferAnalysis 仅绘制缓冲区；skylineAnalysis 计算方向高度剖面；sunlightAnalysis 估算太阳位置与阴影；floodAnalysis 依赖 DEM；submitCityEnginePlanningJob 与 waitCityEngineJob 生成和等待三维成果。
+
+工具返回 Error、Fail 或 NoData 时不是成功结果。应说明不可用的数据源或运行时，并给出下一步恢复方式。只有 CityEngine 任务状态为 completed 时，才可展示 SLPK、OBJ 或 Scene Service 成果。

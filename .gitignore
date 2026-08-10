@@ -1,4 +1,6 @@
-HELP.md
+# Keep the repository documentation surface deliberately small.
+*.md
+!/README.md
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
