@@ -42,6 +42,20 @@ GISAgent 是一个面向城市规划场景的 AI 辅助 GIS 分析系统。用�
 
 若只需启动基础容器，双击 `start-docker.bat`。容器端口仅绑定本机：Redis `6379`，pgvector `5432`。
 
+## 本地服务
+
+`start-dev.bat` 不会构建完整应用容器。它直接在 Windows 主机启动以下服务：
+
+| 服务 | 地址 | 启动方式 |
+| --- | --- | --- |
+| Vue 前端 | <http://127.0.0.1:5173> | Vite |
+| Java Agent 后端 | <http://127.0.0.1:8080> | Spring Boot |
+| Python GIS API | <http://127.0.0.1:8000/analysis/runtime> | FastAPI |
+| Redis | `127.0.0.1:6379` | Docker Compose |
+| pgvector | `127.0.0.1:5432` | Docker Compose |
+
+前端通过 Vite 代理访问 Java 与 Python 服务。关闭各自打开的终端窗口即可停止前端、Java 或 GIS 服务；基础容器可使用 `docker compose -p lc4j -f compose.yaml down` 停止。
+
 ## 知识图谱配置
 
 管理员登录后，在浏览器的“知识图谱工作台”中可填写能力 ID、别名、用途、验收语句与 JSON，或让 AI 先生成候选草稿；候选必须通过校验后才会发布。
@@ -75,13 +89,4 @@ Set-Location ..
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
 ```
 
-## 生产部署
-
-使用 `.env.production.example` 创建生产 `.env`，配置强密码、TLS 域名和所有外部凭据后执行：
-
-```powershell
-docker compose -f compose-prod.yaml build
-docker compose -f compose-prod.yaml up -d
-```
-
-生产环境仅由 Nginx 对外提供 `80/443`；Java、Python GIS、Redis 与 PostgreSQL 在 Docker 内网通信。请勿提交 `.env`、日志、构建产物、运行时工作区或 CityEngine/GeoScene 凭据。
+请勿提交 `.env`、日志、构建产物、运行时工作区或 CityEngine/GeoScene 凭据。
