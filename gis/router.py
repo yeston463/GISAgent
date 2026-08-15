@@ -80,6 +80,11 @@ class SiteSelectionRequest(_BaseRequest):
     exclusionDistanceM: float = Field(default=200, ge=0, le=50000)
 
 
+class NearestFacilityRequest(_BaseRequest):
+    candidates: Optional[Any] = None
+    facilities: Optional[Any] = None
+
+
 class BufferRequest(_BaseRequest):
     lon: float = Field(..., ge=-180, le=180)
     lat: float = Field(..., ge=-90, le=90)
@@ -315,6 +320,14 @@ async def execute_site_selection(payload: SiteSelectionRequest):
         return service.calculate_site_selection(payload.model_dump())
     except Exception as exc:
         return _server_error("site_selection", exc, analysis_type="site_selection")
+
+
+@app.post("/analysis/nearest-facility")
+async def execute_nearest_facility(payload: NearestFacilityRequest):
+    try:
+        return service.calculate_nearest_facility_distance(payload.model_dump())
+    except Exception as exc:
+        return _server_error("nearest_facility_distance", exc, analysis_type="nearest_facility_distance")
 
 
 @app.post("/analysis/dem/public-raster")

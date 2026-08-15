@@ -775,3 +775,99 @@ def _create_buffer_feature_approx(lon, lat, radius):
             "warning": "Approximate lon/lat buffer because neither ArcPy nor GeoPandas is available.",
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic building fallback (small towns / rural areas without OSM coverage)
+# --------------------------------------------------------------------------- #
+def _point_in_polygon(x, y, polygon_coords):
+    """Ray-casting point-in-polygon test against the outer ring (WGS84 lon/lat)."""
+    if not polygon_coords or not polygon_coords[0]:
+        return False
+    ring = polygon_coords[0]
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y):
+            denom = (yj - yi) or 1e-12
+            if x < (xj - xi) * (y - yi) / denom + xi:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _synthetic_buildings(aoi_geojson, max_buildings=40, seed=20260815):
+    """Generate a reproducible synthetic building grid inside an AOI.
+
+    Used only when OSM Overpass has no building footprints (small towns and
+    rural areas), so the full analysis pipeline can still be demonstrated.
+    Every feature is explicitly tagged ``source=synthetic`` and must never be
+    presented as measured survey data.
+    """
+    geom = _normalize_geometry(aoi_geojson)
+    if not geom or geom.get("type") != "Polygon":
+        # Accept a GeoJSON Feature wrapping a Polygon (the AOI payload format).
+        if isinstance(aoi_geojson, dict) and aoi_geojson.get("type") == "Feature":
+            geom = _normalize_geometry(aoi_geojson.get("geometry"))
+    if not geom or geom.get("type") != "Polygon":
+        return None
+    coords = geom.get("coordinates") or []
+    if not coords or not coords[0]:
+        return None
+    outer = coords[0]
+    minx = min(p[0] for p in outer)
+    maxx = max(p[0] for p in outer)
+    miny = min(p[1] for p in outer)
+    maxy = max(p[1] for p in outer)
+    width = maxx - minx
+    height = maxy - miny
+    if width <= 0 or height <= 0:
+        return None
+
+    import random
+    mid_lat = (miny + maxy) / 2.0
+    meters_per_deg_lon = max(1.0, 111_320.0 * math.cos(math.radians(mid_lat)))
+    meters_per_deg_lat = 111_320.0
+    # Adaptive grid: aim for ~60 m cells, capped to keep feature count sane.
+    cells_x = max(2, min(8, int(round(width * meters_per_deg_lon / 60.0))))
+    cells_y = max(2, min(8, int(round(height * meters_per_deg_lat / 60.0))))
+    rng = random.Random(seed)
+
+    features = []
+    count = 0
+    for gy in range(cells_y):
+        for gx in range(cells_x):
+            if count >= max_buildings:
+                break
+            cx = minx + (gx + 0.5) * width / cells_x
+            cy = miny + (gy + 0.5) * height / cells_y
+            if not _point_in_polygon(cx, cy, coords):
+                continue
+            half_w = rng.uniform(9.0, 18.0) / meters_per_deg_lon
+            half_d = rng.uniform(8.0, 15.0) / meters_per_deg_lat
+            height_m = rng.randint(18, 60)
+            floors = max(1, int(round(height_m / 3.0)))
+            rect = [
+                [cx - half_w, cy - half_d],
+                [cx + half_w, cy - half_d],
+                [cx + half_w, cy + half_d],
+                [cx - half_w, cy + half_d],
+                [cx - half_w, cy - half_d],
+            ]
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "id": "synthetic-%d" % (count + 1),
+                    "height": height_m,
+                    "floors": floors,
+                    "source": "synthetic",
+                    "type": "synthetic",
+                },
+                "geometry": {"type": "Polygon", "coordinates": [rect]},
+            })
+            count += 1
+    if not features:
+        return None
+    return {"type": "FeatureCollection", "features": features}

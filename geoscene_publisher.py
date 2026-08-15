@@ -699,8 +699,16 @@ def _request_json(url, fields=None, file_path=None, timeout=300):
         data = None
         headers = {}
     request = urllib.request.Request(url, data=data, headers=headers)
+    # Local GeoScene Enterprise must never route through a system proxy:
+    # development machines with a local HTTP proxy (e.g. 127.0.0.1:7897)
+    # otherwise fail the TLS handshake against the portal.
+    import ssl
+    handlers = [urllib.request.ProxyHandler({})]
+    if not VERIFY_SSL:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=_context()) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

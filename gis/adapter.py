@@ -231,12 +231,23 @@ def _call_overpass(query):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=min(OVERPASS_REQUEST_TIMEOUT_SECONDS, remaining)) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
-                    with _overpass_cache_lock:
-                        _overpass_cache[query] = {"stored_at": time.monotonic(), "payload": payload}
-                    _write_overpass_disk_cache(query, payload)
-                    return payload
+                # OSM Overpass is a public endpoint; a local system proxy
+                # (e.g. 127.0.0.1:7897) breaks its TLS handshake, so bypass it
+                # by clearing proxy env vars around the request.
+                saved_proxy = {}
+                for proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+                    if proxy_key in os.environ:
+                        saved_proxy[proxy_key] = os.environ.pop(proxy_key)
+                try:
+                    with urllib.request.urlopen(req, timeout=min(OVERPASS_REQUEST_TIMEOUT_SECONDS, remaining)) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                finally:
+                    for proxy_key, proxy_value in saved_proxy.items():
+                        os.environ[proxy_key] = proxy_value
+                with _overpass_cache_lock:
+                    _overpass_cache[query] = {"stored_at": time.monotonic(), "payload": payload}
+                _write_overpass_disk_cache(query, payload)
+                return payload
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                 errors.append(f"{endpoint}: {exc}")
         if time.monotonic() >= deadline:

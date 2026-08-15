@@ -139,6 +139,38 @@ def test_site_selection_rejects_mixed_point_and_polygon_candidates(client):
     assert resp.json()["status"] == "InvalidData"
 
 
+def test_nearest_facility_distance_returns_distance_and_bearing(client):
+    candidates = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"id": "candidate-a"},
+         "geometry": {"type": "Point", "coordinates": [121.4705, 31.2305]}},
+    ]}
+    facilities = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"id": "facility-a", "name": "社区服务中心"},
+         "geometry": {"type": "Point", "coordinates": [121.4706, 31.2305]}},
+        {"type": "Feature", "properties": {"id": "facility-b"},
+         "geometry": {"type": "Point", "coordinates": [121.4800, 31.2305]}},
+    ]}
+    resp = client.post("/analysis/execute", json={
+        "operation": "nearest_facility_distance",
+        "params": {"candidates": candidates, "facilities": facilities},
+    })
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["status"] == "Success"
+    assert body["nearest_features"]["features"][0]["properties"]["nearestFacilityId"] == "facility-a"
+    assert body["nearest_features"]["features"][0]["properties"]["nearestFacilityDistanceM"] > 0
+
+
+def test_nearest_facility_distance_requires_facilities(client):
+    resp = client.post("/analysis/execute", json={
+        "operation": "nearest_facility_distance",
+        "params": {"candidates": {"type": "FeatureCollection", "features": []}},
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "NoData"
+    assert "facilities" in resp.json()["missing_data"]
+
+
 def test_spatial_file_inspection_route_returns_ready_metadata(client, tmp_path, monkeypatch):
     root = tmp_path / "gis-inputs"
     path = root / "session" / "terrain.asc"

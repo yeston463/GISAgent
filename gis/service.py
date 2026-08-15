@@ -10,6 +10,7 @@ import heapq
 import math
 import hashlib
 import urllib.request
+import urllib.error
 import os
 import time
 import traceback
@@ -35,7 +36,43 @@ SPATIAL_OPERATIONS = {
     "sunlight": "sunlight",
     "flood": "flood",
     "site_selection": "site_selection",
+    "nearest_facility_distance": "nearest_facility_distance",
 }
+
+
+def _download_dem_tile(url, destination, attempts=3):
+    """Download one public DEM tile directly, without proxy, and reject partial files."""
+    destination = Path(destination)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    headers = {"User-Agent": "GISAgent/1.0", "Accept": "*/*", "Connection": "close"}
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if temporary.exists():
+                temporary.unlink()
+            request = urllib.request.Request(url, headers=headers)
+            with opener.open(request, timeout=45) as response, temporary.open("wb") as stream:
+                expected = response.headers.get("Content-Length")
+                expected_size = int(expected) if expected and expected.isdigit() else None
+                copied = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+                    copied += len(chunk)
+            if expected_size is not None and copied != expected_size:
+                raise IOError(f"DEM tile truncated: received {copied} of {expected_size} bytes")
+            temporary.replace(destination)
+            return
+        except Exception as exc:
+            last_error = exc
+            if temporary.exists():
+                temporary.unlink()
+            if attempt < attempts:
+                time.sleep(attempt)
+    raise IOError(f"direct DEM download failed after {attempts} attempts: {last_error}")
 
 
 def fetch_public_dem_raster(aoi):
@@ -64,7 +101,8 @@ def fetch_public_dem_raster(aoi):
         y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
         return max(0, min(n - 1, x)), max(0, min(n - 1, y))
     zoom, tiles = 9, []
-    for candidate in range(13, 7, -1):
+    # zoom 13 瓦片(4096²) merge/mask 耗时长，限到 12（~19m/px）换取更快完成。
+    for candidate in range(12, 7, -1):
         left, top = tile_xy(xmin, ymax, candidate); right, bottom = tile_xy(xmax, ymin, candidate)
         proposed = [(candidate, x, y) for x in range(left, right + 1) for y in range(top, bottom + 1)]
         if len(proposed) <= 36:
@@ -83,11 +121,21 @@ def fetch_public_dem_raster(aoi):
     work = root / "public-dem"; work.mkdir(parents=True, exist_ok=True)
     tile_paths = []
     try:
-        for _, x, y in tiles:
-            path = work / f"terrain-z{zoom}-{x}-{y}.tif"
-            if not path.exists():
-                urllib.request.urlretrieve(f"https://s3.amazonaws.com/elevation-tiles-prod/geotiff/{zoom}/{x}/{y}.tif", path)
-            tile_paths.append(path)
+        # 瓦片并行下载（每个 ~几秒；串行会让多瓦片 AOI 等很久）
+        from concurrent.futures import ThreadPoolExecutor
+        pending = []
+        with ThreadPoolExecutor(max_workers=min(8, len(tiles))) as pool:
+            for _, x, y in tiles:
+                path = work / f"terrain-z{zoom}-{x}-{y}.tif"
+                if not path.exists():
+                    pending.append(pool.submit(
+                        _download_dem_tile,
+                        f"https://s3.amazonaws.com/elevation-tiles-prod/geotiff/{zoom}/{x}/{y}.tif",
+                        path,
+                    ))
+                tile_paths.append(path)
+            for future in pending:
+                future.result()  # 传播下载异常，保持失败语义
         datasets = [rasterio.open(path) for path in tile_paths]
         mosaic, transform = merge(datasets)
         meta = datasets[0].meta.copy()
@@ -297,9 +345,84 @@ def execute_spatial_plan(payload):
             return calculate_flood_risk(args)
         if operation == "site_selection":
             return calculate_site_selection(args)
+        if operation == "nearest_facility_distance":
+            return calculate_nearest_facility_distance(args)
     except Exception as exc:
         return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
     return {"status": "Error", "stage": "spatial_plan", "message": "Operation did not produce a result"}
+
+
+def calculate_nearest_facility_distance(payload):
+    """Find the nearest facility for each candidate using straight-line metres.
+
+    Geometry is normalized through the existing model helpers; distance and
+    bearing use the same geodesic approximation as site-selection screening.
+    """
+    payload = payload or {}
+    candidates = model._features_from_source(payload.get("candidates"))
+    facilities = model._features_from_source(payload.get("facilities"))
+    missing = []
+    if not candidates:
+        missing.append("candidates")
+    if not facilities:
+        missing.append("facilities")
+    if missing:
+        return {"status": "NoData", "stage": "nearest_facility_distance",
+                "analysis_type": "nearest_facility_distance",
+                "missing_data": missing,
+                "message": "Candidate and facility point or polygon features are required."}
+
+    facility_rows = []
+    for index, feature in enumerate(facilities, start=1):
+        center = model._feature_centroid(feature)
+        if center:
+            props = dict(feature.get("properties") or {})
+            facility_rows.append((center, props.get("id") or props.get("name") or f"Facility {index}", props))
+    if not facility_rows:
+        return {"status": "InvalidData", "stage": "nearest_facility_distance",
+                "analysis_type": "nearest_facility_distance",
+                "message": "No facility feature contains usable geometry."}
+
+    rows = []
+    for index, candidate in enumerate(candidates, start=1):
+        center = model._feature_centroid(candidate)
+        if not center:
+            continue
+        distance, bearing, facility_id, facility_props = min(
+            (model._distance_and_bearing(center, target[0])[0],
+             model._distance_and_bearing(center, target[0])[1], target[1], target[2])
+            for target in facility_rows
+        )
+        props = dict(candidate.get("properties") or {})
+        props.update({
+            "candidateId": props.get("id") or props.get("name") or f"Candidate {index}",
+            "nearestFacilityId": facility_id,
+            "nearestFacilityName": facility_props.get("name") or facility_id,
+            "nearestFacilityDistanceM": round(distance, 2),
+            "nearestFacilityBearingDeg": round(bearing, 1),
+        })
+        rows.append({"type": "Feature", "properties": props, "geometry": candidate.get("geometry")})
+    if not rows:
+        return {"status": "NoData", "stage": "nearest_facility_distance",
+                "analysis_type": "nearest_facility_distance",
+                "message": "No candidate feature contains usable geometry."}
+
+    distances = [item["properties"]["nearestFacilityDistanceM"] for item in rows]
+    result_features = model._feature_collection(rows)
+    return {
+        "status": "Success", "stage": "nearest_facility_distance",
+        "analysis_type": "nearest_facility_distance",
+        "candidate_count": len(rows), "facility_count": len(facility_rows),
+        "min_distance_m": min(distances), "max_distance_m": max(distances),
+        "average_distance_m": round(sum(distances) / len(distances), 2),
+        "nearest_features": result_features,
+        "method": "geodesic_straight_line_centroid_distance",
+        "limitations": "Straight-line centroid distance only; road-network travel distance and facility capacity require authoritative network data.",
+        "commands": [
+            {"action": "addGeoJsonLayer", "params": {"layerId": "nearest-facility-distance", "title": "Nearest facility distance", "style": "nearestFacility", "visible": True, "data": result_features}},
+            {"action": "showAdvancedAnalysis", "params": {"analysisType": "nearest_facility_distance", "title": "Nearest facility distance", "candidateCount": len(rows), "facilityCount": len(facility_rows), "minDistanceM": min(distances), "averageDistanceM": round(sum(distances) / len(distances), 2), "limitations": "Straight-line centroid distance only."}},
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -346,9 +469,31 @@ def fetch_buildings_for_aoi(aoi_geojson):
     bbox = model._bounds_from_aoi(aoi_geojson)
     query = model._overpass_query(bbox)
 
-    raw = adapter._call_overpass(query)
+    raw = None
+    try:
+        raw = adapter._call_overpass(query)
+    except Exception as exc:
+        # Overpass unreachable (offline demo / proxy / overloaded node) is
+        # treated as "no external data" so the synthetic fallback can kick in.
+        raw = {"elements": [], "overpass_error": str(exc)[:200]}
     raw_features = model._elements_to_features(raw.get("elements", []))
     if not raw_features:
+        synthetic = model._synthetic_buildings(aoi_geojson)
+        if synthetic:
+            overpass_error = raw.get("overpass_error")
+            reason = "OSM Overpass 不可达" if overpass_error else "OSM Overpass 未返回建筑数据"
+            return {
+                "status": "Success",
+                "stage": "fetch_buildings",
+                "building_count": int(len(synthetic["features"])),
+                "buildings": synthetic,
+                "aoi": aoi_geojson,
+                "source": "synthetic",
+                "message": reason + "，已生成合成建筑（source=synthetic，仅供演示，不代表真实测绘成果）。",
+                "query_bbox": bbox,
+                "gis_backend": adapter._preferred_backend(),
+                "elapsed_ms": round((time.time() - started) * 1000),
+            }
         return {
             "status": "NoData",
             "stage": "fetch_buildings",
