@@ -23,6 +23,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "rag.auto-load=false",
         "spatial.knowledge-graph.url=",
+        "app.auth.enabled=true",
         "app.auth.admin-username=admin",
         "app.auth.admin-password=test-admin-pass-123",
         "app.auth.jwt-secret=0123456789abcdef0123456789abcdef0123456789abcdef",

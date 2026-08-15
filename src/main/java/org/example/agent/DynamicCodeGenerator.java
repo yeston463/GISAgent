@@ -125,6 +125,7 @@ public class DynamicCodeGenerator {
     }
 
     public void forgetDynamicTool(String name) {
+        if (toolRegistry != null) toolRegistry.removeDynamicTool(name);
         if (toolStore != null) toolStore.remove(name);
     }
 
@@ -296,10 +297,14 @@ public class DynamicCodeGenerator {
     }
 
     private void bindInputs(Context js, JSONObject context, JSONObject params) {
-        JSONObject safeContext = context == null ? new JSONObject() : context;
-        JSONObject safeParams = params == null ? new JSONObject() : params;
-        js.getBindings("js").putMember("contextJson", safeContext.toJSONString());
-        js.getBindings("js").putMember("paramsJson", safeParams.toJSONString());
+        // 动态工具由知识图谱注入：JS 的 context 应包含注册时的上下文快照与
+        // 运行时参数（会话 AOI/建筑/DEM 等由执行器合并进 params），参数优先，
+        // 这样生成的代码无论读 context 还是 params 都能拿到会话数据。
+        JSONObject merged = new JSONObject();
+        if (context != null) merged.putAll(context);
+        if (params != null) merged.putAll(params);
+        js.getBindings("js").putMember("contextJson", merged.toJSONString());
+        js.getBindings("js").putMember("paramsJson", params == null ? "{}" : params.toJSONString());
     }
 
     private String wrapScript(String code) {

@@ -36,6 +36,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -230,6 +231,87 @@ public class AgentController {
             return ResponseEntity.ok(knowledgeGraphRevisionService.publish(request.graph(), request.author(), request.note(), request.acceptanceTests()));
         } catch (IllegalArgumentException error) {
             return ResponseEntity.badRequest().body(Map.of("published", false, "code", "graph_rejected", "message", error.getMessage()));
+        }
+    }
+
+    @PostMapping("/capabilities/publish-dynamic")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Map<String, Object>> publishDynamicCapability(
+            @RequestBody DynamicCapabilityPublishRequest request, HttpServletRequest httpRequest) {
+        if (!executionGuard.isEnabled()) {
+            return ResponseEntity.status(404).body(Map.of("published", false, "code", "dynamic_execution_disabled"));
+        }
+        if (!executionGuard.authorize(httpRequest)) {
+            return ResponseEntity.status(403).body(Map.of("published", false, "code", "dynamic_execution_forbidden"));
+        }
+        if (!knowledgeGraphAdminGuard.authorize(httpRequest)) {
+            return ResponseEntity.status(403).body(Map.of("published", false, "code", "graph_admin_forbidden"));
+        }
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "dynamic_request_required"));
+        }
+        String toolName = request == null || request.name() == null ? "" : request.name().trim();
+        String capabilityId = request == null || request.capabilityId() == null || request.capabilityId().isBlank()
+                ? toolName : request.capabilityId().trim();
+        if (!toolName.matches("[a-z][a-zA-Z0-9_]{2,63}")) {
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "invalid_dynamic_tool_name"));
+        }
+        if (!capabilityId.matches("[a-z][a-z0-9_]{1,80}")) {
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "invalid_capability_id"));
+        }
+        if (toolRegistry.isDynamicTool(toolName)) {
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "dynamic_tool_already_exists"));
+        }
+        try {
+            JSONObject context = request.context() == null
+                    ? new JSONObject() : JSON.parseObject(JSON.toJSONString(request.context()));
+            DynamicCodeGenerator.CodeExecutionResult generated = codeGenerator.generateAndRegister(
+                    toolName, request.description(), request.requirement(), context);
+            if (!"Success".equals(generated.status())) {
+                return ResponseEntity.badRequest().body(Map.of("published", false, "code", "dynamic_generation_rejected",
+                        "message", generated.message(), "generatedCode", generated.generatedCode() == null ? "" : generated.generatedCode()));
+            }
+
+            String version = request.version() == null || request.version().isBlank()
+                    ? spatialCapabilityCatalog.version() + "-dynamic-" + System.currentTimeMillis() : request.version().trim();
+            List<String> aliases = request.aliases() == null ? List.of("动态方法", capabilityId) : request.aliases().stream()
+                    .filter(item -> item != null && !item.isBlank()).map(String::trim).distinct().toList();
+            if (aliases.isEmpty()) aliases = List.of("动态方法", capabilityId);
+            Map<String, Object> capability = new LinkedHashMap<>();
+            capability.put("id", capabilityId);
+            capability.put("enabled", true);
+            capability.put("aliases", aliases);
+            // List.of() empty lists are shared JVM singletons: fastjson would emit
+            // duplicate fields as {"$ref":...} objects instead of [] and break
+            // graph parsing, so each list field needs an independent instance.
+            capability.put("requires", request.requires() == null ? new ArrayList<>() : request.requires());
+            capability.put("optional", request.optional() == null ? new ArrayList<>() : request.optional());
+            capability.put("operations", request.operations() == null || request.operations().isEmpty() ? List.of("dynamic_compute") : request.operations());
+            capability.put("tool", toolName);
+            capability.put("outputs", request.outputs() == null || request.outputs().isEmpty() ? List.of("metric") : request.outputs());
+            capability.put("rendererKinds", request.rendererKinds() == null || request.rendererKinds().isEmpty() ? List.of("metric") : request.rendererKinds());
+            capability.put("dataRequirements", request.dataRequirements() == null ? new ArrayList<>() : request.dataRequirements());
+            capability.put("knowledge", Map.of("purpose", request.purpose() == null || request.purpose().isBlank()
+                    ? (request.description() == null ? "动态空间计算方法" : request.description()) : request.purpose(), "execution", "dynamic_sandbox"));
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("version", version);
+            root.put("capabilities", List.of(capability));
+            Map<String, List<String>> tests = Map.of(capabilityId,
+                    request.acceptanceUtterances() == null || request.acceptanceUtterances().isEmpty()
+                            ? List.of(aliases.get(0)) : request.acceptanceUtterances());
+            Map<String, Object> published = knowledgeGraphRevisionService.publish(
+                    JSON.toJSONString(root), request.author(), request.note(), tests);
+            Map<String, Object> response = new LinkedHashMap<>(published);
+            response.put("registeredTool", toolName);
+            response.put("capabilityId", capabilityId);
+            response.put("graph", JSON.toJSONString(root));
+            return ResponseEntity.ok(response);
+        } catch (IllegalArgumentException error) {
+            codeGenerator.forgetDynamicTool(toolName);
+            return ResponseEntity.badRequest().body(Map.of("published", false, "code", "dynamic_publish_rejected", "message", error.getMessage()));
+        } catch (Exception error) {
+            codeGenerator.forgetDynamicTool(toolName);
+            return ResponseEntity.status(500).body(Map.of("published", false, "code", "dynamic_publish_failed"));
         }
     }
 
@@ -444,6 +526,12 @@ public class AgentController {
     public record CapabilityGraphRequest(String graph, String author, String note, Map<String, List<String>> acceptanceTests) {}
 
     public record CapabilityGraphAiRequest(String capabilityId, String request, String candidateVersion) {}
+
+    public record DynamicCapabilityPublishRequest(
+            String name, String capabilityId, String description, String requirement, Map<String, Object> context,
+            String version, List<String> aliases, String purpose, List<String> acceptanceUtterances,
+            List<String> requires, List<String> optional, List<String> operations, List<String> outputs,
+            List<String> rendererKinds, List<Map<String, Object>> dataRequirements, String author, String note) {}
 
     public record CapabilityIntentTestRequest(List<String> utterances) {}
 

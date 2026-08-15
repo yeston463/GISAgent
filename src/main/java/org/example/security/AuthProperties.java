@@ -9,6 +9,12 @@ import java.util.List;
 @ConfigurationProperties(prefix = "app.auth")
 public class AuthProperties {
 
+    /**
+     * 是否启用全局 JWT 鉴权。默认 false：竞赛现场免登录（所有本地 API 直接可用）；
+     * 生产通过 AUTH_ENABLED=true 开启完整 JWT + RBAC 链路（配合 AUTH_JWT_SECRET 等）。
+     */
+    private boolean enabled = false;
+
     /** JWT 签名密钥。生产必须通过 AUTH_JWT_SECRET 注入，长度至少 32 字节。 */
     private String jwtSecret = "";
 
@@ -38,6 +44,14 @@ public class AuthProperties {
 
     /** 是否跳过健康检查端点的限流。 */
     private boolean rateLimitExcludeHealthCheck = true;
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
 
     public String getJwtSecret() {
         return jwtSecret;

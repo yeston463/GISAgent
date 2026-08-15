@@ -107,7 +107,10 @@ public class pyGisTools {
         Map<String, Object> res = new LinkedHashMap<>();
         res.put("status", "Success");
         res.put("action", "getScreenBuildings");
-        res.put("message", "Fallback only: ask the ArcGIS frontend to query loaded building tiles and upload them.");
+        res.put("source", "overpass");
+        res.put("message", "Ask the frontend to sync AOI buildings. Primary source: OSM Overpass "
+                + "2D footprints via /analysis/fetch_buildings; SceneLayer mesh extraction is kept "
+                + "as fallback where an osm-3d buildings basemap exists.");
         return res;
     }
 
@@ -272,6 +275,38 @@ public class pyGisTools {
         } catch (Exception error) {
             return Map.of("status", "Error", "stage", "site_selection",
                     "message", "Site-selection GeoJSON and weights must be valid JSON objects: " + error.getMessage());
+        }
+    }
+
+    @Tool("nearestFacilityDistance")
+    public Map<String, Object> nearestFacilityDistance(
+            @P("candidatesGeoJson") String candidatesGeoJson,
+            @P("facilitiesGeoJson") String facilitiesGeoJson) {
+        try {
+            JSONObject context = JSON.parseObject(contextService.getGeoJson());
+            if ((candidatesGeoJson == null || candidatesGeoJson.isBlank()) && context != null) {
+                Object candidates = context.get("candidates");
+                if (candidates != null) candidatesGeoJson = JSON.toJSONString(candidates);
+            }
+            if ((facilitiesGeoJson == null || facilitiesGeoJson.isBlank()) && context != null) {
+                Object facilities = context.get("facilities");
+                if (facilities != null) facilitiesGeoJson = JSON.toJSONString(facilities);
+            }
+            if (candidatesGeoJson == null || candidatesGeoJson.isBlank() || "null".equals(candidatesGeoJson)
+                    || facilitiesGeoJson == null || facilitiesGeoJson.isBlank() || "null".equals(facilitiesGeoJson)) {
+                return Map.of("status", "NoData", "stage", "nearest_facility_distance",
+                        "message", "candidatesGeoJson and facilitiesGeoJson are required.");
+            }
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("candidates", JSON.parseObject(candidatesGeoJson));
+            params.put("facilities", JSON.parseObject(facilitiesGeoJson));
+            Map<String, Object> result = postForMap("/execute", Map.of(
+                    "operation", "nearest_facility_distance", "params", params));
+            saveContextFromResult(result);
+            return result;
+        } catch (Exception error) {
+            return Map.of("status", "Error", "stage", "nearest_facility_distance",
+                    "message", "GeoJSON must be valid JSON objects: " + error.getMessage());
         }
     }
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.4",
+  "version": "1.5",
   "capabilities": [
     {
       "id": "urban_metrics",
@@ -124,6 +124,23 @@
         {"trigger": "rainfallMm > 200", "action": "require", "target": "dem_resolution_check"},
         {"trigger": "rainfallMm > 300", "action": "flag", "target": "warning_extreme_rainfall"}
       ]
+    },
+    {
+      "id": "nearest_facility_distance",
+      "aliases": ["最近设施距离", "设施最近距离", "离哪个设施最近", "nearest facility", "facility distance"],
+      "enabled": true,
+      "requires": ["candidates", "facilities"],
+      "optional": [],
+      "knowledge": {
+        "purpose": "计算每个候选点或候选面的质心到最近设施点或设施面的直线距离和方位。",
+        "limitations": "仅为质心直线距离筛查，不代表道路网络行驶距离、通行时间、设施容量或服务范围。"
+      },
+      "operations": ["nearest_facility_distance"],
+      "tool": "nearestFacilityDistance",
+      "outputs": ["vector", "metric", "table"],
+      "rendererKinds": ["vector", "metric", "table"],
+      "constraints": [],
+      "relations": []
     }
   ]
 }

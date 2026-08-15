@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -99,9 +100,14 @@ public class AgentLoopService {
     private GeoDataDiscoveryAgent geoDataDiscoveryAgent;
     @Autowired
     private LlmSpatialRouter llmSpatialRouter;
+    @Autowired
+    private IntentClassifier intentClassifier;
     @Value("${agent.llm-routing.enabled:true}") private boolean llmRoutingEnabled;
 
     private final AgentDecisionParser decisionParser = new AgentDecisionParser();
+    private static final Pattern RAINFALL_MM = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(?:mm|毫米)\\b");
+    private static final Pattern DURATION_HOURS = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(?:h|hr|hrs|hour|hours|小时|时)\\b");
+    private static final Pattern RETURN_PERIOD_YEARS = Pattern.compile("(?i)(\\d{1,4})\\s*(?:years?|yrs?|yr|年(?:一遇)?)");
 
     @Value("${agent.max-rounds:8}")
     private int maxRounds;
@@ -117,6 +123,16 @@ public class AgentLoopService {
             Consumer<ExecutionTrace> traceListener) {
         gisContextService.activateSession(memoryId);
         List<ExecutionTrace> trace = new ArrayList<>();
+        AgentResult rainfallUpdate = captureRainfallScenario(userMessage, trace, traceListener);
+        if (rainfallUpdate != null) {
+            return rainfallUpdate;
+        }
+        if (isParameterQuestion(userMessage)) {
+            return answerParameterQuestion(userMessage, memoryId, trace, traceListener);
+        }
+        if (!isSpatialQuestion(userMessage)) {
+            return answerGeneralQuestion(userMessage, trace, traceListener);
+        }
         if (isCurrentContextPlanningRequest(userMessage)) {
             return executePlanningDemo(userMessage, userId,
                     new TaskPlan(Intent.MODEL, Subject.CURRENT_CONTEXT, null), trace, traceListener);
@@ -337,6 +353,206 @@ public class AgentLoopService {
                         : Map.of("status", "Error", "code", terminalFailure));
     }
 
+    private boolean isSpatialQuestion(String message) {
+        return intentClassifier.classify(message) == IntentClassifier.Intent.SPATIAL_ANALYSIS;
+    }
+
+    private static final List<String> RAINFALL_INTENT_WORDS = List.of(
+            "降雨", "降水", "雨量", "毫米", "mm", "小时", "历时", "重现期", "年一遇",
+            "rainfall", "hour", "flood", "洪水", "内涝", "淹没");
+
+    private AgentResult captureRainfallScenario(
+            String message, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        if (message == null || message.isBlank()) return null;
+        Matcher rainfall = RAINFALL_MM.matcher(message);
+        Matcher duration = DURATION_HOURS.matcher(message);
+        Matcher period = RETURN_PERIOD_YEARS.matcher(message);
+        String lower = message.toLowerCase();
+        boolean regexHit = rainfall.find() || duration.find() || period.find();
+        boolean rainfallIntent = RAINFALL_INTENT_WORDS.stream().anyMatch(lower::contains);
+        if (!regexHit && !rainfallIntent) return null;
+
+        JSONObject existing = contextObject("rainfall_scenario");
+        boolean revising = existing != null && !existing.isEmpty();
+        // fresh 只含本次消息明确提到的数值，避免把会话里残留的旧情景当作"这次说的"
+        JSONObject fresh = new JSONObject();
+        if (rainfall.reset().find()) fresh.put("rainfallMm", Double.parseDouble(rainfall.group(1)));
+        if (duration.reset().find()) fresh.put("durationHours", Double.parseDouble(duration.group(1)));
+        if (period.reset().find()) fresh.put("returnPeriodYears", Integer.parseInt(period.group(1)));
+        boolean gotNewValue = !fresh.isEmpty();
+
+        // 消息明显在描述降雨情景，但正则未能完整解析（中文说法、复合句等）
+        // → 用 LLM 语义抽取补全，正则作为快速路径/兜底。
+        boolean complete = fresh.containsKey("rainfallMm")
+                && fresh.containsKey("durationHours")
+                && fresh.containsKey("returnPeriodYears");
+        if (rainfallIntent && !complete) {
+            JSONObject llmValues = extractRainfallByLlm(message);
+            if (llmValues != null) {
+                llmValues.forEach(fresh::put);
+                gotNewValue = true;
+            }
+        }
+        // 消息里没有任何降雨数值（如用户只说"执行洪水分析"）时不得拦截：
+        // 会话里残留的旧情景不能当作"这次说的"重新记录。
+        if (!gotNewValue) return null;
+        JSONObject values = existing == null ? new JSONObject() : existing;
+        fresh.forEach(values::put);
+        values.put("source", revising ? "conversation_user_revised" : "conversation_user_provided");
+        values.put("name", applyNameTemplate("{returnPeriodYears}yr-{durationHours}h-{rainfallMm}mm", values));
+        gisContextService.saveGeoJson(JSON.toJSONString(Map.of("rainfall_scenario", values)));
+        addTrace(trace, listener, 1, "chat", "已记录降雨情景", values.toJSONString(), "success");
+        AgentResult resumedWorkflow = resumePendingWorkflow(trace, listener);
+        if (resumedWorkflow != null) {
+            return resumedWorkflow;
+        }
+        String reply = "已记录这组降雨情景：" + values.get("rainfallMm") + " mm、"
+                + values.get("durationHours") + " 小时、" + values.get("returnPeriodYears")
+                + " 年一遇。现在只更新会话参数，不会自动执行洪水分析。";
+        return new AgentResult(reply, List.of(), null, false, null, List.of(), trace,
+                Map.of("status", "Success", "mode", "rainfall_parameter_update"));
+    }
+
+    /**
+     * LLM 语义抽取降雨情景参数：理解任意中文/英文表达（含复合句），
+     * 输出经范围校验的 JSON。任何失败都返回 null，由正则路径兜底。
+     */
+    private JSONObject extractRainfallByLlm(String message) {
+        String prompt = "你是降雨情景参数抽取器。从用户消息中提取三个参数："
+                + "rainfallMm（降雨量，毫米）、durationHours（降雨历时，小时）、returnPeriodYears（重现期，年）。"
+                + "规则：只输出一个 JSON 对象，不要输出任何其他文字或 Markdown；"
+                + "消息中没有明确提到的字段必须为 null，绝对不要猜测或推断数值；"
+                + "数值使用数字类型。用户消息：" + message;
+        try {
+            String raw = chatLanguageModel.generate(prompt);
+            if (raw == null || raw.isBlank()) return null;
+            String trimmed = raw.trim();
+            if (trimmed.startsWith("```")) {
+                int firstLine = trimmed.indexOf('\n');
+                if (firstLine >= 0) trimmed = trimmed.substring(firstLine + 1);
+                if (trimmed.endsWith("```")) trimmed = trimmed.substring(0, trimmed.length() - 3);
+                trimmed = trimmed.trim();
+            }
+            JSONObject parsed = JSON.parseObject(trimmed);
+            if (parsed == null) return null;
+            JSONObject result = new JSONObject();
+            Double mm = parsed.getDouble("rainfallMm");
+            if (mm != null && mm > 0 && mm <= 500) result.put("rainfallMm", mm);
+            Double hours = parsed.getDouble("durationHours");
+            if (hours != null && hours > 0 && hours <= 720) result.put("durationHours", hours);
+            Integer years = parsed.getInteger("returnPeriodYears");
+            if (years != null && years >= 1 && years <= 1000) result.put("returnPeriodYears", years);
+            return result.isEmpty() ? null : result;
+        } catch (RuntimeException error) {
+            return null;
+        }
+    }
+
+    /**
+     * 规划前后对比：现状指标（规划前） vs CityEngine 方案参数（规划后）。
+     * 让评审能直观看到规划带来的差异。
+     */
+    private String buildPlanningComparison(Map<String, Object> beforeMetrics, Map<String, Object> planningResult) {
+        StringBuilder sb = new StringBuilder("\n\n【规划前后对比】");
+        int count = getInt(beforeMetrics, "building_count", 0);
+        double meanH = getDouble(beforeMetrics, "mean_height", getDouble(beforeMetrics, "avgHeightM", 0));
+        double far = getDouble(beforeMetrics, "far", 0);
+        if (count > 0 || meanH > 0 || far > 0) {
+            sb.append("\n规划前（现状）：");
+            if (count > 0) sb.append(count).append(" 栋建筑");
+            if (meanH > 0) sb.append("，平均高度约 ").append(Math.round(meanH)).append(" 米");
+            if (far > 0) sb.append("，现状容积率 ").append(String.format(Locale.ROOT, "%.2f", far));
+        }
+        Map<String, Object> requirements = asMap(planningResult == null ? null : planningResult.get("requirements"));
+        if (requirements != null) {
+            sb.append("\n规划后（方案）：");
+            Object maxH = requirements.get("maxBuildingHeight");
+            if (maxH != null) sb.append("目标最高 ").append(maxH).append(" 米");
+            Object floors = requirements.get("floorHeight");
+            if (floors != null) sb.append("，层高 ").append(floors).append(" 米");
+            Object lot = requirements.get("lotCoverage");
+            if (lot != null) sb.append("，地块覆盖率 ").append(lot);
+            Object setback = requirements.get("setback");
+            if (setback != null) sb.append("，退界 ").append(setback).append(" 米");
+            Object roof = requirements.get("roofType");
+            if (roof != null) sb.append("，屋顶 ").append(roof);
+        }
+        if (sb.toString().trim().endsWith("【规划前后对比】")) return "";
+        return sb.toString();
+    }
+
+    private boolean isParameterQuestion(String message) {        if (message == null || message.isBlank()) return false;
+        String value = message.toLowerCase();
+        boolean asksAboutSettings = List.of("参数", "配置", "默认值", "阈值", "输入要求", "需要什么数据", "怎么设置", "取值范围")
+                .stream().anyMatch(value::contains);
+        boolean asksToRun = List.of("执行", "运行", "计算", "开始分析", "进行分析", "做分析", "开始洪水", "设置为", "改为", "调整为")
+                .stream().anyMatch(value::contains);
+        return asksAboutSettings && !asksToRun;
+    }
+
+    private AgentResult answerParameterQuestion(
+            String message, String memoryId, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        String value = message == null ? "" : message.toLowerCase();
+        String context = currentParameterSnapshot(memoryId, value);
+        String prompt = "你是 GISAgent 的参数问答助手。用户只是在询问参数，不要执行任何空间分析，不要返回 JSON 或编号清单。"
+                + "请根据当前会话内存快照，用自然中文回答；区分‘当前内存实际值’与‘系统默认/约束’。"
+                + "如果内存没有该值，明确说当前没有，不要编造。\n会话内存快照：\n" + context
+                + "\n用户问题：" + (message == null ? "" : message);
+        String reply = null;
+        try { reply = chatLanguageModel.generate(prompt); } catch (RuntimeException ignored) { }
+        if (reply == null || reply.isBlank()) {
+            reply = "当前会话参数快照如下：\n" + context;
+        }
+        addTrace(trace, listener, 1, "chat", "参数说明", "只读取配置，不执行空间分析", "success");
+        return new AgentResult(reply.trim(), List.of(), null, false, null, List.of(), trace,
+                Map.of("status", "Success", "mode", "parameter_help"));
+    }
+
+    private String currentParameterSnapshot(String memoryId, String question) {
+        try {
+            JSONObject context = JSON.parseObject(gisContextService.getGeoJson(memoryId));
+            if (context == null) context = new JSONObject();
+            StringBuilder snapshot = new StringBuilder();
+            snapshot.append("contextVersion=").append(context.getLongValue("contextVersion"));
+            snapshot.append("; hasAoi=").append(context.containsKey("aoi"));
+            snapshot.append("; hasDem=").append(context.containsKey("dem"));
+            Object rainfall = context.get("rainfall_scenario");
+            snapshot.append("; rainfall_scenario=").append(rainfall == null ? "当前内存没有" : JSON.toJSONString(rainfall));
+            if (question.contains("洪水") || question.contains("内涝") || question.contains("降雨")
+                    || question.contains("降水") || question.contains("重现期") || question.contains("flood")) {
+                snapshot.append("; systemDefaults=rainfallMm 必须大于0且建议不超过500mm，returnPeriodYears 默认20年且允许1-1000年，durationHours建议填写；当前模型为Priority-Flood+D8径流筛查");
+            }
+            return snapshot.toString();
+        } catch (RuntimeException error) {
+            return "当前内存暂不可读；系统默认值：rainfallMm>0，returnPeriodYears默认20年，允许1-1000年。";
+        }
+    }
+
+    private AgentResult answerGeneralQuestion(
+            String message, List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        addTrace(trace, listener, 1, "chat", "普通问答", "不调用空间分析工具", "running");
+        String prompt = """
+                你是 GISAgent 的本地助手。回答普通问答，不调用工具，不要求 JSON。
+                对系统参数、使用方法、功能说明的问题，简洁说明：当前可用空间能力包括 AOI、建筑指标、天际线、日照、DEM/内涝、选址、方案比选和三维成果；具体运行参数以界面、环境配置和工具结果为准。不要编造未提供的配置值。
+                用户问题：
+                """ + (message == null ? "" : message);
+        try {
+            String reply = chatLanguageModel.generate(prompt);
+            if (reply != null && !reply.isBlank()) {
+                addTrace(trace, listener, 1, "complete", "普通问答完成", "已生成回答", "success");
+                return new AgentResult(reply.trim(), List.of(), null, false, null, List.of(), trace,
+                        Map.of("status", "Success", "mode", "chat"));
+            }
+        } catch (RuntimeException ignored) {
+            // Keep a usable local reply when the chat model is temporarily unavailable.
+        }
+        String fallback = "当前可用功能包括 AOI、建筑指标、天际线、日照、DEM/内涝、选址、方案比选和三维成果。"
+                + "具体运行参数请查看界面状态、.env 配置或对应分析结果。";
+        addTrace(trace, listener, 1, "complete", "普通问答降级完成", "模型不可用，返回本地说明", "success");
+        return new AgentResult(fallback, List.of(), null, false, null, List.of(), trace,
+                Map.of("status", "Success", "mode", "chat_fallback"));
+    }
+
     private boolean isPlanningDemoRequest(String userMessage) {
         if (userMessage == null) {
             return false;
@@ -382,9 +598,8 @@ public class AgentLoopService {
         LlmSpatialRouter.Route route = llmSpatialRouter.route(message);
         if (route == null || "none".equals(route.kind())) return null;
         if ("unavailable".equals(route.kind())) {
-            addTrace(trace, listener, 1, "llm_plan", "LLM 空间路由不可用", route.diagnostic(), "failed");
-            return new AgentResult("当前未得到可验证的空间工具选择，未执行任何分析。请稍后重试。", null, null, false, null,
-                    List.of(), trace, Map.of("status", "Unavailable", "reason", route.diagnostic()));
+            addTrace(trace, listener, 1, "llm_plan", "LLM 空间路由不可用，回退常规流程", route.diagnostic(), "waiting");
+            return null;
         }
         addTrace(trace, listener, 1, "llm_plan", "LLM 选择空间计划", "kind=" + route.kind(), "success");
         if ("discovery".equals(route.kind())) return executeDataDiscovery(route.datasets(), trace, listener);
@@ -604,6 +819,7 @@ public class AgentLoopService {
             case "sunlight_analysis" -> "日照与阴影筛查";
             case "flood_analysis" -> "洪水分析";
             case "urban_metrics" -> "建筑指标分析";
+            case "nearest_facility_distance" -> "nearest facility distance";
             default -> capabilityId;
         };
 
@@ -642,6 +858,14 @@ public class AgentLoopService {
                 "capability=" + capabilityId + ", tool=" + prepared.plan().tool(), "running");
         JSONObject params = new JSONObject();
         params.putAll(prepared.plan().params());
+        if (toolRegistry.isDynamicTool(prepared.plan().tool())) {
+            // 动态工具（知识图谱注入的 JS 能力）需要访问当前会话上下文
+            // （AOI/建筑/DEM 等），否则其代码只能看到注册时的空快照。
+            JSONObject session = JSON.parseObject(gisContextService.getGeoJson());
+            if (session != null) {
+                session.forEach((key, value) -> params.putIfAbsent(key, value));
+            }
+        }
         Map<String, Object> result = asMap(invokeTool(prepared.plan().tool(), params));
         if (result != null) {
             result = new LinkedHashMap<>(result);
@@ -670,6 +894,10 @@ public class AgentLoopService {
             metrics = validationLayer.validateMetrics(result);
             reply = buildMetricReply(metrics);
             saveAnalysis(userId, userMessage, metrics);
+        } else if (toolRegistry.isDynamicTool(prepared.plan().tool())) {
+            // 知识图谱注入的动态能力：结果直接作为指标呈现（不套标准指标结构）。
+            metrics = result;
+            reply = buildDynamicReply(result, displayName);
         } else {
             reply = "“" + displayName + "”已执行，但未返回标准指标。";
         }
@@ -1068,6 +1296,7 @@ public class AgentLoopService {
                     + "\n\n- CityEngine 作业：" + jobId
                     + "\n- Python 脚本：" + script
                     + "\n- CGA 规则：" + rule
+                    + buildPlanningComparison(metrics, completed)
                     + outputText;
             suggestions = List.of("下载并检查 SLPK", "将 SLPK 加载到 ArcGIS Scene", "根据效果继续调整规划参数");
         } else if ("failed".equalsIgnoreCase(status)) {
@@ -1813,9 +2042,36 @@ public class AgentLoopService {
         );
     }
 
+    /**
+     * 动态能力（知识图谱注入的 JS）的通用结果回复：把返回的数值/文本字段
+     * 拼成自然语言说明，控制字段（status/commands/trace 等）不展示。
+     */
+    private String buildDynamicReply(Map<String, Object> result, String displayName) {
+        List<String> ignored = List.of("status", "analysis_type", "analysisType", "commands",
+                "trace", "provenance", "quality", "message", "missing_data", "missingData", "stage");
+        StringBuilder reply = new StringBuilder("已完成“" + displayName + "”：");
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, Object> entry : result.entrySet()) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+            if (ignored.contains(key) || value == null) continue;
+            if (value instanceof Number number) {
+                parts.add(key + "=" + (number.doubleValue() == Math.rint(number.doubleValue())
+                        ? String.valueOf(number.longValue()) : String.format(Locale.ROOT, "%.2f", number.doubleValue())));
+            } else if (value instanceof String text && !text.isBlank()) {
+                parts.add(key + "=" + text);
+            }
+        }
+        if (parts.isEmpty()) {
+            reply.append("动态计算已完成（未返回可展示字段）。");
+        } else {
+            reply.append(String.join("，", parts)).append("。");
+        }
+        return reply.toString();
+    }
+
     private String buildAdvancedReply(Map<String, Object> result) {
-        String type = String.valueOf(result.getOrDefault("analysis_type", "advanced"));
-        if ("skyline".equalsIgnoreCase(type)) {
+        String type = String.valueOf(result.getOrDefault("analysis_type", "advanced"));        if ("skyline".equalsIgnoreCase(type)) {
             return String.format(
                     "已完成天际线形态筛查：分析了 %d 栋建筑，最高建筑约 %.1f 米，平均高度约 %.1f 米。结果为基于建筑中心点和属性高度的方向剖面，不包含地形遮挡。",
                     getInt(result, "building_count", 0),

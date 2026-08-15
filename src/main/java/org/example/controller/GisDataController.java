@@ -42,7 +42,7 @@ public class GisDataController {
     private static final Set<String> VECTOR_EXTENSIONS = Set.of("geojson", "json", "gpkg", "zip", "shp");
     private static final Set<String> RASTER_EXTENSIONS = Set.of("asc", "tif", "tiff");
     private static final Set<String> CONTEXT_DATASETS = Set.of(
-            "aoi", "buildings", "dem", "drainage_network", "river_network");
+            "aoi", "buildings", "dem", "drainage_network", "river_network", "candidates", "facilities");
     private static final long MAX_VECTOR_BYTES = 100L * 1024 * 1024;
     private static final long MAX_RASTER_BYTES = 100L * 1024 * 1024;
 
@@ -69,6 +69,32 @@ public class GisDataController {
     @GetMapping("/context")
     public Map<String, Object> contextStatus(@RequestParam(defaultValue = "default") String memoryId) {
         return describeContext(memoryId, Map.of());
+    }
+
+    /** 返回内置城市建筑数据包（离线可用），供前端切换建筑数据源。 */
+    @GetMapping("/demo-buildings")
+    public ResponseEntity<Map<String, Object>> demoBuildings(
+            @RequestParam(defaultValue = "beijing") String city) {
+        if (!Set.of("beijing", "guangzhou").contains(city)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "InvalidData", "code", "unsupported_city",
+                    "supported", List.of("beijing", "guangzhou")));
+        }
+        Path file = Path.of(System.getProperty("user.dir"), "demo-data", "city-buildings", city + ".geojson");
+        if (!Files.isRegularFile(file)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                    "status", "Error", "code", "city_package_missing",
+                    "message", "数据包缺失：" + file));
+        }
+        try {
+            String json = Files.readString(file, StandardCharsets.UTF_8);
+            return ResponseEntity.ok(Map.of(
+                    "status", "Success", "city", city, "data", JSON.parseObject(json)));
+        } catch (IOException error) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                    "status", "Error", "code", "city_package_unreadable",
+                    "message", error.getMessage()));
+        }
     }
 
     @PostMapping("/data-discovery")
@@ -116,6 +142,15 @@ public class GisDataController {
         response.put("status", "Success");
         response.put("contextSaved", true);
         response.put("demo", true);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/clear-demo-context")
+    public ResponseEntity<Map<String, Object>> clearDemoContext(@RequestBody(required = false) DemoContextRequest request) {
+        String memoryId = request == null ? "default" : safeSession(request.memoryId());
+        boolean cleared = contextService.clearDemoContext(memoryId);
+        Map<String, Object> response = describeContext(memoryId, Map.of("demoCleared", cleared));
+        response.put("status", "Success");
         return ResponseEntity.ok(response);
     }
 
@@ -507,6 +542,9 @@ public class GisDataController {
         response.put("hasAoi", hasAoi);
         response.put("hasBuildings", buildingCount > 0);
         response.put("buildingCount", buildingCount);
+        if (context != null && context.get("demoId") != null) {
+            response.put("demoId", context.get("demoId"));
+        }
         if (hasAoi) response.put("aoi", context.get("aoi"));
         if (context != null && context.get("rainfall_scenario") != null) {
             response.put("rainfallScenario", context.get("rainfall_scenario"));
@@ -514,7 +552,7 @@ public class GisDataController {
         List<String> availableData = new ArrayList<>();
         if (hasAoi) availableData.add("aoi");
         if (buildingCount > 0) availableData.add("buildings");
-        for (String dataset : List.of("dem", "rainfall_scenario", "drainage_network", "river_network")) {
+        for (String dataset : List.of("dem", "rainfall_scenario", "drainage_network", "river_network", "candidates", "facilities")) {
             if (context != null && context.get(dataset) != null) availableData.add(dataset);
         }
         response.put("availableData", availableData);

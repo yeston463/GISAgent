@@ -64,6 +64,17 @@ public class AiConfig {
 
     @Bean("spatialRouterModel")
     public ChatLanguageModel spatialRouterModel() {
+        // Same DeepSeek-first policy as the primary chat model, so intent
+        // routing prefers the configured DeepSeek key and only falls back to
+        // the DashScope key when no DeepSeek key is provided.
+        if (deepSeekApiKey != null && !deepSeekApiKey.isBlank()) {
+            return OpenAiChatModel.builder()
+                    .apiKey(deepSeekApiKey)
+                    .baseUrl(routerBaseUrl)
+                    .modelName(routerModelName)
+                    .temperature(0.0)
+                    .build();
+        }
         return OpenAiChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(chatBaseUrl)

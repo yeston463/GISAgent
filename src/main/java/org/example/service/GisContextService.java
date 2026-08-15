@@ -122,6 +122,20 @@ public class GisContextService {
         return context == null ? 0 : context.getLongValue("contextVersion");
     }
 
+    /** Remove only the bundled demo payload from a session; never clear user data. */
+    public synchronized boolean clearDemoContext(String sessionId) {
+        String key = normalizeSession(sessionId);
+        JSONObject context = JSON.parseObject(contexts.getOrDefault(key, "{}"));
+        if (context == null || !context.containsKey("demoId")) {
+            return false;
+        }
+        context.clear();
+        context.put("contextVersion", 0);
+        contexts.put(key, context.toJSONString());
+        persist();
+        return true;
+    }
+
     public boolean acquireEditLock(String memoryId, String userId, int ttlSeconds) {
         String key = normalizeSession(memoryId);
         long now = System.currentTimeMillis();

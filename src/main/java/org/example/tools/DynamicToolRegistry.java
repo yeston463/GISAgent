@@ -114,6 +114,10 @@ public class DynamicToolRegistry {
         return removed;
     }
 
+    public boolean isDynamicTool(String name) {
+        return name != null && dynamicTools.containsKey(name);
+    }
+
     /**
      * 调用工具
      */

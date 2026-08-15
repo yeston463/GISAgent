@@ -5,6 +5,9 @@ spring:
     redis:
       host: localhost
       port: 6379
+      # Redis 容器由 compose.yaml 强制要求强密码（REDIS_PASSWORD）。
+      # 之前未注入时健康检查 DOWN、会话记忆静默失效；本地免密 Redis 可留空。
+      password: ${REDIS_PASSWORD:}
   datasource:
     url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/vectordb}
     username: ${POSTGRES_USER:postgres}
@@ -63,6 +66,8 @@ server:
 # AUTH_CORS_ORIGINS        允许的跨域来源（逗号分隔）。生产只填正式域名。
 app:
   auth:
+    # false=竞赛现场免登录（所有本地 API 直接可用）；生产必须设 AUTH_ENABLED=true 并配齐下方密钥。
+    enabled: ${AUTH_ENABLED:false}
     jwt-secret: ${AUTH_JWT_SECRET:}
     jwt-ttl-minutes: ${AUTH_JWT_TTL_MINUTES:720}
     jwt-issuer: lc4j-backend

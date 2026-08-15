@@ -66,6 +66,9 @@ public class LlmSpatialRouter {
     }
 
     public Route route(String request) {
+        if (!looksLikeSpatialRequest(request)) {
+            return new Route("none", List.of(), List.of(), null, null, null);
+        }
         long startedAt = System.nanoTime();
         Route strictRoute = strictDeepSeekRoute(request);
         long strictElapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
@@ -139,7 +142,22 @@ public class LlmSpatialRouter {
                 log.warn("LLM spatial routing compatibility attempt {} failed: {}", attempt, error.getMessage());
             }
         }
-        return new Route("unavailable", List.of(), List.of(), null, failure, null);
+        // A malformed router response must never block the normal chat path.
+        // The caller can still use deterministic planners or answer normally.
+        return new Route("none", List.of(), List.of(), null, failure, null);
+    }
+
+    private boolean looksLikeSpatialRequest(String request) {
+        if (request == null || request.isBlank()) return false;
+        String value = request.toLowerCase();
+        return List.of(
+                "gis", "地图", "地块", "红线", "aoi", "坐标", "经纬度", "范围", "缓冲区",
+                "建筑", "道路", "水系", "容积率", "密度", "天际线", "日照", "洪水", "内涝",
+                "淹没", "选址", "dem", "高程", "地形", "遥感", "空间分析", "cityengine",
+                "geoscene", "slpk", "scene server", "三维", "行政区", "地点",
+                "降雨", "降水", "暴雨", "积水", "采光", "挡光", "消防站", "医院",
+                "设施", "坡度", "洼地", "径流", "养老", "学校", "适宜性", "开发强度"
+        ).stream().anyMatch(value::contains);
     }
 
     private Route strictDeepSeekRoute(String request) {

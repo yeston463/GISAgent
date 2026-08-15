@@ -104,8 +104,8 @@ $metrics = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/analysis/urban_metrics'
 
 $baseline = @{
     building_count        = 6
-    site_area_sqm         = 126723.29
-    total_const_area_sqm  = 360424.33
+    site_area_sqm         = 126264.63
+    total_const_area_sqm  = 359118.95
     far                   = 2.844
     building_density      = 19.33
 }

@@ -57,6 +57,9 @@ public class DataAvailabilityChecker {
         for (String key : List.of("dem", "rainfall_scenario", "drainage_network", "river_network")) {
             if (context.containsKey(key) && context.get(key) != null) available.add(key);
         }
+        for (String key : List.of("candidates", "facilities")) {
+            if (hasFeatures(context.get(key))) available.add(key);
+        }
     }
 
     public record Availability(Set<String> available, Set<String> missing, long contextVersion) {

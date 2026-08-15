@@ -27,28 +27,33 @@ if not defined CITYENGINE_RUNTIME_ROOT set "CITYENGINE_RUNTIME_ROOT=C:\GISAgentC
 powershell.exe -NoProfile -Command "$p=$env:CITYENGINE_RUNTIME_ROOT; try {$null=[IO.Path]::GetFullPath($p)} catch {exit 1}; foreach($c in $p.ToCharArray()){if([int]$c -gt 127){exit 2}}" >nul
 if errorlevel 1 (
   echo [ERROR] CITYENGINE_RUNTIME_ROOT must be a valid ASCII-only path.
+  pause
   exit /b 1
 )
 
 if not defined QWEN-APIKEY (
   echo [ERROR] Missing QWEN-APIKEY.
   echo         Copy .env.example to .env and set the DashScope key.
+  pause
   exit /b 1
 )
 if not exist "!ROOT!pom.xml" (
   echo [ERROR] pom.xml not found: "!ROOT!"
+  pause
   exit /b 1
 )
 if not exist "!ROOT!main.py" (
   echo [ERROR] main.py not found: "!ROOT!"
+  pause
   exit /b 1
 )
 if not exist "!FRONTEND!\package.json" (
   echo [ERROR] Frontend package.json not found: "!FRONTEND!"
+  pause
   exit /b 1
 )
 
-if not exist "!ROOT!start-java-backend.ps1" (echo [ERROR] Java backend launcher not found.& exit /b 1)
+if not exist "!ROOT!start-java-backend.ps1" (echo [ERROR] Java backend launcher not found.& pause& exit /b 1)
 set "PYTHON_EXE="
 if defined PYTHON_REQUEST if exist "!PYTHON_REQUEST!" set "PYTHON_EXE=!PYTHON_REQUEST!"
 if not defined PYTHON_EXE (
@@ -58,14 +63,15 @@ if not defined PYTHON_EXE (
 if not defined PYTHON_EXE (
   for /f "delims=" %%P in ('where python 2^>nul') do if not defined PYTHON_EXE set "PYTHON_EXE=%%P"
 )
-if not defined PYTHON_EXE (echo [ERROR] Python not found. Set GIS_PYTHON_EXE in .env or install Python.& exit /b 1)
-where npm >nul 2>nul || (echo [ERROR] npm not found.& exit /b 1)
-where docker >nul 2>nul || (echo [ERROR] Docker CLI not found.& exit /b 1)
-
-if not defined GIS_AUTO_START_DOCKER set "GIS_AUTO_START_DOCKER=1"
+if not defined PYTHON_EXE (echo [ERROR] Python not found. Set GIS_PYTHON_EXE in .env or install Python.& pause& exit /b 1)
+where npm >nul 2>nul || (echo [ERROR] npm not found.& pause& exit /b 1)
+rem Docker is managed separately by start-docker.bat. Set this to 1 only
+rem when an all-in-one launch is explicitly required.
+if not defined GIS_AUTO_START_DOCKER set "GIS_AUTO_START_DOCKER=0"
 if /I "%GIS_AUTO_START_DOCKER%"=="0" (
-  echo [INFO] Docker startup skipped by GIS_AUTO_START_DOCKER=0.
+  echo [INFO] Docker startup skipped. Run start-docker.bat first when Redis/pgvector are needed.
 ) else (
+  where docker >nul 2>nul || (echo [ERROR] Docker CLI not found.& pause& exit /b 1)
   echo Starting Redis and pgvector with Docker Compose ...
   docker info >nul 2>nul
   if errorlevel 1 (
@@ -105,7 +111,7 @@ if not exist "!FRONTEND!\node_modules" (
   echo Installing frontend dependencies ...
   pushd "!FRONTEND!"
   call npm install
-  if errorlevel 1 (popd& echo [ERROR] npm install failed.& exit /b 1)
+  if errorlevel 1 (popd& echo [ERROR] npm install failed.& pause& exit /b 1)
   popd
 )
 
@@ -117,15 +123,15 @@ if errorlevel 1 (
   if not exist "!PYTHON_RUNTIME_EXE!" (
     echo Creating local Python environment ...
     call "!PYTHON_EXE!" -m venv "!PYTHON_VENV!"
-    if errorlevel 1 (echo [ERROR] Failed to create local Python environment.& exit /b 1)
+    if errorlevel 1 (echo [ERROR] Failed to create local Python environment.& pause& exit /b 1)
   )
   echo Installing Python GIS dependencies into .venv ...
   call "!PYTHON_RUNTIME_EXE!" -m pip install -r "!ROOT!requirements.txt"
-  if errorlevel 1 (echo [ERROR] Python dependency installation failed.& exit /b 1)
+  if errorlevel 1 (echo [ERROR] Python dependency installation failed.& pause& exit /b 1)
 )
 
 call "!PYTHON_RUNTIME_EXE!" -c "import fastapi,uvicorn,rasterio" >nul 2>nul
-if errorlevel 1 (echo [ERROR] Python GIS runtime dependencies are unavailable.& exit /b 1)
+if errorlevel 1 (echo [ERROR] Python GIS runtime dependencies are unavailable.& pause& exit /b 1)
 
 echo Verifying Java backend classes ...
 pushd "!ROOT!"

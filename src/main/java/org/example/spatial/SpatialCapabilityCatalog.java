@@ -9,6 +9,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.example.agent.DynamicToolStore;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -23,8 +24,10 @@ import java.util.Set;
 @Component
 public class SpatialCapabilityCatalog {
     private static final Set<String> APPROVED_TOOLS = Set.of(
-            "analyzeCurrentView", "skylineAnalysis", "sunlightAnalysis", "floodAnalysis", "siteSelection");
+            "analyzeCurrentView", "skylineAnalysis", "sunlightAnalysis", "floodAnalysis", "siteSelection",
+            "nearestFacilityDistance");
     private final RestTemplate http = new RestTemplate();
+    private final DynamicToolStore dynamicToolStore;
     private volatile Snapshot snapshot;
     private Snapshot bundledSnapshot;
     private volatile Instant lastRefreshAttempt;
@@ -32,6 +35,15 @@ public class SpatialCapabilityCatalog {
 
     @Value("${spatial.knowledge-graph.url:}") private String remoteUrl;
     @Value("${spatial.knowledge-graph.refresh-ttl-seconds:300}") private long refreshTtlSeconds;
+
+    public SpatialCapabilityCatalog() {
+        this.dynamicToolStore = null;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SpatialCapabilityCatalog(DynamicToolStore dynamicToolStore) {
+        this.dynamicToolStore = dynamicToolStore;
+    }
 
     @PostConstruct
     void load() {
@@ -218,6 +230,9 @@ public class SpatialCapabilityCatalog {
 
     /** New capabilities may reuse, but never extend, an approved executable contract. */
     private Capability extension(Capability candidate) {
+        if (dynamicToolStore != null && dynamicToolStore.hasActive(candidate.tool())) {
+            return candidate;
+        }
         Capability contract = bundledSnapshot.capabilities().values().stream()
                 .filter(baseline -> baseline.tool().equals(candidate.tool())
                         && baseline.operations().equals(candidate.operations())
@@ -237,7 +252,10 @@ public class SpatialCapabilityCatalog {
         String id = required(item, "id");
         String tool = required(item, "tool");
         if (!id.matches("[a-z][a-z0-9_]{1,80}")) throw new IllegalArgumentException("invalid_capability_id:" + id);
-        if (!APPROVED_TOOLS.contains(tool)) throw new IllegalArgumentException("tool_not_allowlisted:" + tool);
+        if (!APPROVED_TOOLS.contains(tool)
+                && (dynamicToolStore == null || !dynamicToolStore.hasActive(tool))) {
+            throw new IllegalArgumentException("tool_not_allowlisted:" + tool);
+        }
         List<String> operations = strings(item.getJSONArray("operations"));
         if (operations.isEmpty()) throw new IllegalArgumentException("operations_required:" + id);
         return new Capability(id, item.getBooleanValue("enabled"), strings(item.getJSONArray("aliases")), strings(item.getJSONArray("requires")),

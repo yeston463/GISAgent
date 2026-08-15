@@ -27,6 +27,10 @@ public class DynamicToolStore {
                 : configured).toAbsolutePath().normalize();
     }
 
+    public DynamicToolStore(Path file) {
+        this.file = file.toAbsolutePath().normalize();
+    }
+
     public synchronized List<Map<String, Object>> load() {
         return loadAll().stream()
                 .filter(row -> !Boolean.FALSE.equals(row.get("active")))
@@ -37,6 +41,11 @@ public class DynamicToolStore {
         return loadAll().stream()
                 .filter(row -> name.equals(String.valueOf(row.get("name"))))
                 .toList();
+    }
+
+    public synchronized boolean hasActive(String name) {
+        if (name == null || name.isBlank()) return false;
+        return load().stream().anyMatch(row -> name.equals(String.valueOf(row.get("name"))));
     }
 
     public synchronized Map<String, Object> rollback(String name, long version) {
