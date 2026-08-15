@@ -81,11 +81,21 @@ async function onBuildingSourceChange() {
       return;
     }
     const fc = data.data;
-    // 上传到当前会话上下文（供 Agent 分析使用）
+    // 上传到当前会话上下文（供 Agent 分析使用），同时带上该城市的默认 AOI，
+    // 加载完即可直接分析，无需手动画范围
+    const cityAoi = {
+      beijing: [[116.36, 39.88], [116.43, 39.88], [116.43, 39.93], [116.36, 39.93], [116.36, 39.88]],
+      guangzhou: [[113.24, 23.10], [113.31, 23.10], [113.31, 23.15], [113.24, 23.15], [113.24, 23.10]]
+    }[city];
     const upload = await axios.post('/api/gis/upload-context', {
       memoryId: getGisSessionId(),
       contextVersion: getGisContextVersion(),
-      buildings: fc
+      buildings: fc,
+      aoi: {
+        type: 'Feature',
+        properties: { name: city === 'beijing' ? '北京城区' : '广州城区', source: 'city_package' },
+        geometry: { type: 'Polygon', coordinates: [cityAoi] }
+      }
     });
     setGisContextVersion(upload.data?.contextVersion);
     // 地图上显示建筑轮廓
