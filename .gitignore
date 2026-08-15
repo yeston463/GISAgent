@@ -81,3 +81,8 @@ geoscene-services.log.*
 .pytest-basetemp*/
 .ozone-default-generated.xml
 geoscene-upload-temp/
+
+# 打包产物/运行时残留（不入库）
+/GISAgent-other-pc-test.zip
+/frontend/vite-capture.err
+/contest-submission/*.zip

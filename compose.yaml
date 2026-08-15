@@ -26,8 +26,10 @@ services:
     image: docker.m.daocloud.io/pgvector/pgvector:pg16
     restart: unless-stopped
     # 仅本机可见，不暴露到局域网/公网
+    # 宿主机端口用 5433：5432 是 GeoScene Data Store 关系存储的端口，
+    # 若被 Docker 抢占会导致数据存储 config store 不可用。
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_DB: vectordb
       POSTGRES_USER: postgres
