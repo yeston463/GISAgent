@@ -1,16 +1,5 @@
 ﻿<template>
-  <LoginView v-if="!auth.isAuthenticated" @login-success="onLoginSuccess" />
-  <div v-else class="app-container">
-    <!-- 会话栏 -->
-    <div class="session-bar">
-      <span class="session-user">
-        {{ auth.displayName }}
-        <el-tag v-if="auth.isAdmin" size="small" type="danger" effect="dark">管理员</el-tag>
-        <el-tag v-else size="small" type="info" effect="plain">普通用户</el-tag>
-      </span>
-      <el-button size="small" @click="handleLogout">退出登录</el-button>
-    </div>
-
+  <div class="app-container">
     <!-- 1. 地理底座 -->
     <MapViewer @map-ready="handleMapReady" />
 
@@ -19,8 +8,7 @@
 
     <!-- 3. AI 聊天助手（右侧） -->
     <ChatAgent :mapView="mainView" />
-    <!-- 能力图谱工作台仅管理员 -->
-    <KnowledgeGraphWorkbench v-if="auth.isAdmin" />
+    <KnowledgeGraphWorkbench />
 
     <AnalysisDashboard :data="chartData"/>
     <CityEngineResultViewer />
@@ -28,10 +16,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue';
-import { ElMessage } from 'element-plus';
-import { auth, logout } from './auth';
-import LoginView from './LoginView.vue';
+import { onMounted, onUnmounted, ref, shallowRef } from 'vue';
 import MapViewer from './components/MapViewer.vue';
 import ChatAgent from './components/ChatAgent.vue';
 import KnowledgeManager from './components/KnowledgeManager.vue';
@@ -39,7 +24,9 @@ import AnalysisDashboard from "./components/AnalysisDashboard.vue";
 import CityEngineResultViewer from "./components/CityEngineResultViewer.vue";
 import KnowledgeGraphWorkbench from './components/KnowledgeGraphWorkbench.vue';
 
-const mainView = ref(null);
+// SceneView 是 GeoScene Accessor 实例，不能放进深响应式 ref（Vue 的 Proxy
+// 会拦截其只读的 __accessor__ 内部属性并抛错）；用 shallowRef 保持原对象引用。
+const mainView = shallowRef(null);
 const chartData = ref({});
 const handleMapReady = (view) => {
   console.log("地图已就绪，正在同步至智能体...");
@@ -85,14 +72,6 @@ onUnmounted(() => {
   window.removeEventListener('clear-gis-charts', clearGisCharts);
 });
 
-const onLoginSuccess = () => {
-  // 登录成功由 auth 响应式状态驱动，自动切换到主界面
-};
-
-const handleLogout = () => {
-  logout();
-  ElMessage.info('已退出登录');
-};
 </script>
 
 <style>
@@ -111,26 +90,4 @@ html, body, #app {
   height: 100vh;
 }
 
-.session-bar {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(6px);
-  border-radius: 8px;
-  padding: 6px 10px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-.session-user {
-  font-size: 13px;
-  color: #0e2a45;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 </style>

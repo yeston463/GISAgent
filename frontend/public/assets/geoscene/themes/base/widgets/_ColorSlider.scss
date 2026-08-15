@@ -1,0 +1,7 @@
+@mixin colorSlider() {
+  @include smartMappingSlider(geoscene-color-slider);
+}
+
+@if $include_ColorSlider == true {
+  @include colorSlider();
+}

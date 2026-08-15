@@ -1,0 +1,137 @@
+.geoscene-ui {
+  box-sizing: border-box;
+  position: absolute;
+  inset: 0;
+  z-index: 0; // creates root stacking context
+  overflow: hidden;
+  font-size: $font-size;
+  pointer-events: none;
+
+  .geoscene-component {
+    pointer-events: auto;
+  }
+
+  /* attribution's position is a special case */
+  .geoscene-attribution {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+  }
+}
+
+.geoscene-ui-corner {
+  display: flex;
+  position: absolute;
+}
+
+.geoscene-ui-inner-container {
+  position: absolute;
+  inset: 0;
+}
+
+.geoscene-ui-manual-container {
+  > .geoscene-component {
+    position: absolute;
+  }
+
+  /* swipe needs to be placed behind all UI components */
+  .geoscene-swipe {
+    z-index: -1;
+  }
+}
+
+// Top Corners
+.geoscene-ui-top-left,
+.geoscene-ui-top-right {
+  flex-flow: column;
+}
+
+.geoscene-ui-top-left {
+  top: 0;
+  left: 0;
+  align-items: flex-start;
+}
+
+.geoscene-ui-top-right {
+  top: 0;
+  right: 0;
+  align-items: flex-end;
+}
+
+//  Bottom Corners
+.geoscene-ui-bottom-left,
+.geoscene-ui-bottom-right {
+  flex-flow: row;
+  align-items: flex-end;
+}
+
+.geoscene-ui-bottom-right {
+  right: 0;
+  bottom: 0;
+  flex-flow: row-reverse;
+
+  .geoscene-component {
+    margin-left: $view-ui-spacing;
+  }
+}
+
+.geoscene-ui-top-right .geoscene-component,
+.geoscene-ui-top-left .geoscene-component {
+  margin-bottom: $view-ui-spacing;
+}
+
+.geoscene-ui-bottom-left {
+  bottom: 0;
+  left: 0;
+
+  .geoscene-component {
+    margin-right: $view-ui-spacing;
+  }
+}
+
+[dir="rtl"] {
+  .geoscene-ui-top-left {
+    align-items: flex-end;
+  }
+
+  .geoscene-ui-top-right {
+    align-items: flex-start;
+  }
+
+  .geoscene-ui-bottom-left {
+    flex-direction: row-reverse;
+  }
+
+  .geoscene-ui-bottom-right {
+    flex-direction: row;
+  }
+}
+
+/* ZoomBox */
+
+.geoscene-zoom-box__container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.geoscene-zoom-box__overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  cursor: crosshair;
+  width: 100%;
+  height: 100%;
+}
+
+.geoscene-zoom-box__overlay-background {
+  fill: rgb(0 0 0 / 10%);
+}
+
+.geoscene-zoom-box__outline {
+  fill: transparent;
+  stroke: dodgerblue;
+  stroke-dasharray: 1, 1;
+  stroke-width: 2px;
+}

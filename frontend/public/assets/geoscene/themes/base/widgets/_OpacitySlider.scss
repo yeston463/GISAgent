@@ -1,0 +1,7 @@
+@mixin opacitySlider() {
+  @include smartMappingSlider(geoscene-opacity-slider);
+}
+
+@if $include_OpacitySlider == true {
+  @include opacitySlider();
+}

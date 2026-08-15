@@ -1,0 +1,57 @@
+@mixin histogram() {
+  .geoscene-histogram {
+    width: 100%;
+    height: 100%;
+    direction: ltr;
+  }
+
+  .geoscene-histogram__content {
+    width: 100%;
+    height: 100%;
+  }
+
+  .geoscene-histogram__svg {
+    display: inline-block;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .geoscene-histogram__data-line {
+    stroke: #888;
+    stroke-width: 1px;
+    shape-rendering: crispEdges;
+  }
+
+  .geoscene-histogram__label {
+    direction: ltr;
+    font-size: 12px;
+    stroke: black;
+    stroke-width: 0;
+    unicode-bidi: plaintext;
+  }
+
+  .geoscene-histogram__average-data-line {
+    stroke: #444;
+  }
+
+  .geoscene-histogram__average-symbol {
+    font-family: "Georgia, serif", sans-serif;
+    font-style: italic;
+  }
+
+  [dir="rtl"] {
+    .geoscene-histogram {
+      direction: rtl;
+
+      .geoscene-histogram__average-label {
+        direction: rtl;
+        unicode-bidi: plaintext;
+      }
+    }
+  }
+}
+
+@if $include_Histogram == true {
+  @include histogram();
+}

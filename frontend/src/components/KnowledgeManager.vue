@@ -24,7 +24,6 @@
         <div class="panel-body">
           <!-- 缩小的上传区域（仅管理员可见） -->
           <el-upload
-              v-if="auth.isAdmin"
               class="knowledge-upload"
               drag
               action="/api/knowledge/upload"
@@ -36,7 +35,6 @@
             <el-icon class="el-icon--upload" :size="24"><upload-filled /></el-icon>
             <div class="el-upload__text">导入文档 (PDF/MD)</div>
           </el-upload>
-          <div v-if="!auth.isAdmin" class="readonly-tip">知识库上传需管理员权限</div>
 
           <div class="file-list-header">已存知识 ({{ uploadedFiles.length }})</div>
 
@@ -58,12 +56,11 @@
 import { ref } from 'vue';
 import { Reading, UploadFilled, Close, Document, Delete } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
-import { auth, getToken } from '../auth';
 
 const isExpanded = ref(false);
 const uploadedFiles = ref([]);
 
-const uploadHeaders = { Authorization: `Bearer ${getToken()}` };
+const uploadHeaders = {};
 
 const handleSuccess = (res) => {
   ElMessage.success("知识已入库");

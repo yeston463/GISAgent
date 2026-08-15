@@ -1,0 +1,101 @@
+@mixin histogramRangeSlider() {
+  .geoscene-histogram-range-slider {
+    display: flex;
+    position: relative;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+
+    .geoscene-slider .geoscene-slider__label {
+      display: none;
+      top: 24px;
+    }
+
+    .geoscene-slider__anchor--moving .geoscene-slider__label {
+      display: inline;
+    }
+
+    .geoscene-slider {
+      font-size: 12px;
+    }
+
+    .geoscene-slider__content {
+      display: flex;
+      flex-direction: column-reverse;
+    }
+
+    .geoscene-slider__max {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      text-align: right;
+
+      .geoscene-slider__range-input {
+        float: right;
+        text-align: right;
+      }
+    }
+
+    .geoscene-slider__min {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      text-align: left;
+
+      .geoscene-slider__range-input {
+        text-align: left;
+      }
+    }
+
+    .geoscene-slider--horizontal {
+      .geoscene-slider__max,
+      .geoscene-slider__min {
+        display: inline;
+        min-width: 50%;
+      }
+    }
+
+    .geoscene-histogram {
+      display: flex;
+      align-self: flex-end;
+    }
+
+    .geoscene-histogram__bar {
+      touch-action: none;
+    }
+  }
+
+  .geoscene-histogram-range-slider__slider-container {
+    align-self: flex-end;
+    margin-bottom: 24px;
+    width: 100%;
+  }
+
+  .geoscene-histogram-range-slider__histogram-container {
+    display: flex;
+    flex-grow: 1;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .geoscene-histogram-range-slider__range-type--less-than,
+  .geoscene-histogram-range-slider__range-type--at-most {
+    .geoscene-slider__segment-0 {
+      background-color: #0079c1;
+    }
+  }
+
+  .geoscene-histogram-range-slider__range-type--greater-than,
+  .geoscene-histogram-range-slider__range-type--at-least,
+  .geoscene-histogram-range-slider__range-type--between,
+  .geoscene-histogram-range-slider__range-type--not-between {
+    .geoscene-slider__segment-1 {
+      background-color: #0079c1;
+    }
+  }
+}
+
+@if $include_HistogramRangeSlider == true {
+  @include histogramRangeSlider();
+}

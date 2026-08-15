@@ -1,0 +1,7 @@
+@mixin classedSizeSlider() {
+  @include smartMappingSlider(geoscene-classed-size-slider);
+}
+
+@if $include_ClassedSizeSlider == true {
+  @include classedSizeSlider();
+}

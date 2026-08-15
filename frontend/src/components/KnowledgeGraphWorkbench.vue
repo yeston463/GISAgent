@@ -4,7 +4,15 @@
     <aside v-if="visible" class="graph-panel">
       <header><div><small>空间知识图谱</small><h2>图谱发布工作台</h2></div><button @click="visible=false">×</button></header>
       <p class="active">当前图谱：{{ graphStatus.version || '加载中' }} · {{ graphStatus.source || '内置' }}</p>
-      <div class="toolbar"><button @click="refreshGraph" :disabled="busy">刷新</button><button @click="loadSelected" :disabled="busy || !selected">加载</button><button @click="applyTemplate" :disabled="busy || !selected">套用模板</button><button @click="clearDraft" :disabled="busy || !selected">手动填写</button><button @click="generateWithAi" :disabled="busy || !selected || !aiRequest.trim()">AI 生成</button><button @click="testIntents" :disabled="busy">测试意图</button></div>
+      <div class="toolbar"><button @click="refreshGraph" :disabled="busy">刷新</button><button @click="loadSelected" :disabled="busy || !selected">加载</button><button @click="applyTemplate" :disabled="busy || !selected">套用模板</button><button @click="clearDraft" :disabled="busy">手动填写</button><button @click="generateWithAi" :disabled="busy || !selected || !aiRequest.trim()">AI 生成</button><button @click="testIntents" :disabled="busy">测试意图</button></div>
+      <div v-if="manualMode" class="dynamic-method">
+        <strong>新增动态方法</strong>
+        <label>方法名<input v-model.trim="dynamicName" placeholder="例如 parcel_score" /></label>
+        <label>方法说明<input v-model.trim="dynamicDescription" placeholder="返回 JSON 指标" /></label>
+        <label>计算需求<textarea v-model="dynamicRequirement" rows="3" placeholder="例如根据 params.area 和 params.count 计算平均值" /></label>
+        <label>注册上下文 JSON<textarea v-model="dynamicContextText" rows="3" spellcheck="false">{}</textarea></label>
+        <button class="primary" @click="createDynamicTool" :disabled="busy || !dynamicName || !dynamicRequirement.trim()">注册工具并发布图谱</button>
+      </div>
       <label>能力 ID
         <select v-if="!manualMode" v-model="selected" @change="loadSelected"><option v-for="item in capabilities" :key="item.id" :value="item.id">{{ item.id }}</option></select>
         <input v-else v-model.trim="selected" placeholder="例如 site_selection 或 urban_metrics" />
@@ -30,6 +38,7 @@ import axios from 'axios';
 
 const visible = ref(false); const busy = ref(false); const capabilities = ref([]); const revisions = ref([]); const graphStatus = ref({});
 const selected = ref(''); const aliases = ref(''); const purpose = ref(''); const acceptanceText = ref(''); const aiRequest = ref(''); const manualMode = ref(false); const draft = ref({ version: '' }); const draftText = ref(''); const previewData = ref(null); const tests = ref([]); const notice = ref(null);
+const dynamicName = ref(''); const dynamicDescription = ref(''); const dynamicRequirement = ref(''); const dynamicContextText = ref('{}'); const dynamicTool = ref('');
 const templates = { urban_metrics:{aliases:'容积率\n建筑指标\nFAR',purpose:'计算范围内容积率、建筑密度与覆盖率。',tests:'计算容积率'}, skyline_analysis:{aliases:'天际线分析\n天际线\nskyline',purpose:'按方向统计建筑高度轮廓。',tests:'进行天际线分析'}, sunlight_analysis:{aliases:'日照分析\n日照与阴影筛查\n阴影分析\nsunlight',purpose:'筛查日照时窗和阴影影响。',tests:'日照与阴影筛查'}, flood_analysis:{aliases:'洪水分析\n内涝分析\n淹没分析\nflood',purpose:'结合 DEM、降雨和排水条件进行洪涝风险筛查。',tests:'洪水分析 80mm，24h，20年'} };
 const current = computed(() => capabilities.value.find(item => item.id === selected.value));
 const notify = (text, error=false) => { notice.value = { text, error }; };
@@ -60,12 +69,40 @@ const clearDraft = () => {
   purpose.value='';
   acceptanceText.value='';
   aiRequest.value='';
+  dynamicName.value=''; dynamicDescription.value=''; dynamicRequirement.value=''; dynamicContextText.value='{}'; dynamicTool.value='';
   draftText.value='';
   previewData.value=null;
   notify('可手动填写候选图谱。');
 };
-const graphObject = () => { const item=current.value; if (!item) throw new Error('请填写已注册的能力 ID'); const edited={...item, aliases:aliases.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), knowledge:{...(item.knowledge||{}), ...(purpose.value.trim()?{purpose:purpose.value.trim()}: {})}}; return {version:draft.value.version.trim(),capabilities:[edited]}; };
+const graphObject = () => {
+  const id = selected.value.trim();
+  if (manualMode.value) {
+    if (!dynamicTool.value || !id) throw new Error('请先生成并注册动态方法');
+    return {version:draft.value.version.trim(),capabilities:[{
+      id, enabled:true, aliases:aliases.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),
+      requires:[], optional:[], operations:['dynamic_compute'], tool:dynamicTool.value,
+      outputs:['metric'], rendererKinds:['metric'], dataRequirements:[],
+      knowledge:{purpose:purpose.value.trim() || dynamicDescription.value.trim()}
+    }]};
+  }
+  const item=current.value; if (!item) throw new Error('请填写已注册的能力 ID');
+  const edited={...item, aliases:aliases.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean), knowledge:{...(item.knowledge||{}), ...(purpose.value.trim()?{purpose:purpose.value.trim()}: {})}};
+  return {version:draft.value.version.trim(),capabilities:[edited]};
+};
 const generateDraft = () => { try { draftText.value=JSON.stringify(graphObject(),null,2); previewData.value=null; } catch(e) { notify(e.message,true); } };
+const createDynamicTool = async () => {
+  busy.value=true;
+  try {
+    const context=JSON.parse(dynamicContextText.value || '{}');
+    const {data}=await axios.post('/api/agent/capabilities/publish-dynamic',{name:dynamicName.value,capabilityId:dynamicName.value,description:dynamicDescription.value,requirement:dynamicRequirement.value,context,version:draft.value.version.trim(),aliases:aliases.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),purpose:purpose.value,acceptanceUtterances:acceptanceText.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),author:'graph-workbench',note:`动态方法 ${dynamicName.value}`});
+    if (!data.published || !data.registeredTool) throw new Error(data.message || '动态方法发布失败');
+    dynamicTool.value=data.registeredTool; selected.value=dynamicName.value; draft.value.version=data.revision?.version || draft.value.version || suggestedVersion();
+    aliases.value=`动态方法\n${dynamicDescription.value || dynamicName.value}`; purpose.value=dynamicDescription.value;
+    acceptanceText.value=aliases.value.split(/\r?\n/)[0]; draftText.value=data.graph || JSON.stringify(graphObject(),null,2); previewData.value=null;
+    manualMode.value=false; await load(); notify(`动态方法 ${data.registeredTool} 已注册、校验并发布`);
+  } catch(e) { notify(e.response?.data?.message || e.message,true); }
+  finally { busy.value=false; }
+};
 const generateWithAi = async () => {
   busy.value=true;
   try {
@@ -96,5 +133,37 @@ onMounted(load);
 </script>
 
 <style scoped>
-.graph-workbench{position:absolute;top:18px;right:18px;z-index:1400}.graph-toggle{border:1px solid #5cc9bf;border-radius:8px;background:#073a49;color:#c8fff5;padding:8px 12px;font-size:12px;cursor:pointer}.graph-panel{position:absolute;right:0;top:42px;width:360px;max-height:calc(100vh - 78px);overflow:auto;padding:16px;border:1px solid #286b75;border-radius:12px;background:#082432ee;color:#d5edf0;box-shadow:0 18px 46px #00131dcc;font-size:12px}.graph-panel header{display:flex;justify-content:space-between}.graph-panel header h2{margin:3px 0 12px;font-size:18px}.graph-panel header small{color:#62d8c8;letter-spacing:.1em}.graph-panel header button{border:0;background:transparent;color:#c9ecf0;font-size:24px;cursor:pointer}.active{margin:0 0 12px;color:#8fb3bd}.graph-panel label{display:block;margin:10px 0;color:#a7c5cc}.graph-panel input,.graph-panel select,.graph-panel textarea{box-sizing:border-box;display:block;width:100%;margin-top:4px;padding:7px;border:1px solid #356b74;border-radius:6px;background:#0d3443;color:#e2f7f8;font:12px Consolas,monospace}.toolbar{display:flex;gap:7px;margin:9px 0;flex-wrap:wrap}.toolbar button,.preview button,.revisions button{border:1px solid #487d85;border-radius:6px;background:#123f50;color:#d7f8f6;padding:6px 9px;cursor:pointer}.toolbar .primary,.publish{background:#49bba9!important;color:#032e32!important;border-color:#68e1cc!important}.preview,.tests,.revisions{display:grid;gap:6px;margin-top:13px;padding:10px;border:1px solid #285a64;border-radius:7px;background:#0a2b38}.preview span,.tests small,.revisions small{display:block;color:#8eabb2}.gate-pass{color:#8ce6be!important}.gate-fail{color:#ff9b9b!important}.tests .pass{color:#8ce6be}.tests .fail{color:#ff9b9b}.revisions>div{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center}.revisions small{grid-column:1}.revisions button{grid-column:2;grid-row:1/3}.notice{color:#8ce6be}.notice.error{color:#ff9b9b}@media(max-width:600px){.graph-panel{width:min(360px,calc(100vw - 36px))}}
+/* GeoScene 组件同款浅色风格 */
+.graph-workbench{position:absolute;top:74px;right:18px;z-index:1400}
+.graph-toggle{border:1px solid #a8a8a8;border-radius:4px;background:#ffffff;color:#2b2b2b;padding:7px 12px;font-size:12px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.25);font-family:"Avenir Next","Segoe UI",Arial,sans-serif}
+.graph-toggle:hover{border-color:#0079c1;color:#0079c1}
+.graph-panel{position:absolute;right:0;top:42px;width:360px;max-height:calc(100vh - 134px);overflow:auto;padding:16px;border:1px solid #d4d4d4;border-radius:4px;background:#ffffff;color:#4c4c4c;box-shadow:0 2px 8px rgba(0,0,0,.3);font-size:12px;font-family:"Avenir Next","Segoe UI",Arial,sans-serif}
+.graph-panel header{display:flex;justify-content:space-between}
+.graph-panel header h2{margin:3px 0 12px;font-size:17px;color:#2b2b2b}
+.graph-panel header small{color:#6e6e6e;letter-spacing:.08em}
+.graph-panel header button{border:0;background:transparent;color:#6e6e6e;font-size:22px;cursor:pointer}
+.graph-panel header button:hover{color:#0079c1}
+.active{margin:0 0 12px;color:#6e6e6e}
+.graph-panel label{display:block;margin:10px 0;color:#4c4c4c;font-weight:600}
+.graph-panel input,.graph-panel select,.graph-panel textarea{box-sizing:border-box;display:block;width:100%;margin-top:4px;padding:6px 7px;border:1px solid #a8a8a8;border-radius:3px;background:#ffffff;color:#2b2b2b;font:12px Consolas,monospace;outline:none}
+.graph-panel input:focus,.graph-panel select:focus,.graph-panel textarea:focus{border-color:#0079c1;box-shadow:0 0 0 1px #0079c1}
+.toolbar{display:flex;gap:7px;margin:9px 0;flex-wrap:wrap}
+.toolbar button,.preview button,.revisions button,.dynamic-method button{border:1px solid #a8a8a8;border-radius:3px;background:#f8f8f8;color:#2b2b2b;padding:5px 9px;cursor:pointer;font-family:inherit}
+.toolbar button:hover,.preview button:hover,.revisions button:hover,.dynamic-method button:hover{border-color:#0079c1;color:#0079c1}
+.toolbar .primary,.publish{background:#0079c1!important;color:#ffffff!important;border-color:#0079c1!important}
+.toolbar .primary:hover,.publish:hover{background:#005e95!important;color:#ffffff!important;border-color:#005e95!important}
+.preview,.tests,.revisions{display:grid;gap:6px;margin-top:13px;padding:10px;border:1px solid #e0e0e0;border-radius:4px;background:#f8f8f8}
+.preview span,.tests small,.revisions small{display:block;color:#6e6e6e}
+.gate-pass{color:#2e7d32!important}
+.gate-fail{color:#c62828!important}
+.tests .pass{color:#2e7d32}
+.tests .fail{color:#c62828}
+.revisions>div{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center}
+.revisions small{grid-column:1}
+.revisions button{grid-column:2;grid-row:1/3}
+.notice{color:#2e7d32}
+.notice.error{color:#c62828}
+.dynamic-method{margin:10px 0;padding:10px;border:1px solid #e0e0e0;border-radius:4px;background:#f8f8f8}
+.dynamic-method strong{display:block;color:#2b2b2b;margin-bottom:6px}
+@media(max-width:600px){.graph-panel{width:min(360px,calc(100vw - 36px))}}
 </style>

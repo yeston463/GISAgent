@@ -1,0 +1,277 @@
+@mixin coordinateConversion() {
+  .geoscene-coordinate-conversion {
+    position: relative;
+    cursor: default;
+    width: 400px;
+    font-size: $font-size--small;
+
+    .geoscene-select option[disabled] {
+      color: $interactive-font-color--disabled;
+    }
+  }
+
+  .geoscene-coordinate-conversion.geoscene-disabled {
+    @include icomoonIconSelector() {
+      &::before {
+        color: $interactive-font-color--disabled;
+      }
+    }
+
+    color: $interactive-font-color--disabled;
+    pointer-events: none;
+  }
+
+  .geoscene-coordinate-conversion--no-basemap {
+    padding: 1em;
+    width: auto;
+  }
+
+  .geoscene-coordinate-conversion--capture-mode {
+    .geoscene-coordinate-conversion__mode-toggle {
+      background: $background-color--offset;
+      color: $interactive-font-color;
+    }
+  }
+
+  .geoscene-coordinate-conversion__conversion-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .geoscene-coordinate-conversion__display {
+    @include wordbreak();
+
+    flex: 1 1 auto;
+    padding: 0.5em;
+    min-height: 2em;
+    direction: ltr;
+  }
+
+  .geoscene-coordinate-conversion__display:hover,
+  .geoscene-coordinate-conversion__select-row:hover {
+    background-color: $background-color--hover;
+  }
+
+  .geoscene-coordinate-conversion__button {
+    border-color: $interactive-font-color;
+    background-color: $background-color;
+    width: auto;
+    min-width: 30%;
+    max-width: 50%;
+    color: $interactive-font-color;
+  }
+
+  .geoscene-coordinate-conversion__convert-button-span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .geoscene-coordinate-conversion__button:hover {
+    border-color: $interactive-font-color;
+    background-color: $interactive-font-color;
+    color: $background-color;
+  }
+
+  .geoscene-coordinate-conversion__input-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: $cap-spacing auto $cap-spacing auto;
+    width: 80%;
+
+    label {
+      display: flex;
+      align-items: center;
+    }
+  }
+
+  .geoscene-coordinate-conversion .geoscene-coordinate-conversion__input-coordinate[type="text"] {
+    margin: 0;
+    border: 1px solid $border-color;
+    padding: 0 0.5em;
+    width: 100%;
+    height: 2em;
+    font-size: $font-size--small;
+  }
+
+  .geoscene-coordinate-conversion__input-coordinate--rejected {
+    text-decoration: underline red;
+  }
+
+  .geoscene-coordinate-conversion__settings {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+
+    .geoscene-select {
+      font-size: inherit;
+    }
+  }
+
+  .geoscene-coordinate-conversion__settings-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-top: $cap-spacing;
+    width: 60%;
+  }
+
+  .geoscene-coordinate-conversion__settings-group > * {
+    margin-bottom: 0.5em;
+  }
+
+  .geoscene-coordinate-conversion__settings-group-horizontal {
+    display: flex;
+    position: relative;
+    flex-direction: row;
+    width: 100%;
+  }
+
+  .geoscene-coordinate-conversion__settings-group:last-child {
+    margin-bottom: $cap-spacing--half;
+    width: 100%;
+    text-align: center;
+  }
+
+  .geoscene-coordinate-conversion__preview-coordinate {
+    min-height: 1.25em;
+  }
+
+  .geoscene-coordinate-conversion__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 $side-spacing 0 $side-spacing;
+    height: 3em;
+
+    .geoscene-coordinate-conversion__row-button {
+      display: none;
+    }
+  }
+
+  .geoscene-coordinate-conversion__row:hover .geoscene-coordinate-conversion__row-button {
+    display: flex;
+  }
+
+  .geoscene-coordinate-conversion__row:focus-within .geoscene-coordinate-conversion__row-button {
+    display: flex;
+  }
+
+  .geoscene-coordinate-conversion__pattern-input {
+    padding: 4px;
+    width: 100%;
+    height: $button-height;
+  }
+
+  .geoscene-coordinate-conversion__tools {
+    display: flex;
+    position: relative;
+    flex: 0 0 auto;
+    padding: 0;
+  }
+
+  .geoscene-coordinate-conversion__select-primary {
+    margin: 0;
+    padding: 0 2.5em 0 0.5em;
+    width: auto;
+    font-size: inherit;
+  }
+
+  .geoscene-coordinate-conversion__select-row {
+    flex: 0 0 75px;
+    margin: 0;
+    background: $background-color;
+    padding: 0 0.5em;
+    height: 2em;
+    text-align-last: center;
+    font-size: inherit;
+  }
+
+  .geoscene-coordinate-conversion__conversions-view {
+    margin: $cap-spacing--half 0 $cap-spacing--half 0;
+  }
+
+  .geoscene-ui-top-right .geoscene-coordinate-conversion__conversions-view,
+  .geoscene-ui-top-left .geoscene-coordinate-conversion__conversions-view,
+  .geoscene-coordinate-conversion div.geoscene-coordinate-conversion__conversions-view--expand-down {
+    display: flex;
+    flex-direction: column;
+
+    .geoscene-coordinate-conversion__conversion-list {
+      flex-direction: column;
+    }
+  }
+
+  .geoscene-ui-bottom-right .geoscene-coordinate-conversion__conversions-view,
+  .geoscene-ui-bottom-left .geoscene-coordinate-conversion__conversions-view,
+  .geoscene-coordinate-conversion div.geoscene-coordinate-conversion__conversions-view--expand-up {
+    display: flex;
+    flex-direction: column-reverse;
+
+    .geoscene-coordinate-conversion__conversion-list {
+      flex-direction: column-reverse;
+    }
+
+    .geoscene-widget--button {
+      .geoscene-icon-up,
+      .geoscene-icon-down {
+        transform: rotate(180deg);
+      }
+    }
+  }
+
+  .geoscene-coordinate-conversion__heading {
+    display: flex;
+    align-items: center;
+    background-color: $background-color--offset;
+    width: 100%;
+    height: $button-height;
+
+    .geoscene-widget__heading {
+      margin: 0 auto;
+    }
+
+    .geoscene-coordinate-conversion__back-button {
+      position: absolute;
+      margin-inline-start: 0;
+      background-color: $background-color--offset;
+
+      &:hover {
+        background-color: $background-color;
+      }
+    }
+  }
+
+  .geoscene-coordinate-conversion__popup {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    opacity: 0.8;
+    z-index: 1;
+    background-color: $background-color--inverse;
+    padding: 1em;
+    width: 50%;
+    animation: geoscene-fade-in 250ms linear;
+    text-align: center;
+    white-space: inherit;
+    color: $interactive-font-color--inverse;
+  }
+
+  .geoscene-coordinate-conversion__clipboard-popup {
+    top: auto;
+    left: auto;
+    transform: none;
+    width: auto;
+    font-size: $font-size--tiny;
+    pointer-events: none;
+    user-select: none;
+  }
+}
+
+@if $include_CoordinateConversion == true {
+  @include coordinateConversion();
+}

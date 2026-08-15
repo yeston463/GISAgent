@@ -1,0 +1,169 @@
+.geoscene-view {
+  --geoscene-view-outline-color: var(--calcite-color-brand);
+  --geoscene-view-outline: 2px solid var(--geoscene-view-outline-color);
+  --geoscene-view-outline-offset: -2px;
+
+  display: flex;
+  margin: 0;
+  padding: 0;
+  font-family: $font-family;
+
+  .geoscene-view-user-storage {
+    overflow: hidden;
+  }
+
+  .geoscene-view-root {
+    position: relative;
+    flex: 1 1 100%;
+    margin: 0;
+    border: none;
+    padding: 0;
+    -webkit-tap-highlight-color: rgb(0 0 0 / 0%);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .geoscene-view-surface {
+    position: absolute;
+    top: 0;
+    left: 0;
+    margin: 0;
+    outline: 0;
+    border: none;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+
+    /*
+     * TODO
+     * Layers should probably manage this on their own
+     */
+    direction: ltr;
+    user-select: none;
+
+    &--touch {
+      &-none {
+        touch-action: none;
+      }
+
+      &-pan {
+        touch-action: pan-x pan-y;
+      }
+    }
+  }
+
+  .geoscene-view-surface:focus::after {
+    box-sizing: border-box;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 999;
+    outline: var(--geoscene-view-outline);
+    outline-offset: var(--geoscene-view-outline-offset);
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    content: "";
+    pointer-events: none;
+  }
+
+  .geoscene-view-surface[data-navigating="true"] {
+    cursor: grabbing;
+  }
+
+  .geoscene-view-surface[data-cursor="copy"] {
+    cursor: copy;
+  }
+
+  .geoscene-view-surface[data-cursor="crosshair"] {
+    cursor: crosshair;
+  }
+
+  .geoscene-view-surface[data-cursor="help"] {
+    cursor: help;
+  }
+
+  .geoscene-view-surface[data-cursor="move"] {
+    cursor: move;
+  }
+
+  .geoscene-view-surface[data-cursor="pointer"] {
+    cursor: pointer;
+  }
+
+  .geoscene-view-surface[data-cursor="progress"] {
+    cursor: progress;
+  }
+
+  .geoscene-view-surface[data-cursor="grab"] {
+    cursor: grab;
+  }
+
+  .geoscene-view-surface[data-cursor="grabbing"] {
+    cursor: grabbing;
+  }
+
+  .geoscene-view-surface[data-cursor="n-resize"] {
+    cursor: n-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="e-resize"] {
+    cursor: e-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="s-resize"] {
+    cursor: s-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="w-resize"] {
+    cursor: w-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="ne-resize"] {
+    cursor: ne-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="nw-resize"] {
+    cursor: nw-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="se-resize"] {
+    cursor: se-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="sw-resize"] {
+    cursor: sw-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="ew-resize"] {
+    cursor: ew-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="ns-resize"] {
+    cursor: ns-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="nesw-resize"] {
+    cursor: nesw-resize;
+  }
+
+  .geoscene-view-surface[data-cursor="nwse-resize"] {
+    cursor: nwse-resize;
+  }
+
+  .geoscene-display-object,
+  .geoscene-bitmap {
+    position: absolute;
+    margin: 0;
+    border: none;
+    padding: 0; // @dris0000 @juan6600
+    // Keep these prefixes?
+    -webkit-user-drag: none;
+    user-select: none;
+  }
+
+  .geoscene-bitmap {
+    transform-origin: top left;
+    max-width: none;
+  }
+}

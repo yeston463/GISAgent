@@ -3,7 +3,24 @@ import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
-import { viteStaticCopy } from 'vite-plugin-static-copy'
+import { cpSync, existsSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// @geoscene/core 的 workers / wasm / t9n 等资产不走打包器，需要原样拷贝到
+// public/assets，让 SDK 的 assetsPath 在开发与构建时都能命中。
+function copyGeoSceneAssets() {
+  const source = resolve(__dirname, 'node_modules/@geoscene/core/assets')
+  const target = resolve(__dirname, 'public/assets')
+  return {
+    name: 'copy-geoscene-assets',
+    buildStart() {
+      if (existsSync(source)) cpSync(source, target, { recursive: true })
+    },
+  }
+}
 
 export default defineConfig({
   plugins: [
@@ -14,15 +31,7 @@ export default defineConfig({
     Components({
       resolvers: [ElementPlusResolver()],
     }),
-    viteStaticCopy({
-      targets: [
-        {
-          src: 'node_modules/@arcgis/core/assets/**/*',
-          dest: 'assets',
-          rename: { stripBase: 4 },
-        },
-      ],
-    }),
+    copyGeoSceneAssets(),
   ],
   server: {
     host: '127.0.0.1',
@@ -39,8 +48,10 @@ export default defineConfig({
       },
     },
   },
-  optimizeDeps: {
-    exclude: ['@arcgis/core', '@arcgis/map-components', '@esri/calcite-components'],
+  // @geoscene/core 是多入口 ESM 包（无 main/exports 字段），不能整包预构建；
+  // 由 Vite 按模块图按需转换（构建模式 Rollup 直接打包，已验证通过）。
+  worker: {
+    format: 'es',
   },
   build: {
     chunkSizeWarningLimit: 1500,

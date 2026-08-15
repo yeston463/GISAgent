@@ -46,7 +46,7 @@
             </div>
           </article>
         </div>
-        <p class="disclaimer">评分权重：合规 50% · 经济 30% · 可行性 20%。评分越高方案越优。点击方案卡片可切换地图显示（TODO: 建筑三维切换）。</p>
+        <p class="disclaimer">评分权重：合规 50% · 经济 30% · 可行性 20%。评分越高方案越优。点击方案卡片可切换地图中的方案图层。</p>
       </template>
 
       <template v-else-if="isComparison">
@@ -114,7 +114,7 @@
           <strong>{{ confidenceText }}</strong>
         </div>
         <div class="metrics-grid">
-          <article v-for="item in standardRows" :key="item.key" class="standard-card">
+          <article v-for="item in (isStandardMetrics ? standardRows : dynamicRows)" :key="item.key" class="standard-card">
             <span>{{ item.label }}</span><strong>{{ item.value }}</strong><small>{{ item.note }}</small>
           </article>
         </div>
@@ -196,11 +196,71 @@ const advancedProfile = computed(() => Array.isArray(advancedData.value.profile)
 const hasComputedMetrics = payload => {
   const data = payload?.metrics || payload || {};
   const status = String(data.status || '').toLowerCase();
-  return status !== 'error'
-    && Number.isFinite(Number(data.far))
+  if (status === 'error' || status === 'fail' || status === 'nodata') return false;
+  const standardValid = Number.isFinite(Number(data.far))
     && Number(data.site_area ?? data.site_area_sqm) > 0
     && Number(data.building_count) > 0;
+  if (standardValid) return true;
+  // 知识图谱动态能力（如 avg_height_analysis）的指标字段不固定，
+  // 只要至少有一个非控制字段可展示即视为有效结果。
+  return Object.entries(data).some(([key, value]) =>
+    !CONTROLLED_FIELDS.has(key)
+    && (typeof value === 'number' || typeof value === 'boolean'
+      || (typeof value === 'string' && value.length <= 40 && !/^[\[{]/.test(value)))
+  );
 };
+const isStandardMetrics = computed(() => Number.isFinite(Number(standardData.value.far)));
+const CONTROLLED_FIELDS = new Set([
+  'status','stage','analysis_type','analysisType','commands','trace','provenance',
+  'quality','message','missing_data','missingData','method','limitations','center',
+  'source','data_source','dataSource','context_version','contextVersion','plan',
+  'aoi','buildings','samples','shadows','skyline_profile','profile'
+]);
+const FIELD_LABELS = {
+  buildingCount:'建筑数量', building_count:'建筑数量',
+  avgHeightM:'平均建筑高度', avg_height_m:'平均建筑高度', mean_height:'平均建筑高度', meanHeight:'平均建筑高度',
+  maxHeightM:'最高建筑', max_height:'最高建筑', maxHeight:'最高建筑',
+  totalAreaSqm:'建筑总面积', total_area_sqm:'建筑总面积', building_area:'建筑总面积',
+  siteAreaSqm:'用地面积', site_area_sqm:'用地面积',
+  buildingDensity:'建筑密度', building_density:'建筑密度',
+  footprintAreaSqm:'建筑基底面积', footprint_area_sqm:'建筑基底面积'
+};
+const humanizeKey = key => key
+  .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+  .replace(/[_-]+/g, ' ')
+  .trim()
+  .replace(/\b\w/g, char => char.toUpperCase());
+const formatDynamicValue = (value, key) => {
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value !== 'number' || !Number.isFinite(value)) return String(value);
+  if (/count/i.test(key)) return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+  const digits = /height/i.test(key) ? 1 : 2;
+  return Number(value).toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+};
+const dynamicNote = (key, value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (/height/i.test(key)) return '单位：米';
+    if (/area/i.test(key)) return '单位：平方米';
+    if (/density/i.test(key)) return '单位：%';
+    if (/count/i.test(key)) return '范围内有效建筑';
+  }
+  return key;
+};
+const dynamicRows = computed(() => {
+  const data = standardData.value || {};
+  const rows = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (CONTROLLED_FIELDS.has(key)) continue;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      rows.push({ key, label: FIELD_LABELS[key] || humanizeKey(key), value: formatDynamicValue(value, key), note: dynamicNote(key, value) });
+    } else if (typeof value === 'boolean') {
+      rows.push({ key, label: FIELD_LABELS[key] || humanizeKey(key), value: formatDynamicValue(value, key), note: key });
+    } else if (typeof value === 'string' && value.length <= 40 && !/^[\[{]/.test(value) && value.trim()) {
+      rows.push({ key, label: FIELD_LABELS[key] || humanizeKey(key), value, note: key });
+    }
+  }
+  return rows.length ? rows : [{ key: 'empty', label: '指标', value: '暂无', note: '分析未返回可展示字段' }];
+});
 const buildingExposureAvailable = computed(() => advancedData.value.buildingExposureAvailable !== false);
 const advancedBuildingStatus = computed(() =>
   advancedData.value.analysisType === 'flood' && !buildingExposureAvailable.value

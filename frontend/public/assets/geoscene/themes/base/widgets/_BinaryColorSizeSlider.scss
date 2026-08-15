@@ -1,0 +1,7 @@
+@mixin binaryColorSizeSlider() {
+  @include smartMappingSlider(geoscene-binary-color-size-slider);
+}
+
+@if $include_BinaryColorSizeSlider == true {
+  @include binaryColorSizeSlider();
+}

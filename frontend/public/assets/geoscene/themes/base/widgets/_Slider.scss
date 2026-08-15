@@ -1,0 +1,386 @@
+@mixin slider() {
+  $slider-track-thickness: 2px !default;
+  $slider-anchor-thickness: 1px !default;
+  $slider-tick-thickness: 1px !default;
+  $slider-tick-length: 5px !default;
+  $slider-ticks-z-index: 0;
+
+  $slider-thumb-size: 16px !default;
+  $slider-thumb-offset: ($slider-thumb-size * 0.5) - 1 !default;
+  $slider-thumb-hover-scale: 1.2 !default;
+  $slider-thumb-size--hover: $slider-thumb-size * $slider-thumb-hover-scale !default;
+  $slider-thumb-offset--hover: ($slider-thumb-size--hover * 0.5) - 1 !default;
+
+  .geoscene-slider {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    direction: ltr;
+    user-select: none;
+  }
+
+  .geoscene-disabled {
+    .geoscene-slider__content,
+    .geoscene-slider__min,
+    .geoscene-slider__max {
+      opacity: 0.4;
+    }
+
+    .geoscene-slider__thumb {
+      &:hover {
+        transform: none;
+        border-color: $button-color;
+        cursor: default;
+      }
+    }
+
+    .geoscene-slider__label {
+      &:hover {
+        cursor: default;
+      }
+    }
+
+    .geoscene-slider__segment {
+      &:hover {
+        cursor: default;
+      }
+    }
+
+    .geoscene-slider {
+      &--horizontal,
+      &--vertical {
+        .geoscene-slider__segment--interactive {
+          &:hover {
+            cursor: default;
+          }
+        }
+      }
+    }
+  }
+
+  .geoscene-slider--reversed.geoscene-slider--horizontal {
+    flex-direction: row-reverse;
+  }
+
+  .geoscene-slider--reversed.geoscene-slider--vertical {
+    flex-direction: column;
+  }
+
+  .geoscene-slider--horizontal {
+    flex-direction: row;
+
+    .geoscene-slider__content {
+      height: auto;
+    }
+
+    .geoscene-slider__track {
+      width: 100%;
+      height: $slider-track-thickness;
+    }
+
+    .geoscene-slider__segment--interactive {
+      &:hover {
+        cursor: ew-resize;
+      }
+    }
+
+    .geoscene-slider__anchor {
+      width: $slider-anchor-thickness;
+      height: 100%;
+    }
+
+    .geoscene-slider__label {
+      top: -30px;
+      left: -50px;
+      margin: 0 $side-spacing--three-quarters;
+      text-align: center;
+    }
+
+    .geoscene-slider__label-input {
+      text-align: center;
+    }
+
+    .geoscene-slider__max,
+    .geoscene-slider__min {
+      flex: 0 0 auto;
+      margin: auto;
+      width: 50px;
+      height: auto;
+    }
+
+    .geoscene-slider__ticks {
+      top: 100%;
+      left: 0;
+      margin: $cap-spacing--three-quarters 0 0 0;
+      width: 100%;
+    }
+
+    .geoscene-slider__tick {
+      width: $slider-tick-thickness;
+      height: $slider-tick-length;
+    }
+
+    .geoscene-slider__tick-label {
+      margin-top: $cap-spacing--plus-half;
+    }
+  }
+
+  .geoscene-slider--vertical {
+    flex-direction: column-reverse;
+
+    .geoscene-slider__content {
+      flex-direction: column;
+      width: auto;
+    }
+
+    .geoscene-slider__track {
+      flex: 1 0 0;
+      flex-direction: column;
+      width: $slider-track-thickness;
+      height: 100%;
+    }
+
+    .geoscene-slider__segment--interactive {
+      &:hover {
+        cursor: ns-resize;
+      }
+    }
+
+    .geoscene-slider__anchor {
+      width: 100%;
+      height: $slider-anchor-thickness;
+    }
+
+    .geoscene-slider__label {
+      top: -10px;
+      left: 20px;
+      text-align: left;
+    }
+
+    .geoscene-slider__max,
+    .geoscene-slider__min {
+      margin: auto;
+      width: 100%;
+    }
+
+    .geoscene-slider__max {
+      flex: 0 0 22px;
+    }
+
+    .geoscene-slider__min {
+      flex: 0 0 22px;
+    }
+
+    .geoscene-slider__ticks {
+      top: 0;
+      left: 100%;
+      margin: 0 0 0 $side-spacing--three-quarters;
+    }
+
+    .geoscene-slider__tick {
+      width: $slider-tick-length;
+      height: $slider-tick-thickness;
+    }
+
+    .geoscene-slider__tick-label {
+      margin-left: 30px;
+    }
+  }
+
+  .geoscene-slider__content {
+    display: flex;
+    position: relative;
+    flex: 1 0 auto;
+    align-items: center;
+    justify-content: center;
+    z-index: 0;
+    margin: auto;
+    line-height: 0;
+  }
+
+  .geoscene-slider__track {
+    display: inline-block;
+    position: relative;
+    background-color: $border-color--contrast;
+    touch-action: none;
+  }
+
+  .geoscene-slider__segment {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    width: 100%;
+    height: 100%;
+    will-change: transform;
+    touch-action: none;
+
+    &:hover {
+      cursor: pointer;
+    }
+  }
+
+  .geoscene-slider__anchor {
+    position: absolute;
+    background-color: $background-color--inverse;
+    touch-action: none;
+    user-select: none;
+
+    &:focus {
+      .geoscene-slider__thumb,
+      .geoscene-slider__label {
+        outline: inherit;
+      }
+    }
+  }
+
+  .geoscene-slider__anchor--moving {
+    &:focus {
+      .geoscene-slider__thumb {
+        border: 3px solid $button-color--hover;
+        cursor: grabbing;
+      }
+    }
+
+    .geoscene-slider__label {
+      &:hover {
+        cursor: grabbing;
+      }
+    }
+
+    .geoscene-slider__label--interactive {
+      &:hover {
+        cursor: grabbing;
+      }
+    }
+  }
+
+  .geoscene-slider__thumb {
+    position: absolute;
+    top: -$slider-thumb-offset;
+    left: -$slider-thumb-offset;
+    transition: all 125ms ease-in-out;
+    z-index: $slider-ticks-z-index + 1; // Make sure the thumb goes on top of the ticks
+    border: 2px solid $button-color;
+    border-radius: $slider-thumb-size;
+    background-color: $background-color;
+    width: $slider-thumb-size;
+    height: $slider-thumb-size;
+    touch-action: none;
+
+    &:hover {
+      top: -$slider-thumb-offset--hover;
+      left: -$slider-thumb-offset--hover;
+      border-width: 3px;
+      border-color: $button-color--hover;
+      cursor: grab;
+      width: $slider-thumb-size--hover;
+      height: $slider-thumb-size--hover;
+    }
+  }
+
+  .geoscene-slider__label {
+    position: absolute;
+    min-width: 80px;
+    line-height: 22px;
+
+    &:hover {
+      cursor: grab;
+    }
+  }
+
+  .geoscene-slider__label--interactive,
+  .geoscene-slider__max--interactive,
+  .geoscene-slider__min--interactive {
+    &:hover {
+      cursor: pointer;
+      text-decoration: underline;
+    }
+  }
+
+  .geoscene-slider__label-input {
+    position: relative;
+    z-index: $slider-ticks-z-index + 1;
+    width: 100%;
+  }
+
+  .geoscene-slider__extra-content {
+    display: inline-block;
+  }
+
+  .geoscene-slider__max,
+  .geoscene-slider__min {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    text-align: center;
+    line-height: 22px;
+  }
+
+  .geoscene-slider__max--interactive,
+  .geoscene-slider__min--interactive {
+    &:hover {
+      background-color: $background-color--offset;
+    }
+  }
+
+  .geoscene-slider__range-input {
+    padding: 1px 0;
+    width: 100%;
+    text-align: center;
+  }
+
+  .geoscene-slider__ticks {
+    display: inline-block;
+    position: absolute;
+    z-index: $slider-ticks-z-index;
+    height: 100%;
+  }
+
+  .geoscene-slider__tick {
+    position: absolute;
+    background: $border-color--contrast;
+  }
+
+  .geoscene-slider__tick-label {
+    position: absolute;
+    width: max-content;
+  }
+
+  [dir="rtl"] {
+    .geoscene-slider__label,
+    .geoscene-slider__max,
+    .geoscene-slider__min,
+    .geoscene-slider__tick-label {
+      direction: rtl;
+      unicode-bidi: plaintext;
+    }
+
+    .geoscene-slider__range-input,
+    .geoscene-slider__label-input {
+      unicode-bidi: plaintext;
+    }
+  }
+}
+
+/*
+  #22969 - Focus outline does not appear as expected in Edge
+  Slider includes thumb/label elements in anchor focus outline when 'handle' is focused
+  Default browser style for focus outline is not included on parent element in Edge
+  This means using 'outline: inherit' on thumb/label elements does nothing
+  ... unless we define an outline on the parent
+*/
+@supports (-ms-ime-align: auto) {
+  .geoscene-slider {
+    &__anchor {
+      &:focus {
+        outline: 1px dotted black;
+      }
+    }
+  }
+}
+
+@if $include_Slider == true {
+  @include slider();
+}

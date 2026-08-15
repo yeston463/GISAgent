@@ -107,6 +107,8 @@
         <option value="dem">DEM</option>
         <option value="drainage_network">排水管网</option>
         <option value="river_network">河网</option>
+        <option value="candidates">候选地</option>
+        <option value="facilities">设施</option>
       </select>
       <select v-model="uploadCrs" class="crs-select" :disabled="isAnalyzing" aria-label="Source coordinate reference system">
         <option value="EPSG:4326">WGS84</option>
@@ -131,12 +133,25 @@
 import { ref, toRef, nextTick, onMounted, onUnmounted } from 'vue';
 import { Compass, Upload } from '@element-plus/icons-vue';
 import axios from 'axios';
-import * as webMercatorUtils from '@arcgis/core/geometry/support/webMercatorUtils.js';
-import * as geometryEngine from '@arcgis/core/geometry/geometryEngine.js';
-import Point from '@arcgis/core/geometry/Point.js';
-import Polygon from '@arcgis/core/geometry/Polygon.js';
 import { useCommandExecutor } from '../useCommandExecutor';
 import { getGisSessionId, setGisContextVersion } from '../gisSession';
+import { loadGeoSceneModules } from '../map/geoSceneAdapter';
+
+let geoSceneModulesPromise;
+
+const getGeoSceneModules = () => {
+  if (!geoSceneModulesPromise) {
+    geoSceneModulesPromise = loadGeoSceneModules([
+      'geoscene/geometry/support/webMercatorUtils',
+      'geoscene/geometry/geometryEngine',
+      'geoscene/geometry/Point',
+      'geoscene/geometry/Polygon'
+    ]).then(([webMercatorUtils, geometryEngine, Point, Polygon]) => ({
+      webMercatorUtils, geometryEngine, Point, Polygon
+    }));
+  }
+  return geoSceneModulesPromise;
+};
 
 const props = defineProps(['mapView']);
 const scrollContainer = ref(null);
@@ -169,8 +184,11 @@ onMounted(async () => {
   window.addEventListener('sketch-aoi-ready', handleSketchReady);
   window.addEventListener('request-planning-scenario-switch', handleScenarioSwitchRequest);
   await refreshContextStatus();
-  if (contextStatus.value.demoEnabled) {
-    await loadDemoContext({ auto: true });
+  // Older versions auto-loaded the demo. Remove only that persisted fixture
+  // so the page always starts empty until the user clicks the demo button.
+  if (contextStatus.value.demoId) {
+    const { data } = await axios.post('/api/gis/clear-demo-context', { memoryId: memoryId.value });
+    applyContextStatus(data);
   }
 });
 
@@ -200,7 +218,7 @@ const handleSketchReady = async event => {
       params: { aoiGeometry: event?.detail?.aoiGeometry }
     }]);
     if (synced === false || window.lastGisResult?.status !== 'Success') {
-      throw new Error(window.lastGisResult?.message || '未能从当前三维建筑图层提取有效建筑');
+      throw new Error(window.lastGisResult?.message || '未能同步该区域建筑数据（Overpass 无建筑或底图不可用）');
     }
   } catch (error) {
     console.error('红线建筑同步失败:', error);
@@ -222,6 +240,7 @@ const applyContextStatus = data => {
     hasBuildings: Boolean(data?.hasBuildings),
     buildingCount: Number(data?.buildingCount || 0),
     demoEnabled: Boolean(data?.demoEnabled),
+    demoId: data?.demoId || null,
     hasDem: Array.isArray(data?.availableData) && data.availableData.includes('dem'),
     contextVersion: Number(data?.contextVersion ?? -1),
     aoi: data?.aoi || null
@@ -238,11 +257,10 @@ const refreshContextStatus = async () => {
   }
 };
 
-const loadDemoContext = async (options = {}) => {
-  const auto = options?.auto === true;
+const loadDemoContext = async () => {
   if (isAnalyzing.value) return;
   isAnalyzing.value = true;
-  loadingStatusText.value = auto ? '正在载入离线演示数据...' : '正在加载验证样例...';
+  loadingStatusText.value = '正在加载验证样例...';
   try {
     const { data } = await axios.post('/api/gis/demo-context', { memoryId: memoryId.value });
     applyContextStatus(data);
@@ -251,17 +269,9 @@ const loadDemoContext = async (options = {}) => {
       { action: 'addGeoJsonLayer', params: { data: data.buildings, layerId: 'analysis-demo-buildings', style: 'existing', title: '验证建筑' } }
     ]);
     await showDemoSummary(data);
-    if (auto) {
-      messages.value.push(createAssistantMessage('已载入离线演示数据（不依赖网络/OSM）。'));
-    } else {
-      messages.value.push(createAssistantMessage('验证样例已加载：范围和 3 栋建筑已就绪，可直接执行天际线分析或日照与阴影筛查。'));
-    }
+    messages.value.push(createAssistantMessage('验证样例已加载：范围和 3 栋建筑已就绪，可直接执行天际线分析或日照与阴影筛查。'));
   } catch (error) {
-    if (auto) {
-      console.warn('离线演示数据自动加载失败，已静默降级:', error);
-    } else {
-      messages.value.push(createAssistantMessage(`验证样例加载失败：${error?.response?.data?.message || error?.message || '未知错误'}`));
-    }
+    messages.value.push(createAssistantMessage(`验证样例加载失败：${error?.response?.data?.message || error?.message || '未知错误'}`));
   } finally {
     isAnalyzing.value = false;
     scrollToBottom();
@@ -316,15 +326,16 @@ const loadGroundDem = async (force = false) => {
   if (isAnalyzing.value && !force) return;
   const mapView = props.mapView?.value || props.mapView;
   const ground = mapView?.map?.ground;
-  const aoi = window.lastManualAoiGeometry || window.lastBufferGeometry || restoreAoiGeometry(contextStatus.value.aoi);
+  const aoi = window.lastManualAoiGeometry || window.lastBufferGeometry || await restoreAoiGeometry(contextStatus.value.aoi);
   if (!ground?.queryElevation || !aoi) {
     messages.value.push(createAssistantMessage('无法从底图获取高程：请先用右上角工具绘制 AOI；若地形服务不可用，请上传 DEM。'));
     scrollToBottom();
     return;
   }
   isAnalyzing.value = true;
-  loadingStatusText.value = '正在从 ArcGIS 地形面采样高程...';
+  loadingStatusText.value = '正在从 GeoScene 地形面采样高程...';
   try {
+    const { Point, geometryEngine, webMercatorUtils } = await getGeoSceneModules();
     const extent = aoi.extent;
     const side = 16;
     const points = [];
@@ -346,19 +357,19 @@ const loadGroundDem = async (force = false) => {
       return {
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [geographic.x, geographic.y] },
-        properties: { id: `ground-dem-${index + 1}`, elevation_m: Number(geographic.z), source: 'arcgis_world_elevation' }
+        properties: { id: `ground-dem-${index + 1}`, elevation_m: Number(geographic.z), source: 'geoscene_world_elevation' }
       };
     });
     if (features.length < 3) throw new Error('地形服务未返回足够的高程样本');
     const { data } = await axios.post('/api/gis/ground-dem', {
       memoryId: memoryId.value, contextVersion: contextStatus.value.contextVersion,
-      sourceCrs: 'EPSG:4326', aoi: toGeoJsonAoi(aoi),
+      sourceCrs: 'EPSG:4326', aoi: await toGeoJsonAoi(aoi),
       dem: { type: 'FeatureCollection', features }
     });
     applyContextStatus(data);
-    messages.value.push(createAssistantMessage(`已从 ArcGIS World Elevation 在当前 AOI 采样 ${data.sampleCount} 个高程点。这是规则网格高程样本，不是原始 DEM 栅格；输入“洪水分析”后，Agent 会检查还缺少的业务数据。`));
+    messages.value.push(createAssistantMessage(`已从 GeoScene World Elevation 在当前 AOI 采样 ${data.sampleCount} 个高程点。这是规则网格高程样本，不是原始 DEM 栅格；输入“洪水分析”后，Agent 会检查还缺少的业务数据。`));
   } catch (error) {
-    messages.value.push(createAssistantMessage(`从 ArcGIS World Elevation 采样高程失败：${error?.response?.data?.message || error?.message || '请上传 DEM 文件。'}`));
+    messages.value.push(createAssistantMessage(`从 GeoScene World Elevation 采样高程失败：${error?.response?.data?.message || error?.message || '请上传 DEM 文件。'}`));
   } finally {
     isAnalyzing.value = false;
     scrollToBottom();
@@ -366,30 +377,35 @@ const loadGroundDem = async (force = false) => {
 };
 
 const loadPublicDem = async (resumeMessage = '') => {
-  const aoi = window.lastManualAoiGeometry || window.lastBufferGeometry || restoreAoiGeometry(contextStatus.value.aoi);
+  const aoi = window.lastManualAoiGeometry || window.lastBufferGeometry || await restoreAoiGeometry(contextStatus.value.aoi);
   if (!aoi) throw new Error('无法获取 DEM：当前没有可用 AOI。');
   isAnalyzing.value = true;
   loadingStatusText.value = '正在下载并裁剪公共 GeoTIFF DEM...';
   try {
     const { data } = await axios.post('/api/gis/public-dem', {
-      memoryId: memoryId.value, contextVersion: contextStatus.value.contextVersion, aoi: toGeoJsonAoi(aoi)
+      memoryId: memoryId.value, contextVersion: contextStatus.value.contextVersion, aoi: await toGeoJsonAoi(aoi)
     });
     applyContextStatus(data);
     const metadata = data.metadata || {};
     messages.value.push(createAssistantMessage('已获取真实 GeoTIFF DEM：' + (metadata.source || 'public DEM') + '，分辨率约 ' + (metadata.resolutionMeters || '未知') + ' m，覆盖 ' + (metadata.tileCount || 0) + ' 个高程瓦片。'));
     if (resumeMessage) await processAiChat(resumeMessage, true);
   } catch (error) {
-    messages.value.push(createAssistantMessage('真实 DEM 获取不可用：' + (error?.response?.data?.message || error?.message || '请上传 GeoTIFF/ASC。')));
+    const detail = error?.response?.data?.message || error?.message || '公共 GeoTIFF 服务不可用';
+    // 直连公共 S3 DEM 可能被网络中途断开；用 GeoScene World Elevation
+    // 规则网格采样兜底，保持现场演示可继续，不伪装为原始 GeoTIFF。
+    messages.value.push(createAssistantMessage(`公共 GeoTIFF 直连失败（${detail}），正在切换 GeoScene World Elevation 高程采样...`));
+    await loadGroundDem(true);
   } finally {
     isAnalyzing.value = false;
     scrollToBottom();
   }
 };
 
-const restoreAoiGeometry = aoi => {
+const restoreAoiGeometry = async aoi => {
   const geometry = aoi?.geometry || aoi;
   if (!geometry || geometry.type !== 'Polygon' || !Array.isArray(geometry.coordinates)) return null;
   try {
+    const { Polygon, webMercatorUtils } = await getGeoSceneModules();
     const polygon = new Polygon({ rings: geometry.coordinates, spatialReference: { wkid: 4326 } });
     return webMercatorUtils.geographicToWebMercator(polygon);
   } catch (error) {
@@ -398,7 +414,8 @@ const restoreAoiGeometry = aoi => {
   }
 };
 
-const toGeoJsonAoi = aoi => {
+const toGeoJsonAoi = async aoi => {
+  const { webMercatorUtils } = await getGeoSceneModules();
   const geographic = aoi?.spatialReference?.isWGS84 ? aoi : webMercatorUtils.webMercatorToGeographic(aoi);
   return {
     type: 'Feature',
@@ -457,7 +474,7 @@ const uploadSpatialFile = async event => {
     const { data } = await axios.post('/api/gis/data-file', form);
     applyContextStatus(data);
     if (data.dataType === 'vector' && data.vectorData) {
-      const styles = { aoi: 'aoi', buildings: 'existing', drainage_network: 'optimized', river_network: 'optimized', dem: 'warning' };
+      const styles = { aoi: 'aoi', buildings: 'existing', drainage_network: 'optimized', river_network: 'optimized', candidates: 'siteSelection', facilities: 'green', dem: 'warning' };
       await execute([{ action: 'addGeoJsonLayer', params: {
         data: data.vectorData, layerId: `uploaded-${uploadDataset.value}`,
         style: styles[uploadDataset.value] || 'optimized', title: data.fileName
@@ -482,9 +499,7 @@ const handleUserSend = () => {
     const text = currentInput.value;
     messages.value.push({ role: 'user', text });
     currentInput.value = '';
-    window.open(`/api/reports/latest?memoryId=${encodeURIComponent(memoryId.value)}`, '_blank', 'noopener');
-    messages.value.push(createAssistantMessage('已开始下载最近一次成功分析的可追溯报告（HTML）。打开后可使用浏览器“打印”保存为 PDF。'));
-    scrollToBottom();
+    openLatestReport();
     return;
   }
   window.dispatchEvent(new Event('clear-gis-charts'));
@@ -503,6 +518,12 @@ const handleUserSend = () => {
   processAiChat(text);
 };
 
+const openLatestReport = () => {
+  window.open(`/api/reports/latest?memoryId=${encodeURIComponent(memoryId.value)}`, '_blank', 'noopener');
+  messages.value.push(createAssistantMessage('已开始下载最近一次成功分析的可追溯报告（HTML）。打开后可使用浏览器“打印”保存为 PDF。'));
+  scrollToBottom();
+};
+
 const processAiChat = async (userInput, isHidden = false) => {
   isAnalyzing.value = true;
   activeTrace.value = [];
@@ -518,7 +539,9 @@ const processAiChat = async (userInput, isHidden = false) => {
         detail: data.resultEnvelope.provenance
       }));
     }
-    if (data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, 'far')) {
+    if (data.metrics && Object.keys(data.metrics).length > 0) {
+      // 是否可展示由指标面板统一校验：标准 FAR 指标与知识图谱
+      // 动态能力（如 avg_height_analysis 的 buildingCount 等）均可展示。
       window.dispatchEvent(new CustomEvent('show-gis-charts', { detail: data.metrics }));
     }
     const cityEngineJobId = data.reply?.match(/CityEngine 作业[：:]\s*([\w-]+)/)?.[1];

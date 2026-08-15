@@ -1,0 +1,43 @@
+@mixin tableList() {
+  .geoscene-table-list {
+    display: flex;
+  }
+
+  .geoscene-table-list__filter-no-results {
+    @include layerListFilterNoResults();
+  }
+
+  .geoscene-table-list__status-indicator {
+    @include layerListStatusIndicator();
+  }
+
+  .geoscene-table-list__publishing {
+    @include layerListPublishingIndicator();
+
+    animation: geoscene-table-layer-list__publishing-anim 2s normal infinite;
+  }
+
+  .geoscene-table-list__item-content {
+    @include layerListItemContent();
+  }
+
+  .geoscene-table-list__item-content-bottom {
+    @include layerListContentBottom();
+  }
+
+  .geoscene-table-list__item-content-bottom .geoscene-legend__service {
+    @include layerListLegend();
+  }
+
+  .geoscene-table-list__item-message {
+    @include layerListContentBottom();
+  }
+
+  @keyframes geoscene-table-layer-list__publishing-anim {
+    @include layerListPublishing();
+  }
+}
+
+@if $include_TableList == true {
+  @include tableList();
+}

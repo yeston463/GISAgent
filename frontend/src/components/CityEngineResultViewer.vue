@@ -49,9 +49,20 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue';
-import Map from '@arcgis/core/Map';
-import SceneView from '@arcgis/core/views/SceneView';
-import SceneLayer from '@arcgis/core/layers/SceneLayer';
+import { loadGeoSceneModules } from '../map/geoSceneAdapter';
+
+let geoSceneModulesPromise;
+
+const getGeoSceneModules = () => {
+  if (!geoSceneModulesPromise) {
+    geoSceneModulesPromise = loadGeoSceneModules([
+      'geoscene/Map',
+      'geoscene/views/SceneView',
+      'geoscene/layers/SceneLayer'
+    ]);
+  }
+  return geoSceneModulesPromise;
+};
 
 const visible = ref(false);
 const jobId = ref('');
@@ -130,6 +141,7 @@ const createView = async (spatialReference) => {
   destroyView();
   await nextTick();
   if (!sceneElement.value) return null;
+  const [Map, SceneView] = await getGeoSceneModules();
   const map = new Map({ basemap: null, ground: null });
   const view = new SceneView({
     container: sceneElement.value,
@@ -150,6 +162,7 @@ const loadSceneService = async () => {
   errorMessage.value = '';
   reportLoadStatus('running', '正在连接 GeoScene SceneServer');
   try {
+    const [, , SceneLayer] = await getGeoSceneModules();
     const layer = new SceneLayer({ url: sceneServiceUrl.value, title: 'CityEngine 优化成果' });
     await layer.load();
     const spatialReference = layer.spatialReference || layer.fullExtent?.spatialReference;

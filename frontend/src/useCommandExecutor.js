@@ -1,8 +1,24 @@
-﻿import Graphic from "@arcgis/core/Graphic";
-import Point from "@arcgis/core/geometry/Point";
-import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import axios from "axios";
 import { getGisContextVersion, getGisSessionId, setGisContextVersion } from "./gisSession";
+import { loadGeoSceneModules } from "./map/geoSceneAdapter";
+
+let geoSceneModulesPromise;
+
+const getGeoSceneModules = () => {
+  if (!geoSceneModulesPromise) {
+    geoSceneModulesPromise = loadGeoSceneModules([
+      "geoscene/Graphic",
+      "geoscene/geometry/Point",
+      "geoscene/layers/GeoJSONLayer",
+      "geoscene/geometry/Polygon",
+      "geoscene/geometry/support/webMercatorUtils",
+      "geoscene/geometry/geometryEngine"
+    ]).then(([Graphic, Point, GeoJSONLayer, Polygon, webMercatorUtils, geometryEngine]) => ({
+      Graphic, Point, GeoJSONLayer, Polygon, webMercatorUtils, geometryEngine
+    }));
+  }
+  return geoSceneModulesPromise;
+};
 
 // 决赛级全局状态缓存：锁定最近一次 Python 计算的真实结果
 window.lastGisResult = {
@@ -17,6 +33,69 @@ window.lastGisResult = {
 window.lastBufferGeometry = null;
 window.lastManualAoiGeometry = null;
 window.currentAoiSource = null;
+
+// 将 GeoScene 几何转为 WGS84 GeoJSON Polygon（AOI 上传与 Overpass 拉取共用）。
+const aoiGeoJsonFromGeometry = (geometry, webMercatorUtils) => {
+  const fix = (num) => parseFloat(num.toFixed(6));
+  if (geometry?.rings) {
+    const geographic = geometry.spatialReference?.isWGS84
+      ? geometry
+      : webMercatorUtils.webMercatorToGeographic(geometry);
+    if (!geographic?.rings) throw new Error("无法将 AOI 转换为 WGS84");
+    return {
+      type: "Polygon",
+      coordinates: geographic.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]))
+    };
+  }
+  // 降级：用 extent 矩形
+  const ext = geometry?.extent || geometry;
+  const geographicExtent = Math.abs(ext.xmin) > 180
+    ? webMercatorUtils.webMercatorToGeographic(ext)
+    : ext;
+  return {
+    type: "Polygon",
+    coordinates: [[
+      [fix(geographicExtent.xmin), fix(geographicExtent.ymin)],
+      [fix(geographicExtent.xmax), fix(geographicExtent.ymin)],
+      [fix(geographicExtent.xmax), fix(geographicExtent.ymax)],
+      [fix(geographicExtent.xmin), fix(geographicExtent.ymax)],
+      [fix(geographicExtent.xmin), fix(geographicExtent.ymin)]
+    ]]
+  };
+};
+
+// 把 Overpass 建筑轮廓渲染为地图图层。天地图底图没有 osm-3d 建筑图层，
+// 建筑面必须显式叠加才能被点击感知（spatial-click）与目视核验。
+const renderOverpassBuildingsLayer = async (view, features) => {
+  const { GeoJSONLayer } = await getGeoSceneModules();
+  const existing = view.map.findLayerById("overpass_buildings_layer");
+  if (existing) view.map.remove(existing);
+  const blobUrl = URL.createObjectURL(new Blob(
+    [JSON.stringify({ type: "FeatureCollection", features })],
+    { type: "application/json" }
+  ));
+  const layer = new GeoJSONLayer({
+    id: "overpass_buildings_layer",
+    title: "OSM 建筑轮廓",
+    url: blobUrl,
+    outFields: ["*"],
+    elevationInfo: { mode: "on-the-ground" },
+    renderer: {
+      type: "simple",
+      symbol: {
+        type: "polygon-3d",
+        symbolLayers: [{
+          type: "fill",
+          material: { color: [0, 167, 225, 0.55] },
+          outline: { color: [255, 255, 255, 0.9], size: 1.5 }
+        }]
+      }
+    }
+  });
+  layer.load().then(() => URL.revokeObjectURL(blobUrl)).catch(() => {});
+  view.map.add(layer);
+  return layer;
+};
 
 export function useCommandExecutor(viewRef) {
 
@@ -41,7 +120,7 @@ export function useCommandExecutor(viewRef) {
 
       const view = await getReadyView();
 
-      // ArcGIS SceneView 跳转
+      // GeoScene SceneView 跳转
       await view.goTo({
         center: [lon, lat], // 顺序：[经度, 纬度]
         zoom: params.zoom || 17,
@@ -72,8 +151,96 @@ export function useCommandExecutor(viewRef) {
 
       try {
         const view = await getReadyView();
-        const webMercatorUtils = await import("@arcgis/core/geometry/support/webMercatorUtils.js");
+        const { webMercatorUtils } = await getGeoSceneModules();
 
+        // 共享上传：两条建筑获取路径最终都落到同一个上下文同步协议。
+        const uploadContext = async (features, aoiGeometry, decisions, inputCount) => {
+          console.log("📤 上传数据...");
+          const res = await axios.post("/api/gis/upload-context", {
+            memoryId: getGisSessionId(),
+            contextVersion: getGisContextVersion(),
+            buildings: { type: "FeatureCollection", features: features },
+            aoi: { type: "Feature", geometry: aoiGeometry },
+            geometryTransfer: {
+              policy: "preserve_original_footprint",
+              inputCount,
+              preservedCount: features.length,
+              approximatedCount: features.filter(feature => feature.properties?.geometryApproximation).length,
+              skippedCount: decisions.filter(item => item.decision.startsWith("skip_")).length,
+              decisions: decisions
+            }
+          });
+          setGisContextVersion(res.data?.contextVersion);
+          window.lastGisResult = {
+            ...res.data,
+            far: parseFloat(res.data.far) || 0,
+            site_area: parseFloat(res.data.site_area) || 0,
+            building_area: parseFloat(res.data.building_area) || 0,
+            building_count: parseInt(res.data.building_count) || 0,
+            status: "Success", timestamp: Date.now()
+          };
+          console.log("✅ 结果:", window.lastGisResult);
+          window.dispatchEvent(new CustomEvent("gis-data-ready"));
+          return true;
+        };
+
+        // ---- 主路径：Overpass 2D 建筑轮廓 ----
+        // 天地图底图没有 osm-3d 建筑 SceneLayer，真实建筑面统一从
+        // Python /analysis/fetch_buildings（Overpass）按 AOI 拉取并裁剪。
+        // queryGeometry 在此解析一次并贯穿全流程：异步查询期间不重读全局，
+        // 避免后续 flyTo/buffer 指令改变指标与 CityEngine 使用的多边形。
+        const queryGeometry = params?.aoiGeometry || window.lastBufferGeometry;
+        if (!queryGeometry) {
+          console.error("❌ 无缓冲区几何");
+          return false;
+        }
+        const geometryDecisions = [];
+        try {
+          const aoiGeometry = aoiGeoJsonFromGeometry(queryGeometry, webMercatorUtils);
+          const footprintResponse = await axios.post("/analysis/fetch_buildings", {
+            aoi: { type: "Feature", geometry: aoiGeometry, properties: {} }
+          });
+          const fetchedFeatures = footprintResponse.data?.buildings?.features;
+          if (!Array.isArray(fetchedFeatures) || fetchedFeatures.length < 3) {
+            throw new Error(footprintResponse.data?.message
+              || `Overpass 仅返回 ${Array.isArray(fetchedFeatures) ? fetchedFeatures.length : 0} 栋建筑`);
+          }
+          const features = fetchedFeatures.map((feature, index) => {
+            const properties = { ...(feature.properties || {}) };
+            const coordinates = feature.geometry?.coordinates || [];
+            const polygons = feature.geometry?.type === "MultiPolygon" ? coordinates : [coordinates];
+            const originalVertexCount = polygons.reduce((polygonTotal, polygon) =>
+              polygonTotal + polygon.reduce((ringTotal, ring) => ringTotal + Math.max(0, ring.length - 1), 0), 0
+            );
+            return {
+              ...feature,
+              properties: {
+                ...properties,
+                id: properties.id ?? properties.osm_id ?? `osm-${index + 1}`,
+                geometrySource: "openstreetmap_overpass_aoi_clipped",
+                geometryApproximation: false,
+                originalVertexCount,
+                geometryChangeReason: "Overpass 提供的 OSM 真实建筑面，已按当前 AOI 裁剪。"
+              }
+            };
+          });
+          geometryDecisions.push({
+            buildingId: "OSM-primary",
+            decision: "overpass_primary_fetch",
+            reason: `已从 Overpass 获取 AOI 全量 ${features.length} 栋真实建筑面（主数据源）。`
+          });
+          await renderOverpassBuildingsLayer(view, features);
+          return await uploadContext(features, aoiGeometry, geometryDecisions, features.length);
+        } catch (error) {
+          geometryDecisions.push({
+            buildingId: "OSM-primary",
+            decision: "overpass_primary_failed",
+            reason: `Overpass 主路径失败，回退 SceneLayer Mesh 提取：${error?.response?.data?.message || error?.message || "未知错误"}`
+          });
+          console.warn("⚠️ Overpass 主路径失败，回退 SceneLayer Mesh 提取:", error);
+        }
+
+        // ---- 回退路径：SceneLayer Mesh 提取（仅在底图提供 osm-3d 建筑图层时可用）----
         // 找建筑图层
         console.log("🔍 查找建筑图层...");
         console.log("📋 所有图层:");
@@ -95,6 +262,8 @@ export function useCommandExecutor(viewRef) {
         if (!osmLayer) {
           console.error("❌ 未找到建筑图层");
           console.log("💡 提示：请确保地图中有 Buildings 图层");
+          window.lastGisResult.status = "error";
+          window.lastGisResult.message = "该区域没有可用的建筑数据：Overpass 未返回建筑面，且当前天地图底图没有三维建筑图层可回退。请在有建筑的区域重试。";
           return false;
         }
         console.log("✅ 找到建筑图层:", osmLayer.title);
@@ -139,19 +308,8 @@ export function useCommandExecutor(viewRef) {
           return false;
         }
 
-        // 使用缓冲区查询
-        // Snapshot the AOI for this complete synchronization. Do not reread
-        // the global after asynchronous layer queries, otherwise a later
-        // flyTo/buffer command can make metrics and CityEngine use different
-        // polygons.
-        let queryGeometry = params?.aoiGeometry || window.lastBufferGeometry;
-        if (!queryGeometry) {
-          console.log("❌ 无缓冲区几何");
-          return false;
-        }
-
-        const ext = queryGeometry.extent;
-        console.log("📐 缓冲区范围:", ext.xmin, ext.ymin, ext.xmax, ext.ymax);
+        // 使用缓冲区查询（queryGeometry 已在 Overpass 主路径解析为 const 快照）
+        console.log("📐 缓冲区范围:", queryGeometry.extent.xmin, queryGeometry.extent.ymin, queryGeometry.extent.xmax, queryGeometry.extent.ymax);
 
         console.log("🔍 执行缓冲区查询（圆形几何）...");
         let bufferResult;
@@ -174,8 +332,7 @@ export function useCommandExecutor(viewRef) {
         }
 
         // 处理建筑数据。CityEngine 必须接收真实面轮廓，不能用 extent 冒充建筑 footprint。
-        const fix = (num) => parseFloat(num.toFixed(6));
-        const geometryDecisions = [];
+        // fix 与 geometryDecisions 已在 Overpass 主路径声明（geometryDecisions 贯穿两条路径）。
         const meshToFootprint = async (mesh) => {
           if (mesh?.type !== "mesh") return null;
 
@@ -494,7 +651,7 @@ export function useCommandExecutor(viewRef) {
 
           let sourceRings = g.rings;
           let ringsAreGeographic = g.type === "mesh";
-          let geometrySource = "arcgis_polygon_rings";
+          let geometrySource = "geoscene_polygon_rings";
           let geometryApproximation = false;
           let geometryChangeReason = "保留原始建筑轮廓；CityEngine 仅沿该轮廓生成体量。";
           let meshInfo = null;
@@ -504,13 +661,13 @@ export function useCommandExecutor(viewRef) {
               if ((!Array.isArray(sourceRings) || sourceRings.length === 0) && meshInfo?.rings) {
                 sourceRings = meshInfo.rings;
                 if (meshInfo.footprintRecovery === "mesh_exact_ground_faces") {
-                  geometrySource = "arcgis_scene_mesh_ground_boundary";
+                  geometrySource = "geoscene_scene_mesh_ground_boundary";
                   geometryChangeReason = "从 SceneLayer 已加载 Mesh 的真实底面边界还原建筑轮廓；未使用 extent。";
                 } else if (meshInfo.footprintRecovery === "mesh_wall_bottom_edges") {
-                  geometrySource = "arcgis_scene_mesh_wall_bottom_edges";
+                  geometrySource = "geoscene_scene_mesh_wall_bottom_edges";
                   geometryChangeReason = "从 SceneLayer Mesh 墙面底边还原建筑轮廓；适用于无底面但地图可见的三维建筑，未使用 extent。";
                 } else if (meshInfo.footprintRecovery === "mesh_projected_convex_hull") {
-                  geometrySource = "arcgis_scene_mesh_projected_hull";
+                  geometrySource = "geoscene_scene_mesh_projected_hull";
                   geometryApproximation = true;
                   geometryChangeReason = "SceneLayer Mesh 无法恢复闭合底边，已用 Mesh 投影凸包近似；精度高于 extent 外包矩形。";
                   geometryDecisions.push({
@@ -519,10 +676,10 @@ export function useCommandExecutor(viewRef) {
                     reason: geometryChangeReason
                   });
                 } else if (meshInfo.footprintRecovery === "mesh_roof_surface_boundary") {
-                  geometrySource = "arcgis_scene_mesh_roof_projection";
+                  geometrySource = "geoscene_scene_mesh_roof_projection";
                   geometryChangeReason = "SceneLayer Mesh 缺少闭合底面，已由真实屋顶三角网垂直投影恢复建筑轮廓；未使用凸包或 extent。";
                 } else {
-                  geometrySource = "arcgis_scene_mesh_lower_surface_boundary";
+                  geometrySource = "geoscene_scene_mesh_lower_surface_boundary";
                   geometryChangeReason = "从 SceneLayer Mesh 的低位底面三角网恢复建筑边界，适用于存在地形高差的建筑；未使用 extent。";
                 }
               }
@@ -535,9 +692,9 @@ export function useCommandExecutor(viewRef) {
             sourceRings = extentToGeographicRing(g.extent);
             if (sourceRings) {
               ringsAreGeographic = true;
-              geometrySource = "arcgis_geometry_extent_rectangle";
+              geometrySource = "geoscene_geometry_extent_rectangle";
               geometryApproximation = true;
-              geometryChangeReason = "未取得真实建筑轮廓，按 ArcGIS 几何 extent 生成外包矩形近似体。";
+              geometryChangeReason = "未取得真实建筑轮廓，按 GeoScene 几何 extent 生成外包矩形近似体。";
               geometryDecisions.push({
                 buildingId: idVal,
                 decision: "approximate_extent_rectangle",
@@ -560,9 +717,9 @@ export function useCommandExecutor(viewRef) {
             sourceRings = extentToGeographicRing(g.extent);
             if (sourceRings) {
               ringsAreGeographic = true;
-              geometrySource = "arcgis_geometry_extent_rectangle";
+              geometrySource = "geoscene_geometry_extent_rectangle";
               geometryApproximation = true;
-              geometryChangeReason = "真实建筑轮廓无法转换至 WGS84，按 ArcGIS 几何 extent 生成外包矩形近似体。";
+              geometryChangeReason = "真实建筑轮廓无法转换至 WGS84，按 GeoScene 几何 extent 生成外包矩形近似体。";
               geometryDecisions.push({ buildingId: idVal, decision: "approximate_extent_rectangle", reason: geometryChangeReason });
             } else {
               geometryDecisions.push({
@@ -587,9 +744,9 @@ export function useCommandExecutor(viewRef) {
           if (!ringsAreValid) {
             const rectangleRings = extentToGeographicRing(g.extent);
             if (rectangleRings) {
-              geometrySource = "arcgis_geometry_extent_rectangle";
+              geometrySource = "geoscene_geometry_extent_rectangle";
               geometryApproximation = true;
-              geometryChangeReason = "建筑轮廓无效，按 ArcGIS 几何 extent 生成外包矩形近似体。";
+              geometryChangeReason = "建筑轮廓无效，按 GeoScene 几何 extent 生成外包矩形近似体。";
               geometryDecisions.push({ buildingId: idVal, decision: "approximate_extent_rectangle", reason: geometryChangeReason });
               coords.splice(0, coords.length, ...rectangleRings);
             } else {
@@ -654,122 +811,24 @@ export function useCommandExecutor(viewRef) {
           console.warn(`⚠️ ${geometryDecisions.length} 项建筑几何处理决策:`, geometryDecisions);
         }
 
-        // 构建 AOI：使用实际缓冲区圆形几何，而非外接矩形
-        const bufferGeom = queryGeometry;
-        let aoiGeometry;
-        if (bufferGeom && bufferGeom.rings) {
-          const geographicAoi = bufferGeom.spatialReference?.isWGS84
-            ? bufferGeom
-            : webMercatorUtils.webMercatorToGeographic(bufferGeom);
-          if (!geographicAoi?.rings) throw new Error("无法将 AOI 转换为 WGS84");
-          aoiGeometry = {
-            type: "Polygon",
-            coordinates: geographicAoi.rings.map(ring => ring.map(p => [fix(p[0]), fix(p[1])]))
-          };
-        } else {
-          // 降级：用 extent 矩形
-          const geographicExtent = Math.abs(ext.xmin) > 180
-            ? webMercatorUtils.webMercatorToGeographic(ext)
-            : ext;
-          aoiGeometry = {
-            type: "Polygon",
-            coordinates: [[
-              [fix(geographicExtent.xmin), fix(geographicExtent.ymin)],
-              [fix(geographicExtent.xmax), fix(geographicExtent.ymin)],
-              [fix(geographicExtent.xmax), fix(geographicExtent.ymax)],
-              [fix(geographicExtent.xmin), fix(geographicExtent.ymax)],
-              [fix(geographicExtent.xmin), fix(geographicExtent.ymin)]
-            ]]
-          };
-        }
+        // 构建 AOI：使用实际缓冲区圆形几何，而非外接矩形（与 Overpass 主路径共用转换）
+        const aoiGeometry = aoiGeoJsonFromGeometry(queryGeometry, webMercatorUtils);
 
         // SceneLayer 查询受瓦片加载和当前视图影响。少量返回值即使几何完整，
-        // 也可能只是已加载的一小部分；三维建模必须先核验 AOI 全量 footprint。
-        const hasApproximateFootprints = features.some(feature => feature.properties?.geometryApproximation);
-        const requiresCompleteFootprints = features.length < 3
-          || geometryDecisions.length > 0
-          || hasApproximateFootprints;
-        if (requiresCompleteFootprints) {
-          console.warn("⚠️ 场景图层建筑数量或轮廓不完整，正在从 OSM 获取 AOI 内原始轮廓...");
-          try {
-            const aoiFeature = { type: "Feature", geometry: aoiGeometry, properties: {} };
-            const footprintResponse = await axios.post("/analysis/fetch_buildings", { aoi: aoiFeature });
-            const fetchedFeatures = footprintResponse.data?.buildings?.features;
-            if (!Array.isArray(fetchedFeatures) || fetchedFeatures.length === 0) {
-              throw new Error(footprintResponse.data?.message || "OSM 未返回建筑面");
-            }
-            features = fetchedFeatures.map((feature, index) => {
-              const properties = { ...(feature.properties || {}) };
-              const coordinates = feature.geometry?.coordinates || [];
-              const polygons = feature.geometry?.type === "MultiPolygon" ? coordinates : [coordinates];
-              const originalVertexCount = polygons.reduce((polygonTotal, polygon) =>
-                polygonTotal + polygon.reduce((ringTotal, ring) => ringTotal + Math.max(0, ring.length - 1), 0), 0
-              );
-              return {
-                ...feature,
-                properties: {
-                  ...properties,
-                  id: properties.id ?? properties.osm_id ?? `osm-${index + 1}`,
-                  geometrySource: "openstreetmap_overpass_aoi_clipped",
-                  geometryApproximation: false,
-                  originalVertexCount,
-                  geometryChangeReason: "SceneLayer 未提供完整 footprint，改用 OSM 真实建筑面并按当前 AOI 裁剪。"
-                }
-              };
-            });
-            geometryDecisions.push({
-              buildingId: "OSM-fallback",
-              decision: "replace_incomplete_scene_footprints",
-              reason: `SceneLayer 返回 ${bufferResult.features.length} 栋或轮廓不完整，已改用 OSM 的 ${features.length} 个真实建筑面。`
-            });
-          } catch (error) {
-            const fallbackDetail = error?.response?.data?.message
-              || error?.response?.data?.detail
-              || error?.message
-              || "未知错误";
-            geometryDecisions.push({
-              buildingId: "OSM-fallback",
-              decision: "osm_fallback_failed",
-              reason: `OSM 真实轮廓回退失败：${fallbackDetail}`
-            });
-            if (features.length < 3) {
-              throw new Error(`建筑上下文不完整：SceneLayer 仅返回 ${features.length} 栋，且无法取得 AOI 全量真实建筑面。已停止同步以避免生成退化的少量建筑成果。${fallbackDetail}`);
-            }
-            console.warn("⚠️ OSM 回退失败，将仅使用场景图层中已有的真实 rings:", error);
-          }
+        // 也可能只是已加载的一小部分。Overpass 主路径已在函数开头尝试并失败，
+        // 此处不再重复外网调用，仅核验数量并如实记录近似轮廓。
+        if (features.some(feature => feature.properties?.geometryApproximation)) {
+          geometryDecisions.push({
+            buildingId: "OSM-primary",
+            decision: "keep_approximate_scene_footprints",
+            reason: "Overpass 不可用且 SceneLayer 含近似轮廓，保留近似几何以维持分析可用。"
+          });
+        }
+        if (features.length < 3) {
+          throw new Error(`建筑上下文不完整：SceneLayer 仅返回 ${features.length} 栋，且 Overpass 主路径未取得 AOI 全量真实建筑面。已停止同步以避免生成退化的少量建筑成果。`);
         }
 
-        // 上传到后端
-        console.log("📤 上传数据...");
-        const res = await axios.post("/api/gis/upload-context", {
-          memoryId: getGisSessionId(),
-          contextVersion: getGisContextVersion(),
-          buildings: { type: "FeatureCollection", features: features },
-          aoi: { type: "Feature", geometry: aoiGeometry },
-          geometryTransfer: {
-            policy: "preserve_original_footprint",
-            inputCount: bufferResult.features.length,
-            preservedCount: features.length,
-            approximatedCount: features.filter(feature => feature.properties?.geometryApproximation).length,
-            skippedCount: geometryDecisions.filter(item => item.decision.startsWith("skip_")).length,
-            decisions: geometryDecisions
-          }
-        });
-        setGisContextVersion(res.data?.contextVersion);
-
-        const freshData = {
-          ...res.data,
-          far: parseFloat(res.data.far) || 0,
-          site_area: parseFloat(res.data.site_area) || 0,
-          building_area: parseFloat(res.data.building_area) || 0,
-          building_count: parseInt(res.data.building_count) || 0,
-          status: "Success", timestamp: Date.now()
-        };
-
-        window.lastGisResult = freshData;
-        console.log("✅ 结果:", freshData);
-        window.dispatchEvent(new CustomEvent("gis-data-ready"));
-        return true;
+        return await uploadContext(features, aoiGeometry, geometryDecisions, bufferResult.features.length);
 
       } catch (err) {
         console.error("❌ 错误:", err);
@@ -819,6 +878,7 @@ export function useCommandExecutor(viewRef) {
       console.log("🎨 [原子指令] 收到几何数据，准备渲染至 3D 空间...", params);
       try {
         const view = await getReadyView();
+        const { GeoJSONLayer } = await getGeoSceneModules();
 
         // 1. 解析数据 (处理字符串或对象)
         let geojson = params.geoJson;
@@ -885,6 +945,7 @@ export function useCommandExecutor(viewRef) {
 
     addGeoJsonLayer: async (params) => {
       const view = await getReadyView();
+      const { GeoJSONLayer } = await getGeoSceneModules();
       const data = params?.data;
       if (!data) return;
 
@@ -932,6 +993,15 @@ export function useCommandExecutor(viewRef) {
           { minValue: 70, maxValue: 100, label: "High suitability", symbol: siteSelectionSymbol([34, 197, 94, 0.5], [21, 128, 61, 0.95]) }
         ]
       };
+      const nearestFacilityRenderer = {
+        type: "class-breaks", field: "nearestFacilityDistanceM", defaultSymbol: {
+          ...siteSelectionSymbol([148, 163, 184, 0.35], [71, 85, 105, 0.9])
+        }, classBreakInfos: [
+          { minValue: 0, maxValue: 250, label: "Within 250 m", symbol: siteSelectionSymbol([34, 197, 94, 0.55], [21, 128, 61, 0.95]) },
+          { minValue: 250, maxValue: 1000, label: "250 m to 1 km", symbol: siteSelectionSymbol([245, 158, 11, 0.5], [180, 83, 9, 0.9]) },
+          { minValue: 1000, maxValue: 100000000, label: "Over 1 km", symbol: siteSelectionSymbol([239, 68, 68, 0.48], [153, 27, 27, 0.9]) }
+        ]
+      };
       const blob = new Blob([JSON.stringify(data)], { type: "application/geo+json" });
       const url = URL.createObjectURL(blob);
       const layer = new GeoJSONLayer({
@@ -939,7 +1009,7 @@ export function useCommandExecutor(viewRef) {
         title: params.title || "Agent 分析图层",
         url,
         elevationInfo: { mode: params.style === "warning" || params.style === "optimized" ? "on-the-ground" : "on-the-ground" },
-        renderer: params.style === "floodRisk" ? floodRenderer : params.style === "floodExposure" ? floodExposureRenderer : params.style === "siteSelection" ? siteSelectionRenderer : {
+        renderer: params.style === "floodRisk" ? floodRenderer : params.style === "floodExposure" ? floodExposureRenderer : params.style === "siteSelection" ? siteSelectionRenderer : params.style === "nearestFacility" ? nearestFacilityRenderer : {
           type: "simple",
           symbol: {
             type: "simple-fill",
@@ -963,6 +1033,8 @@ export function useCommandExecutor(viewRef) {
             ,{ fieldName: "siteScore", label: "适宜性评分" }
             ,{ fieldName: "screeningStatus", label: "筛查状态" }
             ,{ fieldName: "nearestFacilityM", label: "最近设施距离 (m)" }
+            ,{ fieldName: "nearestFacilityDistanceM", label: "最近设施距离 (m)" }
+            ,{ fieldName: "nearestFacilityBearingDeg", label: "最近设施方位 (°)" }
             ,{ fieldName: "nearestConstraintM", label: "最近约束距离 (m)" }
           ] }]
         }
@@ -1021,8 +1093,7 @@ export function useCommandExecutor(viewRef) {
         throw new Error("行政区 AOI 必须是 GeoJSON Polygon 或 MultiPolygon");
       }
       const view = await getReadyView();
-      const Polygon = (await import("@arcgis/core/geometry/Polygon.js")).default;
-      const Graphic = (await import("@arcgis/core/Graphic.js")).default;
+      const { Polygon, Graphic } = await getGeoSceneModules();
       const rings = geometry.type === "Polygon" ? geometry.coordinates : geometry.coordinates.flat();
       const aoi = new Polygon({ rings, spatialReference: { wkid: 4326 } });
       window.lastBufferGeometry = aoi;
@@ -1066,10 +1137,7 @@ export function useCommandExecutor(viewRef) {
           return { skipped: true, reason: "manual_aoi_locked" };
         }
         const view = await getReadyView();
-        // 动态引入 ArcGIS 前端几何引擎
-        const geometryEngine = await import("@arcgis/core/geometry/geometryEngine.js");
-        const Graphic = (await import("@arcgis/core/Graphic.js")).default;
-        const Point = (await import("@arcgis/core/geometry/Point.js")).default;
+        const { geometryEngine, Graphic, Point, Polygon } = await getGeoSceneModules();
 
         // 解析 AI 传来的参数
         const lon = parseFloat(params.longitude);
@@ -1112,7 +1180,6 @@ export function useCommandExecutor(viewRef) {
             const dLat = dy / 111320;
             coords.push([lon + dLon, lat + dLat]);
           }
-          const Polygon = (await import("@arcgis/core/geometry/Polygon.js")).default;
           bufferGeom = new Polygon({
             rings: [coords],
             spatialReference: { wkid: 4326 }

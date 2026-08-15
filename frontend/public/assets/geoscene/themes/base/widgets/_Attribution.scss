@@ -1,0 +1,57 @@
+@mixin attribution() {
+  .geoscene-attribution {
+    display: flex;
+    flex-flow: row nowrap;
+    align-items: center;
+    justify-content: space-between;
+    background-color: rgba($background-color, 0.8);
+    line-height: 16px; // TODO: refactor to let Attribution inherit line-height.
+    font-size: $font-size--small;
+  }
+
+  .geoscene-attribution__link {
+    text-decoration: none;
+    color: currentColor;
+
+    &:hover,
+    &:active,
+    &:visited,
+    &:focus {
+      color: currentColor;
+    }
+  }
+
+  .geoscene-attribution__sources {
+    flex: 1 0;
+    align-self: flex-start;
+    padding: 0 5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: $font-weight--light;
+  }
+
+  .geoscene-attribution__sources[role="button"] {
+    font-size: 1em;
+  }
+
+  .geoscene-attribution__powered-by {
+    align-self: flex-end;
+    padding: 0 5px;
+    text-align: right;
+    white-space: nowrap;
+    font-weight: $font-weight;
+  }
+
+  .geoscene-attribution--open {
+    z-index: 2;
+  }
+
+  .geoscene-attribution__sources--open {
+    white-space: normal;
+  }
+}
+
+@if $include_Attribution == true {
+  @include attribution();
+}

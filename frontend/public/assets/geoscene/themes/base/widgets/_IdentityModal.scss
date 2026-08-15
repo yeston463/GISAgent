@@ -1,0 +1,10 @@
+@mixin identityModal() {
+  .geoscene-identity-modal__info,
+  .geoscene-identity-modal__notice {
+    margin-bottom: $cap-spacing;
+  }
+}
+
+@if $include_IdentityModal == true {
+  @include identityModal();
+}

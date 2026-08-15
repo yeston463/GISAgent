@@ -1,0 +1,103 @@
+@mixin features() {
+  // actions
+  $action-size: $button-width--half !default;
+  $action-size--image: $button-width--half !default;
+
+  .geoscene-features {
+    --calcite-color-background: $background-color;
+
+    display: flex;
+    flex-direction: column;
+
+    calcite-flow {
+      position: relative;
+      z-index: 1;
+    }
+
+    img {
+      image-orientation: from-image;
+    }
+  }
+
+  .geoscene-features__flow-item--collapsed {
+    --calcite-flow-item-header-border-block-end: none;
+  }
+
+  .geoscene-features__container {
+    background-color: var(--calcite-color-background);
+  }
+
+  .geoscene-features__container:not(:empty) {
+    padding: $cap-spacing;
+  }
+
+  .geoscene-features .geoscene-feature,
+  .geoscene-features .geoscene-feature-relationship {
+    background-color: transparent;
+  }
+
+  .geoscene-features__heading {
+    word-break: break-word;
+    word-wrap: break-word;
+  }
+
+  .geoscene-features__header,
+  .geoscene-features__footer {
+    display: flex;
+    justify-content: flex-end;
+    background-color: var(--calcite-color-foreground-1);
+  }
+
+  .geoscene-features__loader {
+    align-self: center;
+    padding-inline: 1rem;
+  }
+
+  .geoscene-features__pagination-action-bar {
+    flex: 1;
+    border-inline-end: 1px solid var(--calcite-color-border-3);
+  }
+
+  .geoscene-features__icon {
+    display: inline-block;
+    flex: 0 0 $action-size--image;
+    width: $action-size;
+    height: $action-size;
+  }
+
+  .geoscene-features__action-image {
+    flex: 0 0 $action-size--image;
+    background-position: 50% 50%;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: $action-size--image;
+    height: $action-size--image;
+  }
+
+  .geoscene-features__footer {
+    flex: 1;
+  }
+
+  .geoscene-features__header {
+    border-block-end: 1px solid var(--calcite-color-border-3);
+  }
+
+  .geoscene-features__content-feature {
+    --calcite-flow-item-footer-padding: 0;
+  }
+
+  .geoscene-features__feature-menu-observer {
+    position: relative;
+    bottom: 20px;
+    z-index: 2;
+    text-align: center;
+  }
+
+  .geoscene-features__action--exit {
+    transform: scaleX(-1);
+  }
+}
+
+@if $include_Features == true {
+  @include features();
+}

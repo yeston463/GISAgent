@@ -1,0 +1,7 @@
+@mixin heatmapSlider() {
+  @include smartMappingSlider(geoscene-heatmap-slider);
+}
+
+@if $include_HeatmapSlider == true {
+  @include heatmapSlider();
+}

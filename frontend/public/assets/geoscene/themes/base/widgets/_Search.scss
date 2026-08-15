@@ -1,0 +1,218 @@
+$search_width: 240px !default;
+
+@mixin clearBorders($exception-side: "", $exception-value: "") {
+  $border-sides: top, right, bottom, left;
+
+  @each $border-side in $border-sides {
+    @if $border-side == $exception-side {
+      border-#{$exception-side}: $exception-value;
+    } @else {
+      border-#{$border-side}: none;
+    }
+  }
+}
+
+@mixin search() {
+  @include loopingProgressBar(".geoscene-search--searching");
+
+  .geoscene-search {
+    display: flex;
+    flex-flow: row nowrap;
+    align-items: center;
+    justify-content: center;
+    width: $search_width;
+    overflow: visible;
+
+    .geoscene-widget--button {
+      box-shadow: none;
+    }
+
+    .geoscene-icon-notice-triangle {
+      margin-inline-end: 5px;
+      vertical-align: text-bottom;
+      line-height: 16px;
+      font-size: 16px;
+    }
+
+    .geoscene-widget__loader {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: $button-height;
+    }
+
+    .geoscene-widget__loader-text {
+      margin: 0 $side-spacing--third;
+    }
+  }
+
+  .geoscene-search__container,
+  .geoscene-search__input-container,
+  .geoscene-search__form {
+    display: flex;
+    flex-flow: row nowrap;
+  }
+
+  .geoscene-search__container {
+    position: relative;
+    flex: 1 0 100%;
+    align-items: stretch;
+
+    .geoscene-search__input,
+    .geoscene-widget--button {
+      z-index: 0;
+    }
+
+    .geoscene-search__input:focus,
+    .geoscene-widget--button:focus {
+      z-index: 1;
+    }
+  }
+
+  .geoscene-search__input-container {
+    flex: 2 0;
+    align-items: stretch;
+  }
+
+  .geoscene-search__form {
+    flex: 1 0;
+    align-items: stretch;
+    margin: 0;
+    padding: 0;
+  }
+
+  .geoscene-search__input {
+    display: block;
+    margin: 0;
+    border: none;
+    box-shadow: none;
+    width: 100%;
+  }
+
+  .geoscene-search__input::-ms-clear {
+    display: none;
+  }
+
+  .geoscene-search__input::placeholder {
+    opacity: 1;
+    color: $font-color--placeholder;
+  }
+
+  .geoscene-search__submit-button,
+  .geoscene-search__sources-button {
+    display: flex;
+    align-self: flex-end;
+    cursor: pointer;
+  }
+
+  .geoscene-search__submit-button {
+    @include clearBorders(left, solid 1px $border-color);
+  }
+
+  .geoscene-search__sources-button {
+    @include clearBorders(right, solid 1px $border-color);
+  }
+
+  .geoscene-search__sources-button--up {
+    display: none;
+  }
+
+  .geoscene-search__clear-button {
+    @include clearBorders();
+
+    display: flex;
+    align-self: flex-end;
+  }
+
+  .geoscene-search__source-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .geoscene-search__suggestions-menu {
+    @include icomoonIconSelector() {
+      vertical-align: middle;
+    }
+  }
+
+  .geoscene-search__suggestions-menu .geoscene-menu__header:first-child,
+  .geoscene-search__suggestions-menu ul:first-child {
+    border: none;
+  }
+
+  .geoscene-search--show-suggestions .geoscene-search__suggestions-menu,
+  .geoscene-search--sources .geoscene-search__sources-menu {
+    visibility: visible;
+    max-height: 300px;
+    overflow: auto;
+    animation: geoscene-fade-in 250ms ease-out;
+  }
+
+  .geoscene-search__source--active {
+    background-color: $background-color--active;
+  }
+
+  .geoscene-search--warning .geoscene-search__warning-menu {
+    transition: opacity 125ms ease-in-out;
+    visibility: visible;
+    opacity: 1;
+    max-height: inherit;
+  }
+
+  .geoscene-search--multiple-sources .geoscene-search__input {
+    border-left: 0;
+  }
+
+  .geoscene-search__warning-menu {
+    opacity: 0;
+    z-index: 1;
+    font-size: 14px;
+  }
+
+  .geoscene-search__warning-body {
+    padding: 0.8em 1em;
+  }
+
+  .geoscene-search__warning-header {
+    margin-bottom: 5px;
+    font-weight: $font-weight--bold;
+  }
+
+  .geoscene-ui-bottom-left,
+  .geoscene-ui-bottom-right {
+    .geoscene-search__sources-button--up {
+      display: flex;
+    }
+
+    .geoscene-search__sources-button--down {
+      display: none;
+    }
+  }
+
+  .geoscene-view-width-less-than-small .geoscene-search__input {
+    font-size: 16px;
+  }
+
+  [dir="rtl"] {
+    .geoscene-search__submit-button {
+      border-right: solid 1px $border-color;
+      border-left: none;
+    }
+
+    .geoscene-search__sources-button {
+      border-right: none;
+      border-left: solid 1px $border-color;
+    }
+
+    .geoscene-search__container::after {
+      animation: looping-progresss-bar-ani $looping-progress-bar-params reverse;
+    }
+  }
+}
+
+@if $include_Search == true {
+  @include search();
+}

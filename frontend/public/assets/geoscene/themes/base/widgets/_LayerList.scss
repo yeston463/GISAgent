@@ -1,0 +1,85 @@
+@mixin layerList() {
+  .geoscene-layer-list {
+    display: flex;
+  }
+
+  .geoscene-layer-list__filter-no-results {
+    @include layerListFilterNoResults();
+  }
+
+  .geoscene-layer-list__item {
+    --calcite-list-item-spacing-indent: 2rem;
+  }
+
+  .geoscene-layer-list__item-temporary-icon {
+    margin-inline-start: 0.25rem;
+  }
+
+  .geoscene-layer-list__visible-icon {
+    visibility: hidden;
+  }
+
+  .geoscene-layer-list__item--active:hover,
+  .geoscene-layer-list__item--active:focus,
+  .geoscene-layer-list__item--active:focus-within {
+    > .geoscene-layer-list__visible-toggle > .geoscene-layer-list__visible-icon {
+      visibility: visible;
+    }
+  }
+
+  .geoscene-layer-list__item--invisible-at-scale {
+    color: $interactive-font-color--disabled;
+  }
+
+  .geoscene-layer-list__status-indicator {
+    @include layerListStatusIndicator();
+  }
+
+  .geoscene-layer-list__publishing {
+    @include layerListPublishingIndicator();
+
+    animation: geoscene-layer-list__publishing-anim 2s normal infinite;
+  }
+
+  .geoscene-layer-list__updating {
+    @include layerListUpdatingIndicator();
+
+    animation: geoscene-layer-list__updating-anim 2s normal infinite;
+  }
+
+  .geoscene-layer-list__connection-status {
+    @include layerListConnectionStatus();
+  }
+
+  .geoscene-layer-list__connection-status--connected {
+    color: $connection-connected;
+  }
+
+  .geoscene-layer-list__item-content {
+    @include layerListItemContent();
+  }
+
+  .geoscene-layer-list__item-content-bottom {
+    @include layerListContentBottom();
+  }
+
+  .geoscene-layer-list__item-content-bottom .geoscene-legend__service {
+    @include layerListLegend();
+  }
+
+  .geoscene-layer-list__item-message {
+    @include layerListContentBottom();
+  }
+
+  @keyframes geoscene-layer-list__updating-anim {
+    @include layerListUpdating();
+  }
+
+  @keyframes geoscene-layer-list__publishing-anim {
+    @include layerListPublishing();
+  }
+}
+
+@if $include_LayerList == true {
+  @include layerList();
+}

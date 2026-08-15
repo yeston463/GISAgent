@@ -1,0 +1,37 @@
+@mixin featureTemplates() {
+  $icon_size: 48px;
+  $border: 1px solid $border-color;
+
+  .geoscene-feature-templates {
+    background: var(--calcite-color-background);
+  }
+
+  .geoscene-feature-templates__list-item-icon {
+    display: flex;
+    flex: 0;
+    align-items: center;
+    justify-content: center;
+    width: $icon_size;
+    min-width: $icon_size;
+  }
+
+  .geoscene-feature-templates__list-item-icon > div {
+    // TemplateItem thumbnail uses plain div as wrapper
+    display: flex;
+  }
+
+  .geoscene-ui {
+    .geoscene-feature-templates {
+      width: $panel-width;
+    }
+
+    // If FeatureTemplates is used _inside_ another widget, then .geoscene-feature-templates should fit inside it
+    .geoscene-widget .geoscene-feature-templates {
+      width: 100%;
+    }
+  }
+}
+
+@if $include_FeatureTemplates == true {
+  @include featureTemplates();
+}

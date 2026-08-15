@@ -1,0 +1,10 @@
+@mixin panoramicViewer() {
+  .geoscene-panoramic-viewer {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+@if $include_PanoramicViewer == true {
+  @include panoramicViewer();
+}
