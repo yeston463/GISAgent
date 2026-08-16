@@ -1889,6 +1889,7 @@ def _load_demo_json(file_name):
         candidates.append(Path(configured_dir) / file_name)
     candidates.extend([
         base_dir / "demo-case" / file_name,
+        base_dir / "src" / "main" / "resources" / "demo-case" / file_name,
         base_dir / "src" / "main" / "resources" / "static" / "demo-case" / file_name,
     ])
 
