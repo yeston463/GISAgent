@@ -646,3 +646,27 @@ def test_create_buffer_feature_validation():
         main.create_buffer_feature(0, 0, 500)  # (0,0) rejected
     with pytest.raises(ValueError):
         main.create_buffer_feature(None, None, 500)  # missing lon/lat
+
+
+def test_flood_depth_magnitude_is_plausible_for_storm():
+    """固定输入固定预期: 80mm/24h 暴雨在带汇流的城市 DEM 上，
+    最大相对水深应达到分米级（0.1~1.0 m），而不是被压缩到厘米级。"""
+    size = 16
+    features = []
+    for row in range(size):
+        for col in range(size):
+            x = 121.470 + col * .0004
+            y = 31.230 + row * .0004
+            dist = ((row - size / 2) ** 2 + (col - size / 2) ** 2) ** 0.5
+            elev = 10 + (row - col) * 0.05 + max(0.0, dist - 4) * 0.8
+            features.append({"type": "Feature",
+                             "geometry": {"type": "Point", "coordinates": [x, y]},
+                             "properties": {"elevation_m": round(elev, 2)}})
+    aoi = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [
+        [121.470, 31.230], [121.474, 31.230], [121.474, 31.234], [121.470, 31.234], [121.470, 31.230]]},
+        "properties": {}}
+    dem = {"type": "FeatureCollection", "features": features}
+    result = main.calculate_flood_risk({"aoi": aoi, "dem": dem,
+                                        "rainfall_scenario": {"rainfallMm": 80, "returnPeriodYears": 20}})
+    assert 0.10 <= result["max_estimated_depth_m"] <= 1.0
+    assert result["high_risk_cell_count"] >= 1

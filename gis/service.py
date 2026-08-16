@@ -1790,14 +1790,19 @@ def calculate_flood_risk(payload):
             lon, lat = _cell_coordinate(grid, row, column)
             depression_depth = max(0.0, filled[row][column] - elevation)
             contributing_cells = accumulation[row][column]
-            routing_factor = min(2.5, 0.35 * math.log1p(contributing_cells / accumulation_reference))
-            runoff_depth = rainfall_mm / 1000.0 * 0.65 * (1.0 + routing_factor) * (1.0 - drainage[row][column])
-            # A filled depression denotes storage capacity, not instant water
-            # depth. Event runoff can only occupy that available capacity.
-            # This keeps a 120 mm storm from becoming a multi-metre depth just
-            # because a DEM contains a deep closed pit.
-            event_depth = runoff_depth * min(1.0, 0.20 + 0.16 * routing_factor)
-            depth_m = min(depression_depth, event_depth) if depression_depth > 0 else event_depth * 0.15
+            routing_factor = min(2.5, 0.6 * math.log1p(contributing_cells / accumulation_reference))
+            runoff_depth = rainfall_mm / 1000.0 * 0.75 * (1.0 + routing_factor) * (1.0 - drainage[row][column])
+            # 积水深度校准：城市内涝中，80mm/24h 暴雨在低洼汇流点的
+            # 典型积水深度约 0.3~0.6m，一般区域约 0.05~0.2m。水深由
+            # 径流深与地形集中度决定；洼地容量只作为上限约束，防止深坑
+            # 被灌成数米深，而不是把整体深度压低到厘米级。
+            concentration = 0.6 + 1.2 * routing_factor / 2.5
+            depth_m = runoff_depth * concentration
+            if depression_depth > 0:
+                depth_m = min(depression_depth, depth_m)
+            else:
+                # 无洼地时保留地表滞留水深（约为汇流积水的一半）
+                depth_m = depth_m * 0.5
             score = min(100.0, depth_m / 0.30 * 100.0)
             level = "high" if depth_m >= 0.020 else "medium" if depth_m >= 0.008 else "low"
             cell_width_m = abs(grid["dx"]) * 111320.0 * max(math.cos(math.radians(lat)), 0.01)
