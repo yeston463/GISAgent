@@ -107,21 +107,32 @@ async function showBuildingFootprints(featureCollection, city) {
     buildingGraphicsLayer = null;
   }
   if (!featureCollection?.features?.length) return;
-  const blob = new Blob([JSON.stringify(featureCollection)], { type: 'application/geo+json' });
+  // 缺失 height 的建筑补默认 15m：SizeVariable 把 null 当 0 会渲染成
+  // 几乎贴地的矮块，统一默认高度更符合建筑体量观感。
+  const prepared = {
+    ...featureCollection,
+    features: (featureCollection.features || []).map(feature => {
+      const props = feature.properties || {};
+      if (props.height === null || props.height === undefined) {
+        return { ...feature, properties: { ...props, height: 15 } };
+      }
+      return feature;
+    })
+  };
+  const blob = new Blob([JSON.stringify(prepared)], { type: 'application/geo+json' });
   const url = URL.createObjectURL(blob);
   const layer = new GeoJSONLayerCtor({
     title: 'city-buildings',
     url,
-    // 必须显式请求字段：Arcade 表达式引用 $feature.height 时，
-    // 缺少 outFields 会导致高度字段取不到值，3D 拉伸退化为平面/不可见。
+    // 必须显式请求字段：SizeVariable 按 height 字段驱动拉伸高度时，
+    // 缺少 outFields 会取不到值，3D 拉伸退化为统一高度。
     outFields: ["*"],
-    // 3D 拉伸：高度来自 height 字段（米），缺失时默认 15m，建筑呈现立体体块。
-    // GeoScene 的 ExtrudeSymbol3DLayer.size 只接受数字；动态高度由
-    // renderer 级 valueExpression 返回（Arcade 表达式求值后驱动 size）。
+    // 3D 拉伸：用 SizeVariable（size visual variable）按 height 字段
+    // 映射拉伸高度（米），建筑按真实高度呈现立体体块。实测确认
+    // GeoJSONLayer 的 SimpleRenderer.valueExpression 不驱动 extrude size，
+    // SizeVariable 是 GeoScene 4.29 的有效方案。
     renderer: {
       type: 'simple',
-      valueExpression: "$feature.height ? $feature.height : 15",
-      valueExpressionTitle: '建筑高度（米）',
       symbol: {
         type: 'polygon-3d',
         symbolLayers: [{
@@ -130,7 +141,15 @@ async function showBuildingFootprints(featureCollection, city) {
           material: { color: [255, 170, 0, 0.65] },
           edges: { type: 'solid', color: [200, 120, 0, 0.8] }
         }]
-      }
+      },
+      visualVariables: [{
+        type: 'size',
+        field: 'height',
+        minDataValue: 0,
+        maxDataValue: 72,
+        minSize: 2,
+        maxSize: 72
+      }]
     },
     elevationInfo: { mode: 'on-the-ground' }
   });
