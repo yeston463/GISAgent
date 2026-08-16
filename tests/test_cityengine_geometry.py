@@ -377,3 +377,104 @@ def test_service_restart_closes_unstarted_cityengine_job(tmp_path, monkeypatch):
     assert recovered["status"] == "failed"
     assert "restarted" in recovered["message"]
     assert (results_dir / f"{job_id}.json").is_file()
+
+
+def test_validate_footprint_geometry_repairs_self_intersection():
+    # Bowtie: outer ring crosses itself -> shapely invalid, buffer(0) repairs it.
+    bowtie = {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]],
+    }
+    valid, reason, repaired = bridge._validate_footprint_geometry(bowtie)
+    assert valid, reason
+    assert repaired is not None
+    from shapely.geometry import shape
+    assert shape(repaired).is_valid
+
+
+def test_validate_footprint_geometry_rejects_unrepairable():
+    # Collapsed ring -> buffer(0) yields an empty geometry.
+    collapsed = {
+        "type": "Polygon",
+        "coordinates": [[[1, 1], [1, 1], [1, 1], [1, 1], [1, 1]]],
+    }
+    valid, reason, repaired = bridge._validate_footprint_geometry(collapsed)
+    assert not valid
+    assert repaired is None
+    assert "无法自动修复" in reason or "为空" in reason
+
+
+def test_prepare_buildings_repairs_self_intersection_and_skips_collapsed():
+    bowtie = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]],
+        },
+        "properties": {"id": "repairable-1"},
+    }
+    collapsed = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[1, 1], [1, 1], [1, 1], [1, 1], [1, 1]]],
+        },
+        "properties": {"id": "collapsed-1"},
+    }
+    prepared, _actions, summary = _prepare([bowtie, collapsed])
+    ids = {f["properties"]["id"] for f in prepared["features"]}
+    assert "repairable-1" in ids
+    assert "collapsed-1" not in ids
+    assert any(d["buildingId"] == "collapsed-1" and d["decision"] == "skip_invalid_footprint"
+               for d in summary["decisions"])
+
+
+def test_planned_metrics_uses_real_geometry_and_planning_limits():
+    # 三栋 60m 高层建筑，规划限高 54m -> 规划后最高建筑应为 54m，
+    # 基底面积来自真实几何（footprint_sqm），容积率按规划层数重算。
+    features = [
+        _feature("H-1", height=60, floors=20),
+        _feature("H-2", height=60, floors=20),
+        _feature("H-3", height=60, floors=20),
+    ]
+    rule_set = {"ruleSetId": "test", "effective": True,
+                "source": "test", "rules": {"buildingHeight": {"max": 54.0, "unit": "m"}}}
+    normalized = normalize_requirements(
+        {"maxBuildingHeight": 54, "floorHeight": 3.0, "lotCoverage": 0.75}, rule_set)
+    prepared, _actions, _summary = _prepare_buildings(
+        {"type": "FeatureCollection", "features": features},
+        rule_set, {"type": "FeatureCollection", "features": []}, normalized,
+    )
+    # 限高 54m 触发高度调整（问题建筑集合为空 -> 不调整，直接按输入 60m）
+    planned = bridge._planned_metrics(
+        prepared, {"site_area": 50000.0, "building_count": 3}, normalized)
+
+    assert planned["building_count"] == 3
+    assert planned["site_area"] == 50000.0
+    assert planned["footprint_area_sqm"] > 0
+    assert planned["far"] > 0
+    assert planned["building_density"] > 0
+    assert 0 < planned["green_rate"] <= 100
+    # 规划限高对全部建筑生效：高度压到 54m，层数按 54/3=18 层
+    assert planned["buildingHeight"] == 54.0
+
+
+def test_planned_metrics_caps_height_for_problem_buildings():
+    # 标记为问题建筑 -> 高度压到限高 54m，规划后最高建筑为 54m
+    features = [
+        _feature("P-1", height=60, floors=20),
+        _feature("P-2", height=60, floors=20),
+    ]
+    rule_set = {"ruleSetId": "test", "effective": True,
+                "source": "test", "rules": {"buildingHeight": {"max": 54.0, "unit": "m"}}}
+    normalized = normalize_requirements(
+        {"maxBuildingHeight": 54, "floorHeight": 3.0, "lotCoverage": 0.75}, rule_set)
+    problem = {"type": "FeatureCollection", "features": [
+        _feature("P-1"), _feature("P-2")]}
+    prepared, _actions, _summary = _prepare_buildings(
+        {"type": "FeatureCollection", "features": features},
+        rule_set, problem, normalized,
+    )
+    planned = bridge._planned_metrics(
+        prepared, {"site_area": 50000.0, "building_count": 2}, normalized)
+    assert planned["buildingHeight"] == 54.0

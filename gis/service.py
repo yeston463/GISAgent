@@ -2100,6 +2100,7 @@ def evaluate_context_case(payload):
         "case": {key: case_data.get(key) for key in ("caseId", "name", "city", "landUse", "landUseName", "description")},
         "ruleSet": rule_set,
         "current": {"metrics": current_metrics},
+        "planned": {"metrics": cityengine_job.get("plannedMetrics") or {}},
         "problemBuildings": problems,
         "cityEngineJob": cityengine_job,
         "aoi": aoi,

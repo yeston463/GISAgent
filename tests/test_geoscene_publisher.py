@@ -539,3 +539,89 @@ def test_publish_uses_fresh_name_for_orphan_and_verifies_before_success(tmp_path
     assert result["serviceItemId"] == "fresh-item"
     assert result["hostedService"]["verified"] is True
     assert events[-1][0:2] == ("scene_published", "success")
+
+
+def test_publish_strict_gate_aborts_when_object_store_unhealthy(tmp_path, monkeypatch):
+    slpk = tmp_path / "result.slpk"
+    slpk.write_bytes(b"slpk")
+    monkeypatch.setattr(publisher, "publishing_status", lambda: {"configured": True})
+    monkeypatch.setattr(publisher, "_token", lambda: "token")
+    monkeypatch.setattr(publisher, "discover_stale_publications", lambda _token: [])
+    monkeypatch.setattr(publisher, "_find_service_items", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(publisher, "_find_existing_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        publisher,
+        "_request_json",
+        lambda url, fields=None, file_path=None, timeout=300: {"results": []}
+        if url.endswith("/search") else {"error": {"code": "unexpected", "message": url}},
+    )
+    monkeypatch.setattr(publisher, "OBJECT_STORE_GATE", "strict")
+    monkeypatch.setattr(
+        publisher,
+        "wait_object_store_healthy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("Timed out waiting ... overallhealth=None")
+        ),
+    )
+
+    with pytest.raises(TimeoutError, match="overallhealth=None"):
+        publisher.publish_slpk(slpk, "ce-job")
+
+
+def test_publish_warn_gate_continues_when_object_store_unhealthy(tmp_path, monkeypatch):
+    slpk = tmp_path / "result.slpk"
+    slpk.write_bytes(b"slpk")
+    events = []
+
+    monkeypatch.setattr(publisher, "publishing_status", lambda: {"configured": True})
+    monkeypatch.setattr(publisher, "_token", lambda: "token")
+    monkeypatch.setattr(publisher, "discover_stale_publications", lambda _token: [])
+    monkeypatch.setattr(publisher, "_ensure_folder", lambda _token: "folder")
+    monkeypatch.setattr(publisher, "_find_service_items", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(publisher, "_find_existing_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(publisher, "_poll_item_status", lambda *args, **kwargs: {"status": "completed"})
+    monkeypatch.setattr(
+        publisher,
+        "verify_scene_service",
+        lambda url, timeout=90, token=None, poll_interval=3: {
+            "url": url,
+            "serviceName": "fresh",
+            "serviceType": "SceneServer",
+            "verified": True,
+        },
+    )
+    monkeypatch.setattr(publisher, "share_publication", lambda publication: publication)
+    monkeypatch.setattr(publisher, "OBJECT_STORE_GATE", "warn")
+    monkeypatch.setattr(
+        publisher,
+        "wait_object_store_healthy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("Timed out waiting ... overallhealth=None")
+        ),
+    )
+
+    def request_json(url, fields=None, file_path=None, timeout=300):
+        if url.endswith("/search"):
+            return {"results": []}
+        if url.endswith("/addItem"):
+            return {"id": "source-item"}
+        if url.endswith("/publish"):
+            return {"services": [{
+                "success": True,
+                "serviceItemId": "fresh-item",
+                "serviceUrl": "https://example.test/fresh/SceneServer",
+            }]}
+        raise AssertionError(f"Unexpected request: {url}")
+
+    monkeypatch.setattr(publisher, "_request_json", request_json)
+
+    result = publisher.publish_slpk(
+        slpk,
+        "ce-job",
+        lambda stage, status, message, details: events.append((stage, status)),
+    )
+
+    assert result["serviceItemId"] == "fresh-item"
+    assert result["objectStoreGate"] == "warn"
+    assert "overallhealth=None" in result["objectStoreGateWarning"]
+    assert ("object_store_checking", "warning") in events

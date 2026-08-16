@@ -137,6 +137,19 @@ const destroyView = () => {
   }
 };
 
+// 浏览器不信任 GeoScene 自签名证书，SceneLayer 直接访问 https 域名会
+// Failed to fetch。把托管 SceneServer 映射为同源 /geoscene-server 代理路径，
+// 由 Vite/nginx 服务端完成 TLS 握手后再转发。
+const GEOSCENE_SERVER_ORIGIN = 'https://product.geosceneenterprise.cn';
+const proxySceneUrl = (url) => {
+  if (!url) return '';
+  const trimmed = url.trim();
+  if (trimmed.startsWith(GEOSCENE_SERVER_ORIGIN)) {
+    return trimmed.replace(GEOSCENE_SERVER_ORIGIN, '/geoscene-server');
+  }
+  return trimmed;
+};
+
 const createView = async (spatialReference) => {
   destroyView();
   await nextTick();
@@ -157,19 +170,20 @@ const createView = async (spatialReference) => {
 };
 
 const loadSceneService = async () => {
-  if (!sceneServiceUrl.value) return;
+  const targetUrl = proxySceneUrl(sceneServiceUrl.value);
+  if (!targetUrl) return;
   loading.value = true;
   errorMessage.value = '';
   reportLoadStatus('running', '正在连接 GeoScene SceneServer');
   try {
     const [, , SceneLayer] = await getGeoSceneModules();
-    const layer = new SceneLayer({ url: sceneServiceUrl.value, title: 'CityEngine 优化成果' });
+    const layer = new SceneLayer({ url: targetUrl, title: 'CityEngine 优化成果' });
     await layer.load();
     const spatialReference = layer.spatialReference || layer.fullExtent?.spatialReference;
     if (!spatialReference) throw new Error('Scene Service 未返回空间参考');
     const view = await createView(spatialReference);
     view.map.add(layer);
-    activeSceneUrl.value = sceneServiceUrl.value;
+    activeSceneUrl.value = targetUrl;
     await view.goTo(layer.fullExtent || layer, { duration: 1200 });
     reportLoadStatus('success', 'SceneServer 已加载，CityEngine 三维成果展示完成');
   } catch (error) {
@@ -281,35 +295,39 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.result-overlay { position: fixed; top: 24px; right: 24px; bottom: 24px; left: min(650px, 46vw); z-index: 1200; pointer-events: none; }
-.result-window { width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; border: 1px solid rgba(64, 216, 255, .45); border-radius: 10px; background: #07111f; box-shadow: 0 24px 80px rgba(0, 0, 0, .55); }
+/* GeoScene 组件同款浅色风格 */
+.result-overlay { position: fixed; top: 24px; right: 24px; bottom: 24px; left: min(650px, 46vw); z-index: 1200; pointer-events: none; font-family: "Avenir Next","Segoe UI",Arial,sans-serif; }
+.result-window { width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto; border: 1px solid #d4d4d4; border-radius: 4px; background: #ffffff; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
 .result-header, .result-toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
-.result-header { justify-content: space-between; color: #eafaff; border-bottom: 1px solid rgba(255, 255, 255, .1); }
+.result-header { justify-content: space-between; color: #2b2b2b; border-bottom: 1px solid #e0e0e0; }
 .result-header div { display: flex; align-items: baseline; gap: 12px; }
-.result-header span { color: #86a8b8; font-size: 12px; }
-.close-button { border: 0; background: transparent; color: #fff; font-size: 28px; cursor: pointer; }
-.result-toolbar { border-bottom: 1px solid rgba(255, 255, 255, .08); background: rgba(10, 28, 45, .9); }
-.result-toolbar input { min-width: 0; flex: 1; padding: 9px 11px; border: 1px solid #31516a; border-radius: 4px; color: #eafaff; background: #071522; outline: none; }
-.result-toolbar button, .result-toolbar a { padding: 9px 14px; border: 1px solid #1fb9d8; border-radius: 4px; color: #dffaff; background: #08677a; text-decoration: none; cursor: pointer; }
+.result-header span { color: #6e6e6e; font-size: 12px; }
+.close-button { border: 0; background: transparent; color: #6e6e6e; font-size: 22px; cursor: pointer; }
+.close-button:hover { color: #0079c1; }
+.result-toolbar { border-bottom: 1px solid #e0e0e0; background: #f8f8f8; }
+.result-toolbar input { min-width: 0; flex: 1; padding: 6px 7px; border: 1px solid #a8a8a8; border-radius: 3px; color: #2b2b2b; background: #ffffff; font: 12px Consolas,monospace; outline: none; }
+.result-toolbar input:focus { border-color: #0079c1; box-shadow: 0 0 0 1px #0079c1; }
+.result-toolbar button, .result-toolbar a { padding: 6px 12px; border: 1px solid #a8a8a8; border-radius: 3px; color: #2b2b2b; background: #f8f8f8; text-decoration: none; cursor: pointer; font-size: 12px; }
+.result-toolbar button:hover, .result-toolbar a:hover { border-color: #0079c1; color: #0079c1; }
 .result-toolbar button:disabled { opacity: .45; cursor: not-allowed; }
-.decision-summary { padding: 10px 16px; color: #c7dde5; border-bottom: 1px solid rgba(255, 255, 255, .08); background: #091927; }
+.decision-summary { padding: 10px 16px; color: #4c4c4c; border-bottom: 1px solid #e0e0e0; background: #f8f8f8; font-size: 12px; }
 .decision-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
-.decision-stats strong { color: #f0fbff; }
-.decision-stats span { color: #8fbdca; font-size: 12px; }
-.decision-summary p { margin: 7px 0; color: #9fc0ca; font-size: 12px; }
+.decision-stats strong { color: #2b2b2b; }
+.decision-stats span { color: #6e6e6e; font-size: 12px; }
+.decision-summary p { margin: 7px 0; color: #6e6e6e; font-size: 12px; }
 .decision-summary details { font-size: 12px; }
-.decision-summary summary { width: fit-content; color: #62e5ff; cursor: pointer; }
+.decision-summary summary { width: fit-content; color: #0079c1; cursor: pointer; }
 .decision-summary ul { max-height: 150px; margin: 8px 0 0; padding: 0; overflow: auto; list-style: none; }
-.decision-summary li { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(130px, 1fr) minmax(220px, 2fr); gap: 10px; padding: 7px 0; border-top: 1px solid rgba(255, 255, 255, .06); }
-.decision-summary li strong { overflow-wrap: anywhere; color: #e8f7fa; }
-.decision-summary li span { color: #7dd8e8; }
-.decision-summary li small { color: #a9c1c9; }
+.decision-summary li { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(130px, 1fr) minmax(220px, 2fr); gap: 10px; padding: 7px 0; border-top: 1px solid #e0e0e0; }
+.decision-summary li strong { overflow-wrap: anywhere; color: #2b2b2b; }
+.decision-summary li span { color: #0079c1; }
+.decision-summary li small { color: #6e6e6e; }
 .viewer-body { position: relative; flex: 1; min-height: 0; }
 .scene-view { position: absolute; inset: 0; }
-.empty-state { position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; gap: 10px; padding: 32px; text-align: center; color: #b7d5df; pointer-events: none; background: radial-gradient(circle, rgba(13, 55, 77, .82), rgba(4, 13, 24, .96)); }
-.empty-state strong { color: #62e5ff; font-size: 18px; }
-.empty-state p { margin: 0; }
-.error-message { position: absolute; left: 50%; bottom: 20px; z-index: 4; transform: translateX(-50%); padding: 10px 14px; border: 1px solid #d75d68; border-radius: 4px; color: #ffd9dc; background: rgba(92, 22, 30, .92); }
+.empty-state { position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; gap: 10px; padding: 32px; text-align: center; color: #4c4c4c; pointer-events: none; background: #ffffff; }
+.empty-state strong { color: #2b2b2b; font-size: 17px; }
+.empty-state p { margin: 0; color: #6e6e6e; }
+.error-message { position: absolute; left: 50%; bottom: 20px; z-index: 4; transform: translateX(-50%); padding: 10px 14px; border: 1px solid #d75d68; border-radius: 4px; color: #c62828; background: #fff5f5; }
 @media (max-width: 1050px) {
   .result-overlay { top: 16px; right: 16px; bottom: 16px; left: 38vw; }
 }

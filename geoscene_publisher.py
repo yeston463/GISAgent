@@ -94,6 +94,16 @@ OBJECT_STORE_QUIET_SECONDS = _positive_int_env(
 OBJECT_STORE_QUIET_TIMEOUT_SECONDS = _positive_int_env(
     "GEOSCENE_OBJECT_STORE_QUIET_TIMEOUT_SECONDS", 360, minimum=30, maximum=3600
 )
+# strict: 对象存储健康检查失败即终止发布（默认，治理最严）
+# warn:   健康检查失败时降级为告警，仍尝试发布托管 Scene Service
+#         （适用于 DataStore 机器状态标记异常但对象存储实际可用的场景）
+OBJECT_STORE_GATE = os.environ.get("GEOSCENE_OBJECT_STORE_GATE", "strict").strip().lower()
+if OBJECT_STORE_GATE not in {"strict", "warn"}:
+    OBJECT_STORE_GATE = "strict"
+# warn 模式下健康检查等待窗口（秒），避免机器状态标记异常时白白等待完整超时
+OBJECT_STORE_GATE_WARN_TIMEOUT_SECONDS = _positive_int_env(
+    "GEOSCENE_OBJECT_STORE_GATE_WARN_TIMEOUT_SECONDS", 30, minimum=5, maximum=600
+)
 STALE_PUBLICATION_MIN_AGE_SECONDS = _positive_int_env(
     "GEOSCENE_STALE_PUBLICATION_MIN_AGE_SECONDS", 600, minimum=60, maximum=86400
 )
@@ -978,41 +988,81 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
         "running",
         "正在检查 GeoScene Data Store 对象存储健康状态",
     )
-    object_store = wait_object_store_healthy(
-        token,
-        timeout=min(OBJECT_STORE_VALIDATE_TIMEOUT_SECONDS, remaining("检查对象存储健康状态")),
-        poll_interval=OBJECT_STORE_VALIDATE_INTERVAL_SECONDS,
-    )
-    descriptor = object_store.get("descriptor") or {}
-    machine = object_store.get("machine") or {}
-    _report_progress(
-        progress_callback,
-        "object_store_checking",
-        "success",
-        "GeoScene Data Store 对象存储健康",
-        objectStoreId=descriptor.get("id"),
-        objectStoreMachine=descriptor.get("machine") or machine.get("name"),
-        overallHealth=(object_store.get("validation") or {}).get("datastore.overallhealth"),
-    )
+    gate_warning = None
+
+    def object_store_gate_timeout(stage):
+        if OBJECT_STORE_GATE == "warn":
+            return min(OBJECT_STORE_GATE_WARN_TIMEOUT_SECONDS, remaining(stage))
+        return min(OBJECT_STORE_VALIDATE_TIMEOUT_SECONDS, remaining(stage))
+
+    try:
+        object_store = wait_object_store_healthy(
+            token,
+            timeout=object_store_gate_timeout("检查对象存储健康状态"),
+            poll_interval=OBJECT_STORE_VALIDATE_INTERVAL_SECONDS,
+        )
+    except (TimeoutError, RuntimeError) as gate_error:
+        if OBJECT_STORE_GATE != "warn":
+            raise
+        gate_warning = gate_error
+        descriptor = {}
+        try:
+            descriptor = _object_store_descriptor()
+        except Exception:
+            pass
+        machine = {}
+        _report_progress(
+            progress_callback,
+            "object_store_checking",
+            "warning",
+            f"GeoScene Data Store 对象存储健康检查未通过，已按告警模式继续尝试发布：{gate_error}",
+            objectStoreId=descriptor.get("id"),
+            objectStoreMachine=descriptor.get("machine"),
+        )
+    else:
+        descriptor = object_store.get("descriptor") or {}
+        machine = object_store.get("machine") or {}
+        _report_progress(
+            progress_callback,
+            "object_store_checking",
+            "success",
+            "GeoScene Data Store 对象存储健康",
+            objectStoreId=descriptor.get("id"),
+            objectStoreMachine=descriptor.get("machine") or machine.get("name"),
+            overallHealth=(object_store.get("validation") or {}).get("datastore.overallhealth"),
+        )
     _report_progress(
         progress_callback,
         "object_store_stabilizing",
         "running",
         "正在等待 GeoScene Data Store 对象存储完成恢复并进入稳定窗口",
     )
-    object_store_quiet = wait_object_store_quiet(
-        timeout=min(OBJECT_STORE_QUIET_TIMEOUT_SECONDS, remaining("等待对象存储稳定")),
-        quiet_seconds=OBJECT_STORE_QUIET_SECONDS,
-        poll_interval=min(5, PUBLISH_POLL_INTERVAL_SECONDS or 5),
-    )
-    _report_progress(
-        progress_callback,
-        "object_store_stabilizing",
-        "success",
-        "GeoScene Data Store 对象存储已通过稳定窗口检查",
-        quietForSeconds=object_store_quiet.get("quietForSeconds"),
-        lastRecoveryEventAt=object_store_quiet.get("lastErrorTime"),
-    )
+    try:
+        object_store_quiet = wait_object_store_quiet(
+            timeout=min(OBJECT_STORE_QUIET_TIMEOUT_SECONDS, remaining("等待对象存储稳定")),
+            quiet_seconds=OBJECT_STORE_QUIET_SECONDS,
+            poll_interval=min(5, PUBLISH_POLL_INTERVAL_SECONDS or 5),
+        )
+    except TimeoutError as quiet_error:
+        if OBJECT_STORE_GATE != "warn":
+            raise
+        gate_warning = gate_warning or quiet_error
+        object_store_quiet = {}
+        _report_progress(
+            progress_callback,
+            "object_store_stabilizing",
+            "warning",
+            f"对象存储稳定窗口检查未通过，已按告警模式继续尝试发布：{quiet_error}",
+        )
+    else:
+        _report_progress(
+            progress_callback,
+            "object_store_stabilizing",
+            "success",
+            "GeoScene Data Store 对象存储已通过稳定窗口检查",
+            quietForSeconds=object_store_quiet.get("quietForSeconds"),
+            lastRecoveryEventAt=object_store_quiet.get("lastErrorTime"),
+        )
 
     if not item_id:
         folder_id = _ensure_folder(token)
@@ -1126,7 +1176,7 @@ def publish_slpk(slpk_path, job_id, progress_callback=None):
         serviceItemId=service_item_id,
         sceneServiceUrl=service_url,
     )
-    return share_publication({"status": "completed", "portalUrl": PORTAL_URL, "sourceItemId": item_id, "serviceItemId": service_item_id, "sceneServiceUrl": service_url, "hostedService": hosted_service, "publishedAt": int(time.time())})
+    return share_publication({"status": "completed", "portalUrl": PORTAL_URL, "sourceItemId": item_id, "serviceItemId": service_item_id, "sceneServiceUrl": service_url, "hostedService": hosted_service, "publishedAt": int(time.time()), "objectStoreGate": OBJECT_STORE_GATE, "objectStoreGateWarning": str(gate_warning) if gate_warning else None})
 
 
 # =============================================================================

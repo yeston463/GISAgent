@@ -1265,6 +1265,7 @@ public class AgentLoopService {
         // silently disappears even though the CityEngine job succeeds.
         Map<String, Object> metrics = validationLayer.validateMetrics(
                 extractPlanningMetrics(result));
+        appendPlanningComparisonCommand(planningCommands, metrics, result);
         Map<String, Object> cityEngineJob = asMap(result.get("cityEngineJob"));
         String jobId = cityEngineJob == null ? "未知" : String.valueOf(cityEngineJob.getOrDefault("jobId", "未知"));
         String script = cityEngineJob == null ? "" : String.valueOf(cityEngineJob.getOrDefault("generatedScript", ""));
@@ -1887,6 +1888,60 @@ public class AgentLoopService {
         }
         Map<String, Object> direct = asMap(planningResult.get("metrics"));
         return direct != null && !direct.isEmpty() ? direct : planningResult;
+    }
+
+    /**
+     * 生成“方案对比”命令：before=现状指标（地理数据实测），
+     * after=规划后指标（Python 按真实建筑几何与规划参数推算）。
+     * 前端 AnalysisDashboard 的 comparison 面板消费该命令。
+     */
+    private void appendPlanningComparisonCommand(
+            List<Map<String, Object>> planningCommands,
+            Map<String, Object> beforeMetrics,
+            Map<String, Object> planningResult) {
+        try {
+            Map<String, Object> current = asMap(planningResult.get("current"));
+            Map<String, Object> plannedEnvelope = asMap(planningResult.get("planned"));
+            Map<String, Object> planned = plannedEnvelope == null ? null : asMap(plannedEnvelope.get("metrics"));
+            if (planned == null || planned.isEmpty()) {
+                Map<String, Object> job = asMap(planningResult.get("cityEngineJob"));
+                planned = job == null ? null : asMap(job.get("plannedMetrics"));
+            }
+            if (planned == null || planned.isEmpty()) {
+                return;
+            }
+            Map<String, Object> heightStats = asMap(beforeMetrics.get("height_stats"));
+            double beforeFar = getDouble(beforeMetrics, "far", 0);
+            double beforeDensity = getDouble(beforeMetrics, "building_density",
+                    getDouble(beforeMetrics, "buildingDensity", 0));
+            double beforeHeight = heightStats == null ? 0 : getDouble(heightStats, "max", 0);
+            double beforeGreen = getDouble(beforeMetrics, "green_rate", getDouble(beforeMetrics, "greenRate", 0));
+
+            Map<String, Object> comparison = new LinkedHashMap<>();
+            comparison.put("far", Map.of("before", round2(beforeFar), "after", round2(getDouble(planned, "far", beforeFar))));
+            comparison.put("buildingDensity", Map.of(
+                    "before", round2(beforeDensity),
+                    "after", round2(getDouble(planned, "building_density", getDouble(planned, "building_density_pct", beforeDensity)))));
+            comparison.put("buildingHeight", Map.of(
+                    "before", round1(beforeHeight),
+                    "after", round1(getDouble(planned, "buildingHeight", beforeHeight))));
+            comparison.put("greenRate", Map.of(
+                    "before", round2(beforeGreen),
+                    "after", round2(getDouble(planned, "green_rate", getDouble(planned, "greenRate", beforeGreen)))));
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("comparison", comparison);
+            planningCommands.add(Map.of("action", "comparePlanningScenarios", "params", params));
+        } catch (RuntimeException ignored) {
+            // 对比命令是增强展示，生成失败不应阻断规划流程。
+        }
+    }
+
+    private static double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static double round1(double value) {
+        return Math.round(value * 10.0) / 10.0;
     }
 
     private boolean isFailed(Map<String, Object> result) {

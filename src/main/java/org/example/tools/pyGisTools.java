@@ -454,13 +454,58 @@ public class pyGisTools {
             response.put("status", "Success");
             response.put("scenarios", responseResults);
             response.put("command", Map.of(
-                    "action", "show-planning-comparison",
-                    "params", Map.of("scenarios", responseResults)
+                    "action", "comparePlanningScenarios",
+                    "params", Map.of("comparison", buildScenarioComparison(results, originalFar))
             ));
             return response;
         } catch (Exception e) {
             return Map.of("status", "Error", "message", e.getMessage());
         }
+    }
+
+    /**
+     * 从多方案评估结果构造“现状 vs 最优方案”对比数据，供前端
+     * AnalysisDashboard 的 comparison 面板消费。before 使用现状容积率，
+     * after 取综合评分最高的方案指标。
+     */
+    private Map<String, Object> buildScenarioComparison(List<?> results, double originalFar) {
+        Object best = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        for (Object item : results) {
+            if (item instanceof org.example.agent.ScenarioResult result) {
+                if (result.score() > bestScore) {
+                    bestScore = result.score();
+                    best = result;
+                }
+            }
+        }
+        Map<String, Object> after = new LinkedHashMap<>();
+        if (best instanceof org.example.agent.ScenarioResult result) {
+            after = result.metrics();
+        }
+        Map<String, Object> comparison = new LinkedHashMap<>();
+        comparison.put("far", Map.of("before", round2(originalFar), "after", round2(toDouble(after.get("far")))));
+        comparison.put("buildingDensity", Map.of(
+                "before", 0.0,
+                "after", round2(toDouble(after.get("building_density")))));
+        comparison.put("buildingHeight", Map.of(
+                "before", 0.0,
+                "after", round1(toDouble(after.get("buildingHeight")))));
+        comparison.put("greenRate", Map.of("before", 0.0, "after", 0.0));
+        return comparison;
+    }
+
+    private static double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static double round1(double value) {
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    private static double toDouble(Object value) {
+        if (value == null) return 0;
+        try { return Double.parseDouble(value.toString()); } catch (NumberFormatException e) { return 0; }
     }
 
     private void saveContextFromResult(Map<String, Object> result) {

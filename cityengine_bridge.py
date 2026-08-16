@@ -287,7 +287,7 @@ def _valid_ring(ring):
 
 def _validate_footprint_geometry(geometry):
     if not isinstance(geometry, dict):
-        return False, "缺少 GeoJSON 面几何"
+        return False, "缺少 GeoJSON 面几何", None
     geometry_type = geometry.get("type")
     coordinates = geometry.get("coordinates")
     if geometry_type == "Polygon":
@@ -304,10 +304,38 @@ def _validate_footprint_geometry(geometry):
             )
         )
     else:
-        return False, f"不支持 {geometry_type or 'unknown'} 几何，仅接受 Polygon/MultiPolygon"
+        return False, f"不支持 {geometry_type or 'unknown'} 几何，仅接受 Polygon/MultiPolygon", None
     if not valid:
-        return False, "面坐标为空、无效或 rings 未闭合"
-    return True, ""
+        return False, "面坐标为空、无效或 rings 未闭合", None
+    # 拓扑校验与 _write_shapefile 一致：shapely 判定无效的自相交/空面
+    # 会在写入 Shapefile 时中断整个 CityEngine 任务，必须在准备阶段
+    # 拦截。轻微自相交用 buffer(0) 修复后仍可无损使用；修复不了的才跳过。
+    try:
+        from shapely.geometry import mapping, shape
+        polygon = shape(geometry)
+        if polygon.is_empty:
+            return False, "面几何为空", None
+        if not polygon.is_valid:
+            repaired = polygon.buffer(0)
+            if repaired.is_empty or not repaired.is_valid or repaired.geom_type not in {"Polygon", "MultiPolygon"}:
+                return False, "面几何拓扑无效且无法自动修复", None
+            # shapely mapping 输出 tuple 嵌套，下游 _footprint_quality 等
+            # 按 list 结构解析，深度转回标准 GeoJSON list。
+            return True, "", _to_json_lists(mapping(repaired))
+        return True, "", None
+    except Exception:
+        # shapely 不可用时退回结构校验（旧行为）
+        return True, "", None
+
+
+def _to_json_lists(value):
+    if isinstance(value, dict):
+        return {key: _to_json_lists(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_to_json_lists(item) for item in value]
+    if isinstance(value, list):
+        return [_to_json_lists(item) for item in value]
+    return value
 
 
 def _footprint_vertex_count(geometry):
@@ -387,7 +415,7 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
         geometry = feature.get("geometry")
         source = str(props.get("geometrySource") or "geojson_polygon")
         geometry_approximation = _is_approximate_geometry(props)
-        valid, invalid_reason = _validate_footprint_geometry(geometry)
+        valid, invalid_reason, repaired_geometry = _validate_footprint_geometry(geometry)
         if not valid:
             decisions.append({
                 "buildingId": building_id,
@@ -398,6 +426,10 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
                 "reason": f"{invalid_reason}；已跳过且未生成替代矩形。",
             })
             continue
+        if repaired_geometry is not None:
+            geometry = repaired_geometry
+            geometry_approximation = True
+            props["geometryChangeReason"] = "原始轮廓存在自相交等拓扑问题，已自动修复后保留。"
 
         vertex_count = _footprint_vertex_count(geometry)
         # A three-vertex roof projection is a mesh tile, not a building
@@ -469,6 +501,7 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
             props.pop(metadata_field, None)
         props["ce_height"] = target_height
         props["ce_floors"] = floor_count
+        props["footprint_sqm"] = round(footprint_area_sqm, 2)
         props["vert_src"] = height_source[:40]
         props["vert_est"] = 1 if height_estimated else 0
         props["ce_modify"] = 1 if target_height != current_height else 0
@@ -579,6 +612,58 @@ def _generated_script(job_id, layer_name, shp_workspace_path, rule_workspace_pat
     return f'''from scripting import *\nimport json\nimport os\nimport traceback\n\nce = CE()\nJOB_ID = {job_id!r}\nRESULT_PATH = {str(result_path)!r}\nSTARTED_PATH = {str(started_path)!r}\nEXPORTS = {exports!r}\n\ndef write_result(status, outputs, message):\n    result = {{"jobId": JOB_ID, "status": status, "outputs": outputs, "message": message}}\n    f = open(RESULT_PATH, "w")\n    f.write(json.dumps(result, ensure_ascii=False, indent=2))\n    f.close()\n\ndef run():\n    outputs = {{}}\n    try:\n        started = open(STARTED_PATH, "w")\n        started.write(JOB_ID)\n        started.close()\n        scene_path = "/automationProject/scenes/{job_id}.cej"\n        ce.newFile(scene_path)\n        settings = SHPImportSettings()\n        ce.importFile(ce.toFSPath({shp_workspace_path!r}), settings)\n        layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer, ce.withName({layer_name!r}))\n        if not layers:\n            layers = ce.getObjectsFrom(ce.scene, ce.isShapeLayer)\n        if not layers:\n            raise RuntimeError("CityEngine did not create a shape layer from the footprint shapefile")\n        shapes = ce.getObjectsFrom(layers[0], ce.isShape)\n        if not shapes:\n            raise RuntimeError("No footprint shapes were imported")\n        ce.setRuleFile(shapes, {rule_workspace_path!r})\n        ce.setStartRule(shapes, "Lot")\n        ce.generateModels(shapes)\n        ce.waitForUIIdle()\n        output_dir = ce.toFSPath("/automationProject/models/generated/{job_id}")\n        if not os.path.isdir(output_dir):\n            os.makedirs(output_dir)\n        if "obj" in EXPORTS:\n            obj = OBJExportModelSettings()\n            obj.setOutputPath(output_dir)\n            obj.setBaseName("{job_id}")\n            obj.setFileGranularity(OBJExportModelSettings.START_SHAPE)\n            obj.setExistingFiles(OBJExportModelSettings.OVERWRITE)\n            obj.setTerrainLayers(OBJExportModelSettings.TERRAIN_NONE)\n            ce.export(shapes, obj)\n            outputs["obj"] = output_dir\n        if "slpk" in EXPORTS:\n            slpk = SPKMeshExportModelSettings()\n            slpk.setOutputPath(output_dir)\n            slpk.setBaseName("{job_id}")\n            slpk.setSceneType("Local")\n            slpk.setExistingFiles(SPKMeshExportModelSettings.OVERWRITE)\n            slpk.setFileSize(SPKMeshExportModelSettings.MIDSIZE_FILE)\n            ce.export(shapes, slpk)\n            outputs["slpk"] = os.path.join(output_dir, "{job_id}.slpk")\n        if "fbx" in EXPORTS:\n            fbx = FBXExportModelSettings()\n            fbx.setOutputPath(output_dir)\n            fbx.setBaseName("{job_id}")\n            ce.export(shapes, fbx)\n            outputs["fbx"] = output_dir\n        if "gltf" in EXPORTS:\n            gltf = GLTFExportModelSettings()\n            gltf.setOutputPath(output_dir)\n            gltf.setBaseName("{job_id}")\n            ce.export(shapes, gltf)\n            outputs["gltf"] = output_dir\n        ce.saveFile(scene_path)\n        write_result("completed", outputs, "CityEngine generation and export completed")\n    except Exception as exc:\n        write_result("failed", outputs, str(exc) + "\\n" + traceback.format_exc())\n    finally:\n        try:\n            ce.waitForUIIdle()\n            ce.closeFile()\n        except:\n            pass\n        ce.exit()\n\nrun()\n'''
 
 
+def _planned_metrics(prepared_buildings, current_metrics, normalized):
+    """基于真实建筑几何与规划参数推算“规划后”指标。
+
+    规划后建筑直接采用 CityEngine 将要生成的轮廓与高度
+    （ce_height/ce_floors，已按限高/退界调整），基底面积来自真实
+    几何（footprint_sqm）。容积率 = 建筑总面积 / 用地面积；密度 =
+    基底面积 / 用地面积；最高建筑 = 规划后高度上限。绿地率按规划
+    地块覆盖率反推（1 - lotCoverage），与现状指标形成真实差异。
+    """
+    site_area = gis_model._safe_float(
+        current_metrics.get("site_area", current_metrics.get("site_area_sqm")), 0.0
+    ) if isinstance(current_metrics, dict) else 0.0
+    if site_area <= 0:
+        site_area = 1.0
+    max_building_height = gis_model._safe_float(normalized.get("maxBuildingHeight"), None)
+    floor_height = gis_model._safe_float(normalized.get("floorHeight"), 3.0) or 3.0
+    max_floors = max(1, int(max_building_height / floor_height)) if max_building_height else None
+    total_footprint = 0.0
+    total_floor_area = 0.0
+    max_height = 0.0
+    building_count = 0
+    for feature in (prepared_buildings or {}).get("features", []):
+        props = feature.get("properties") or {}
+        footprint = gis_model._safe_float(props.get("footprint_sqm"), 0.0) or 0.0
+        floors = max(1, int(gis_model._safe_float(props.get("ce_floors"), 1.0) or 1))
+        height = gis_model._safe_float(props.get("ce_height"), 0.0) or 0.0
+        # 规划后指标统一按规定约束：高度不超过规划限高，层数受限高/层高约束
+        planned_height = min(height, max_building_height) if max_building_height else height
+        planned_floors = min(floors, max_floors) if max_floors else floors
+        total_footprint += footprint
+        total_floor_area += footprint * planned_floors
+        if planned_height > max_height:
+            max_height = planned_height
+        building_count += 1
+    far = total_floor_area / site_area
+    density = (total_footprint / site_area) * 100.0
+    lot_coverage = gis_model._safe_float(normalized.get("lotCoverage"), 0.75) or 0.75
+    green_rate = max(0.0, min(100.0, (1.0 - lot_coverage) * 100.0))
+    return {
+        "far": round(far, 3),
+        "building_density": round(density, 2),
+        "building_density_pct": round(density, 2),
+        "buildingHeight": round(max_height, 1),
+        "building_count": building_count,
+        "green_rate": round(green_rate, 2),
+        "site_area": round(site_area, 2),
+        "building_area": round(total_floor_area, 2),
+        "footprint_area_sqm": round(total_footprint, 2),
+        "method": "基于真实建筑几何与规划参数（限高/层高/覆盖率）推算",
+    }
+
+
 def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings, requirements=None, rag_context="", user_request=""):
     job_id = f"ce-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     normalized = normalize_requirements(requirements, rule_set)
@@ -595,6 +680,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
     startup_source_path = runtime["config"] / f"{job_id}-startup.py"
     shp_path = runtime["data"] / f"{job_id}.shp"
     _write_shapefile(prepared_buildings, shp_path)
+    planned_metrics = _planned_metrics(prepared_buildings, current_metrics, normalized)
     cga_path.write_text(_generate_cga(normalized), encoding="utf-8")
     script_path.write_text(_generated_script(job_id, job_id, f"/automationProject/data/generated/{job_id}.shp", f"/automationProject/rules/generated/{job_id}.cga", runtime["result"], runtime["started"], normalized), encoding="utf-8")
     cfg = ConfigParser()
@@ -610,6 +696,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         "case": case_data, "currentMetrics": current_metrics, "problemBuildings": problem_buildings,
         "optimizationActions": optimization_actions,
         "geometrySummary": geometry_summary,
+        "plannedMetrics": planned_metrics,
         "footprints": str(shp_path), "generatedScript": str(script_path), "generatedRule": str(cga_path),
         "configFile": str(config_path), "startupSource": str(startup_source_path),
         "resultManifest": str(result_path),
@@ -625,6 +712,7 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
         "startupSource": str(startup_source_path), "resultManifest": str(result_path),
         "requirements": normalized, "cityEngine": runtime_status(), "launch": launch,
         "optimizationActions": optimization_actions, "geometrySummary": geometry_summary,
+        "plannedMetrics": planned_metrics,
         **_runtime_metadata(runtime),
     }
 

@@ -159,4 +159,60 @@ class ScenarioGenerationTest {
         }
         return service;
     }
+
+    @Test
+    void appendPlanningComparisonCommandBuildsBeforeAfterPairs() throws Exception {
+        AgentLoopService service = createServiceWithCatalog();
+        var method = AgentLoopService.class.getDeclaredMethod(
+                "appendPlanningComparisonCommand",
+                List.class, Map.class, Map.class);
+        method.setAccessible(true);
+
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("far", 0.354);
+        before.put("building_density", 12.5);
+        before.put("height_stats", Map.of("max", 60.0));
+        before.put("green_rate", 5.0);
+
+        Map<String, Object> planned = new LinkedHashMap<>();
+        planned.put("far", 1.234);
+        planned.put("building_density", 25.0);
+        planned.put("buildingHeight", 54.0);
+        planned.put("green_rate", 25.0);
+        Map<String, Object> planningResult = new LinkedHashMap<>();
+        planningResult.put("planned", Map.of("metrics", planned));
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        method.invoke(service, commands, before, planningResult);
+
+        assertEquals(1, commands.size());
+        Map<String, Object> command = commands.get(0);
+        assertEquals("comparePlanningScenarios", command.get("action"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> params = (Map<String, Object>) command.get("params");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> comparison = (Map<String, Object>) params.get("comparison");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> far = (Map<String, Object>) comparison.get("far");
+        assertEquals(0.35, far.get("before"));
+        assertEquals(1.23, far.get("after"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> height = (Map<String, Object>) comparison.get("buildingHeight");
+        assertEquals(60.0, height.get("before"));
+        assertEquals(54.0, height.get("after"));
+    }
+
+    @Test
+    void appendPlanningComparisonCommandSkipsWhenNoPlannedMetrics() throws Exception {
+        AgentLoopService service = createServiceWithCatalog();
+        var method = AgentLoopService.class.getDeclaredMethod(
+                "appendPlanningComparisonCommand",
+                List.class, Map.class, Map.class);
+        method.setAccessible(true);
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        method.invoke(service, commands, Map.of("far", 0.3), Map.of("current", Map.of("metrics", Map.of("far", 0.3))));
+        assertTrue(commands.isEmpty());
+    }
 }
+

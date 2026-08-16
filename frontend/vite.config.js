@@ -46,6 +46,14 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      // SceneServer 代理：浏览器不信任 GeoScene 自签名证书，由 Vite 服务端
+      // 完成 TLS 握手后转发（secure:false），前端 SceneLayer 只访问同源路径。
+      '/geoscene-server': {
+        target: 'https://product.geosceneenterprise.cn',
+        changeOrigin: true,
+        secure: false,
+        rewrite: path => path.replace(/^\/geoscene-server/, ''),
+      },
     },
   },
   // @geoscene/core 是多入口 ESM 包（无 main/exports 字段），不能整包预构建；
