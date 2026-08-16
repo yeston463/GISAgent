@@ -68,4 +68,16 @@ class IntentClassifierTest {
         assertEquals(IntentClassifier.Intent.GENERAL_CHAT, classifier.classify("帮我写一份选址报告的提纲"));
         assertEquals(IntentClassifier.Intent.GENERAL_CHAT, classifier.classify("讲解一下缓冲区分析的用途"));
     }
+
+
+    @Test
+    void classifiesPlaceBuildingAnalysisAsSpatial() {
+        IntentClassifier classifier = new IntentClassifier();
+        assertEquals(IntentClassifier.Intent.SPATIAL_ANALYSIS,
+                classifier.classify("对清华大学周边1km做建筑分析"));
+        assertEquals(IntentClassifier.Intent.SPATIAL_ANALYSIS,
+                classifier.classify("以清华大学为中心，生成1km缓冲区"));
+        assertEquals(IntentClassifier.Intent.SPATIAL_ANALYSIS,
+                classifier.classify("分析天安门附近500米的建筑指标"));
+    }
 }

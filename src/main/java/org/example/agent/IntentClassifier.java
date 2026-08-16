@@ -54,6 +54,8 @@ public class IntentClassifier {
             spatial("哪个地块离学校最近"), spatial("统计候选点到消防站的直线距离"),
             spatial("提取当前范围的地形坡度"), spatial("下载这片区域的建筑物轮廓"),
             spatial("把当前 AOI 发布成三维场景"), spatial("圈一块地做用地适宜性评价"),
+            spatial("对清华大学周边1公里做建筑分析"), spatial("分析天安门附近500米的建筑指标"),
+            spatial("生成以北京大学为中心的2公里缓冲区"), spatial("查看陆家嘴周边建筑高度"),
             spatial("run flood analysis for the current area"), spatial("compute FAR and building density"),
             spatial("skyline profile along the river"), spatial("find the nearest hospital to each candidate site"),
             chat("你现在的参数是什么"), chat("洪水分析的降水参数是什么"),
@@ -129,7 +131,8 @@ public class IntentClassifier {
             "红线", "地块", "建筑密度", "缓冲区", "高程", "地形", "遥感", "空间分析",
             "三维", "经纬度", "消防站", "医院", "坡度", "洼地", "径流", "净距", "设施距离",
             "暴雨", "积水", "降雨", "降水", "挡光", "采光", "适宜性", "开发强度",
-            "养老", "学校",
+            "养老", "学校", "建筑", "建筑分析", "建筑指标", "周边", "公里", "千米", "km",
+            "缓冲区分析", "地形分析", "容积",
             "slpk", "cityengine", "geoscene", "flood", "aoi", "dem", "gis",
             "skyline", "sunlight", "shadow"
     );

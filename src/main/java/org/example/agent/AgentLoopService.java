@@ -144,6 +144,15 @@ public class AgentLoopService {
             return executePlanningDemo(userMessage, userId,
                     new TaskPlan(Intent.MODEL, Subject.CURRENT_CONTEXT, null), trace, traceListener);
         }
+        // 明确的“地点 + 半径”请求（如“以清华大学为中心生成1km缓冲区”、
+        // “分析陆家嘴周边500米建筑”）是确定性 GIS 任务，优先于 LLM 路由，
+        // 避免被错路由到 site_selection（缺 candidates）等能力。
+        if (parsePlaceAnalysisRequest(userMessage) != null) {
+            AgentResult placeResult = executeExplicitPlaceAnalysis(userMessage, userId, trace, traceListener);
+            if (placeResult != null) {
+                return placeResult;
+            }
+        }
         if (llmRoutingEnabled) { AgentResult routed = executeLlmSpatialRoute(userMessage, userId, memoryId, trace, traceListener); if (routed != null) return routed; }
         if (!llmRoutingEnabled) {
             AgentResult confirmedImport = executeConfirmedDataImport(userMessage, trace, traceListener);
@@ -2106,7 +2115,7 @@ public class AgentLoopService {
     private String formatObservation(String toolName, Object result) {
         Map<String, Object> map = asMap(result);
         if (map == null) {
-            return result == null ? "No result" : result.toString();
+            return result == null ? "无结果" : result.toString();
         }
 
         if (isFailed(map)) {
@@ -2147,7 +2156,7 @@ public class AgentLoopService {
         double siteArea = getDouble(metrics, "site_area", getDouble(metrics, "site_area_sqm", 0));
         double buildingArea = getDouble(metrics, "building_area", getDouble(metrics, "total_const_area_sqm", 0));
         return String.format(
-                "Analysis complete. I fetched valid building footprints and calculated FAR %.2f. The AOI area is %.2f ha, estimated total floor area is %.2f ha, and %d buildings were matched.",
+                "分析完成。已获取有效建筑轮廓并计算容积率 %.2f：分析范围 %.2f 公顷，估算建筑总面积 %.2f 公顷，共匹配 %d 栋建筑。",
                 far, siteArea / 10000.0, buildingArea / 10000.0, count
         );
     }
