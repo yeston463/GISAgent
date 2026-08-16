@@ -79,7 +79,7 @@ def fetch_public_dem_raster(aoi):
     """Download, mosaic and crop public GeoTIFF elevation tiles to a WGS84 AOI."""
     features = model._features_from_source(aoi)
     if not features:
-        return {"status": "NoData", "message": "An AOI is required to fetch a DEM raster."}
+        return {"status": "NoData", "message": "获取 DEM 栅格需要 AOI 范围。"}
     geometry = features[0].get("geometry") or {}
     coordinates = []
     def visit(value):
@@ -89,11 +89,11 @@ def fetch_public_dem_raster(aoi):
             for item in value: visit(item)
     visit(geometry.get("coordinates"))
     if len(coordinates) < 3:
-        return {"status": "NoData", "message": "AOI geometry has no usable coordinates."}
+        return {"status": "NoData", "message": "AOI 几何没有可用坐标。"}
     xmin, xmax = min(x for x, _ in coordinates), max(x for x, _ in coordinates)
     ymin, ymax = min(y for _, y in coordinates), max(y for _, y in coordinates)
     if xmin < -180 or xmax > 180 or ymin < -85 or ymax > 85:
-        return {"status": "InvalidData", "message": "Public DEM tile source accepts WGS84 AOIs only."}
+        return {"status": "InvalidData", "message": "公共 DEM 瓦片源仅接受 WGS84 坐标的 AOI。"}
     def tile_xy(lon, lat, zoom):
         n = 2 ** zoom
         x = int((lon + 180.0) / 360.0 * n)
@@ -109,14 +109,14 @@ def fetch_public_dem_raster(aoi):
             zoom, tiles = candidate, proposed
             break
     if not tiles:
-        return {"status": "NoData", "message": "AOI is too large for the public DEM tile request limit."}
+        return {"status": "NoData", "message": "AOI 超出公共 DEM 瓦片请求的大小限制。"}
     try:
         import rasterio
         from rasterio.merge import merge
         from rasterio.mask import mask
         from rasterio.warp import transform_geom
     except ImportError:
-        return {"status": "Unavailable", "message": "Rasterio is unavailable in the GIS runtime."}
+        return {"status": "Unavailable", "message": "GIS 运行时没有可用的 Rasterio。"}
     root = Path(os.getenv("GIS_RASTER_ROOT", Path.cwd() / "cityengine-workspace" / "gis-inputs")).resolve()
     work = root / "public-dem"; work.mkdir(parents=True, exist_ok=True)
     tile_paths = []
@@ -157,7 +157,7 @@ def fetch_public_dem_raster(aoi):
                 "zoom": zoom, "tileCount": len(tiles), "resolutionMeters": round(resolution_m, 2),
                 "width": out_meta["width"], "height": out_meta["height"], "crs": str(out_meta["crs"])}
     except Exception as exc:
-        return {"status": "Error", "message": f"Public DEM fetch failed: {exc}"}
+        return {"status": "Error", "message": f"公共 DEM 获取失败：{exc}"}
 
 
 def inspect_spatial_file(payload):
@@ -349,7 +349,7 @@ def execute_spatial_plan(payload):
             return calculate_nearest_facility_distance(args)
     except Exception as exc:
         return {"status": "Error", "stage": "spatial_plan", "message": str(exc)}
-    return {"status": "Error", "stage": "spatial_plan", "message": "Operation did not produce a result"}
+    return {"status": "Error", "stage": "spatial_plan", "message": "空间规划操作未产生结果"}
 
 
 def calculate_nearest_facility_distance(payload):
@@ -370,7 +370,7 @@ def calculate_nearest_facility_distance(payload):
         return {"status": "NoData", "stage": "nearest_facility_distance",
                 "analysis_type": "nearest_facility_distance",
                 "missing_data": missing,
-                "message": "Candidate and facility point or polygon features are required."}
+                "message": "需要候选点/面与设施点/面要素。"}
 
     facility_rows = []
     for index, feature in enumerate(facilities, start=1):
@@ -381,7 +381,7 @@ def calculate_nearest_facility_distance(payload):
     if not facility_rows:
         return {"status": "InvalidData", "stage": "nearest_facility_distance",
                 "analysis_type": "nearest_facility_distance",
-                "message": "No facility feature contains usable geometry."}
+                "message": "没有设施要素包含可用几何。"}
 
     rows = []
     for index, candidate in enumerate(candidates, start=1):
@@ -405,7 +405,7 @@ def calculate_nearest_facility_distance(payload):
     if not rows:
         return {"status": "NoData", "stage": "nearest_facility_distance",
                 "analysis_type": "nearest_facility_distance",
-                "message": "No candidate feature contains usable geometry."}
+                "message": "没有候选要素包含可用几何。"}
 
     distances = [item["properties"]["nearestFacilityDistanceM"] for item in rows]
     result_features = model._feature_collection(rows)
@@ -417,10 +417,10 @@ def calculate_nearest_facility_distance(payload):
         "average_distance_m": round(sum(distances) / len(distances), 2),
         "nearest_features": result_features,
         "method": "geodesic_straight_line_centroid_distance",
-        "limitations": "Straight-line centroid distance only; road-network travel distance and facility capacity require authoritative network data.",
+        "limitations": "仅按质心直线距离计算；路网出行距离与设施容量需以权威网络数据复核。",
         "commands": [
-            {"action": "addGeoJsonLayer", "params": {"layerId": "nearest-facility-distance", "title": "Nearest facility distance", "style": "nearestFacility", "visible": True, "data": result_features}},
-            {"action": "showAdvancedAnalysis", "params": {"analysisType": "nearest_facility_distance", "title": "Nearest facility distance", "candidateCount": len(rows), "facilityCount": len(facility_rows), "minDistanceM": min(distances), "averageDistanceM": round(sum(distances) / len(distances), 2), "limitations": "Straight-line centroid distance only."}},
+            {"action": "addGeoJsonLayer", "params": {"layerId": "nearest-facility-distance", "title": "最近设施距离", "style": "nearestFacility", "visible": True, "data": result_features}},
+            {"action": "showAdvancedAnalysis", "params": {"analysisType": "nearest_facility_distance", "title": "最近设施距离", "candidateCount": len(rows), "facilityCount": len(facility_rows), "minDistanceM": min(distances), "averageDistanceM": round(sum(distances) / len(distances), 2), "limitations": "仅按质心直线距离计算。"}},
         ],
     }
 
@@ -498,7 +498,7 @@ def fetch_buildings_for_aoi(aoi_geojson):
             "status": "NoData",
             "stage": "fetch_buildings",
             "building_count": 0,
-            "message": "Overpass returned no building footprints for this AOI.",
+            "message": "Overpass 未返回该 AOI 范围内的建筑轮廓。",
             "query_bbox": bbox,
             "gis_backend": adapter._preferred_backend(),
             "elapsed_ms": round((time.time() - started) * 1000),
@@ -534,7 +534,7 @@ def fetch_buildings_for_aoi(aoi_geojson):
             "status": "NoData",
             "stage": "fetch_buildings",
             "building_count": 0,
-            "message": "Buildings were fetched, but none intersected the AOI after clipping.",
+            "message": "已获取建筑数据，但裁剪后没有建筑与 AOI 相交。",
             "raw_count": len(raw_features),
             "query_bbox": bbox,
             "gis_backend": clip_backend or adapter._preferred_backend(),
@@ -547,7 +547,7 @@ def fetch_buildings_for_aoi(aoi_geojson):
             "status": "NoData",
             "stage": "fetch_buildings",
             "building_count": 0,
-            "message": "AOI only intersects degenerate or very small building fragments; no unreliable footprint will be used for metrics or CityEngine.",
+            "message": "AOI 仅与退化或极小的建筑碎片相交；不会使用不可靠轮廓计算指标或生成 CityEngine 模型。",
             "raw_count": len(raw_features),
             "clipped_count": len(clipped_features),
             "rejected_footprint_count": len(rejected_footprints),
@@ -594,7 +594,7 @@ def _calculate_metrics_open_source(payload):
             "stage": "urban_metrics",
             "far": 0,
             "building_count": 0,
-            "message": "No valid building polygons were provided.",
+            "message": "未提供有效的建筑多边形。",
             "gis_backend": "open_source_geopandas",
         }
 
@@ -645,7 +645,7 @@ def _calculate_metrics_geoscene_server(payload):
             "stage": "urban_metrics",
             "far": 0,
             "building_count": 0,
-            "message": "No valid building polygons were provided.",
+            "message": "未提供有效的建筑多边形。",
             "gis_backend": "geoscene_server",
         }
 
@@ -708,7 +708,7 @@ def _calculate_metrics_arcpy(payload):
             "stage": "urban_metrics",
             "far": 0,
             "building_count": 0,
-            "message": "No valid building polygons were provided.",
+            "message": "未提供有效的建筑多边形。",
             "gis_backend": "geoscene_arcpy",
         }
 
@@ -721,7 +721,7 @@ def _calculate_metrics_arcpy(payload):
             "stage": "urban_metrics",
             "far": 0,
             "building_count": 0,
-            "message": "No valid building polygons were provided.",
+            "message": "未提供有效的建筑多边形。",
             "gis_backend": "geoscene_arcpy",
         }
 
@@ -798,7 +798,7 @@ def calculate_metrics(payload):
         "stage": "urban_metrics",
         "far": 0,
         "building_count": 0,
-        "message": "No GIS geometry backend is available. Install geopandas/shapely/pandas, or run this service on the GeoScene/ArcPy interpreter.",
+        "message": "没有可用的 GIS 几何后端。请安装 geopandas/shapely/pandas，或在 GeoScene/ArcPy 解释器上运行本服务。",
         "gis_backend": adapter._preferred_backend(),
         "fallback_errors": fallback_errors,
         "runtime": adapter.runtime_status(),
@@ -1186,7 +1186,7 @@ def calculate_site_selection(payload):
         return {
             "status": "NoData", "stage": "site_selection", "analysis_type": "site_selection",
             "missing_data": ["candidates"],
-            "message": "Candidate point or polygon features are required for site selection.",
+            "message": "选址需要候选点或面要素。",
         }
     geometry_kinds = set()
     for candidate in candidates:
@@ -1197,10 +1197,10 @@ def calculate_site_selection(payload):
             geometry_kinds.add("polygon")
         else:
             return {"status": "InvalidData", "stage": "site_selection", "analysis_type": "site_selection",
-                    "message": "Candidates must use Point, Polygon or MultiPolygon geometry."}
+                    "message": "候选要素必须使用点、面或多面几何。"}
     if len(geometry_kinds) != 1:
         return {"status": "InvalidData", "stage": "site_selection", "analysis_type": "site_selection",
-                "message": "Use either point candidates or polygon candidates in one site-selection request."}
+                "message": "一次选址请求中只能使用点候选或面候选中的一种。"}
     facilities = model._features_from_source(payload.get("facilities"))
     constraints = model._features_from_source(payload.get("constraints"))
     weights = _site_selection_weights(payload.get("weights"))
@@ -1239,12 +1239,12 @@ def calculate_site_selection(payload):
             "avoidanceScore": None if avoidance_score is None else round(avoidance_score * 100.0, 1),
             "nearestFacilityM": None if nearest_facility is None else round(nearest_facility, 1),
             "nearestConstraintM": None if nearest_constraint is None else round(nearest_constraint, 1),
-            "name": props.get("name") or props.get("id") or f"Candidate {index}",
+            "name": props.get("name") or props.get("id") or f"候选地块 {index}",
         })
         ranked.append({"type": "Feature", "properties": props, "geometry": candidate.get("geometry")})
     if not ranked:
         return {"status": "NoData", "stage": "site_selection", "analysis_type": "site_selection",
-                "message": "No candidate feature contains usable geometry."}
+                "message": "没有候选要素包含可用几何。"}
     ranked.sort(key=lambda item: (item["properties"]["screeningStatus"] == "excluded", -item["properties"]["siteScore"], item["properties"]["name"]))
     for rank, item in enumerate(ranked, start=1):
         item["properties"]["siteRank"] = rank
@@ -1258,10 +1258,10 @@ def calculate_site_selection(payload):
         "candidate_geometry": next(iter(geometry_kinds)),
         "ranked_sites": result_features, "best_site": eligible[0] if eligible else None,
         "method": "weighted_euclidean_proximity_screening",
-        "limitations": "Straight-line-distance screening only. Validate land ownership, zoning, parcel area, road-network travel time, environmental constraints, terrain, utilities and statutory approvals with authoritative data before siting.",
+        "limitations": "仅按直线距离筛查；选址前请以权威数据复核土地权属、用地性质、地块面积、路网出行时间、环境约束、地形、市政条件与法定审批。",
         "commands": [
-            {"action": "addGeoJsonLayer", "params": {"layerId": "site-selection-ranked", "title": "Site-selection candidates", "style": "siteSelection", "visible": True, "data": result_features}},
-            {"action": "showAdvancedAnalysis", "params": {"analysisType": "site_selection", "title": "Multi-criteria site screening", "candidateCount": len(ranked), "eligibleCount": len(eligible), "bestSite": eligible[0]["properties"] if eligible else None, "weights": weights, "limitations": "Straight-line-distance screening only; confirm authoritative planning and engineering constraints."}},
+            {"action": "addGeoJsonLayer", "params": {"layerId": "site-selection-ranked", "title": "选址候选地块", "style": "siteSelection", "visible": True, "data": result_features}},
+            {"action": "showAdvancedAnalysis", "params": {"analysisType": "site_selection", "title": "多准则选址筛查", "candidateCount": len(ranked), "eligibleCount": len(eligible), "bestSite": eligible[0]["properties"] if eligible else None, "weights": weights, "limitations": "仅按直线距离筛查，需以权威规划与工程约束复核。"}},
         ],
     }
 
@@ -1295,7 +1295,7 @@ def _analysis_center(payload, features):
 def calculate_skyline(payload):
     features, buildings, source = _advanced_analysis_features(payload)
     if not features:
-        return {"status": "NoData", "analysis_type": "skyline", "message": "No buildings are available for skyline analysis"}
+        return {"status": "NoData", "analysis_type": "skyline", "message": "当前范围内没有可用于天际线分析的建筑"}
     center = _analysis_center(payload, features)
     bin_count = max(12, min(int(payload.get("bin_count", 24) or 24), 72))
     profile = [{
@@ -1335,7 +1335,7 @@ def calculate_skyline(payload):
         "skyline_profile": profile,
         "data_source": source,
         "method": "directional_max_height_profile",
-        "limitations": "Screening profile based on building centroids and attribute heights; terrain and true line-of-sight occlusion are not included.",
+        "limitations": "筛查剖面基于建筑质心与属性高度；未包含地形与真实视线遮挡。",
         "buildings": buildings,
     }
     result["commands"] = [{"action": "showAdvancedAnalysis", "params": {
@@ -1350,12 +1350,12 @@ def calculate_skyline(payload):
 def calculate_sunlight(payload):
     features, buildings, source = _advanced_analysis_features(payload)
     if not features:
-        return {"status": "NoData", "analysis_type": "sunlight", "message": "No buildings are available for sunlight analysis"}
+        return {"status": "NoData", "analysis_type": "sunlight", "message": "当前范围内没有可用于日照分析的建筑"}
     center = _analysis_center(payload, features)
     try:
         analysis_date = calendar_date.fromisoformat(str(payload.get("date"))) if payload.get("date") else calendar_date.today()
     except ValueError:
-        return {"status": "Error", "analysis_type": "sunlight", "message": "date must use YYYY-MM-DD"}
+        return {"status": "Error", "analysis_type": "sunlight", "message": "日期必须使用 YYYY-MM-DD 格式"}
     raw_hours = payload.get("hours") if isinstance(payload.get("hours"), list) else [8, 10, 12, 14, 16]
     hours = sorted(set(max(0, min(int(hour), 23)) for hour in raw_hours))
     heights = [model._feature_height(feature)[0] for feature in features]
@@ -1393,7 +1393,7 @@ def calculate_sunlight(payload):
         "max_shadow_length_m": round(max_shadow_length, 1), "shadow_hour": selected["hour"],
         "shadows": shadow_collection, "data_source": source,
         "method": "solar_position_and_height_based_shadow_screening",
-        "limitations": "Uses local solar time and building attribute heights. Terrain, facade windows and regulatory duration rules are not included.",
+        "limitations": "按本地太阳时与建筑属性高度估算；未包含地形、立面开窗与法定日照时长规则。",
         "buildings": buildings,
     }
     commands = []
@@ -1530,7 +1530,7 @@ def _risk_cell(lon, lat, score, level, depth_m, elevation, cell_width_m, cell_he
     return {
         "type": "Feature",
         "properties": {
-            "name": f"{level.title()} flood risk cell",
+            "name": {"high": "高风险洪涝格网", "medium": "中风险洪涝格网", "low": "低风险洪涝格网"}.get(level, f"{level} 风险洪涝格网"),
             "riskLevel": level,
             "riskScore": round(score, 1),
             "estimatedDepthM": round(depth_m, 3),
@@ -1752,17 +1752,17 @@ def calculate_flood_risk(payload):
     payload = payload or {}
     if not model._features_from_source(payload.get("aoi")):
         return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
-                "missing_data": ["aoi"], "message": "An AOI is required for flood risk screening."}
+                "missing_data": ["aoi"], "message": "洪涝风险筛查需要 AOI 范围。"}
     grid = _hydrologic_grid(payload.get("dem"))
     if not grid or grid["rows"] < 3 or grid["columns"] < 3:
         return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
                 "missing_data": ["hydrologic_dem_grid"],
-                "message": "A 3×3 or larger regular DEM grid is required. Upload ASC/GeoTIFF, or sample a regular ground grid."}
+                "message": "需要 3×3 及以上规格的规则 DEM 网格。请上传 ASC/GeoTIFF，或先采样规则地面网格。"}
     scenario = payload.get("rainfall_scenario")
     rainfall_mm = _number_from_mapping(scenario, ("rainfallMm", "rainfall_mm", "rainfall", "depthMm"))
     if rainfall_mm is None or rainfall_mm <= 0:
         return {"status": "NoData", "stage": "flood_analysis", "analysis_type": "flood",
-                "missing_data": ["rainfall_scenario"], "message": "A positive rainfall scenario is required."}
+                "missing_data": ["rainfall_scenario"], "message": "需要大于 0 的降雨情景。"}
 
     values = grid["values"]
     elevations = [value for row in values for value in row if value is not None]
@@ -1780,7 +1780,7 @@ def calculate_flood_risk(payload):
         "source": grid["source"], "derived_grid": grid["derived"],
     }
     if maximum - minimum < 0.5:
-        dem_quality["warning"] = "Terrain relief is below 0.5 m across the sampled AOI; relative risk classes are sensitive to elevation noise."
+        dem_quality["warning"] = "采样范围内地形高差小于 0.5 米，相对风险分级对高程噪声敏感。"
     risk_features, risk_by_sample = [], []
     for row in range(grid["rows"]):
         for column in range(grid["columns"]):
@@ -1825,7 +1825,7 @@ def calculate_flood_risk(payload):
             exposed = dict(building)
             exposed["properties"] = dict(building.get("properties") or {})
             exposed["properties"].update({
-                "name": exposed["properties"].get("name") or exposed["properties"].get("id") or "Affected building",
+                "name": exposed["properties"].get("name") or exposed["properties"].get("id") or "受影响建筑",
                 "floodExposure": nearest[3], "riskScore": round(nearest[2], 1),
                 "estimatedDepthM": round(nearest[4], 3),
             })
@@ -1848,20 +1848,20 @@ def calculate_flood_risk(payload):
         "data_source": "current_context", "method": "hydrologic_dem_priority_flood_d8_flow_accumulation",
         "hydrology": {"depressionFill": "priority_flood", "flowDirection": "D8",
                        "drainageNetworkApplied": has_drainage, "runoffCoefficient": 0.65},
-        "limitations": "Hydrologic terrain screening uses DEM depression filling, D8 routing and proximity-based drainage reduction. It is not a calibrated 2D hydraulic model and does not represent pipe capacity, river stage, boundary inflow, roughness or time-varying inundation."
-                       + ("" if building_exposure_available else " Building exposure was not calculated because no complete building dataset is available for this AOI."),
+        "limitations": "水文地形筛查基于 DEM 洼地填平、D8 流向与邻近排水削减，非标定的二维水动力模型，不代表管渠容量、河道水位、边界入流、糙率或随时间变化的淹没过程。"
+                       + ("" if building_exposure_available else " 当前 AOI 无完整建筑数据集，未计算建筑暴露情况。"),
     }
     result["commands"] = [{"action": "addGeoJsonLayer", "params": {
-        "layerId": "flood-risk-screening", "title": "Flood risk screening", "style": "floodRisk",
+        "layerId": "flood-risk-screening", "title": "洪涝风险筛查", "style": "floodRisk",
         "visible": True, "data": risk_cells,
     }}]
     if exposed_buildings:
         result["commands"].append({"action": "addGeoJsonLayer", "params": {
-            "layerId": "flood-exposed-buildings", "title": "Potentially affected buildings", "style": "floodExposure",
+            "layerId": "flood-exposed-buildings", "title": "可能受淹建筑", "style": "floodExposure",
             "visible": True, "data": result["affected_buildings"],
         }})
     result["commands"].append({"action": "showAdvancedAnalysis", "params": {
-        "analysisType": "flood", "title": "Flood risk screening", "rainfallMm": result["rainfall_mm"],
+        "analysisType": "flood", "title": "洪涝风险筛查", "rainfallMm": result["rainfall_mm"],
         "returnPeriodYears": return_period, "highRiskCellCount": result["high_risk_cell_count"],
         "mediumRiskCellCount": result["medium_risk_cell_count"],
         # Do not collapse missing building data into a zero-exposure claim.

@@ -513,18 +513,18 @@ public class AgentLoopService {
             JSONObject context = JSON.parseObject(gisContextService.getGeoJson(memoryId));
             if (context == null) context = new JSONObject();
             StringBuilder snapshot = new StringBuilder();
-            snapshot.append("contextVersion=").append(context.getLongValue("contextVersion"));
-            snapshot.append("; hasAoi=").append(context.containsKey("aoi"));
-            snapshot.append("; hasDem=").append(context.containsKey("dem"));
+            snapshot.append("上下文版本=").append(context.getLongValue("contextVersion"));
+            snapshot.append("；已有AOI=").append(context.containsKey("aoi") ? "是" : "否");
+            snapshot.append("；已有DEM=").append(context.containsKey("dem") ? "是" : "否");
             Object rainfall = context.get("rainfall_scenario");
-            snapshot.append("; rainfall_scenario=").append(rainfall == null ? "当前内存没有" : JSON.toJSONString(rainfall));
+            snapshot.append("；降雨情景=").append(rainfall == null ? "当前内存没有" : JSON.toJSONString(rainfall));
             if (question.contains("洪水") || question.contains("内涝") || question.contains("降雨")
                     || question.contains("降水") || question.contains("重现期") || question.contains("flood")) {
-                snapshot.append("; systemDefaults=rainfallMm 必须大于0且建议不超过500mm，returnPeriodYears 默认20年且允许1-1000年，durationHours建议填写；当前模型为Priority-Flood+D8径流筛查");
+                snapshot.append("；系统默认值=降雨量必须大于0且建议不超过500mm，重现期默认20年且允许1-1000年，降雨历时建议填写；当前模型为Priority-Flood+D8径流筛查");
             }
             return snapshot.toString();
         } catch (RuntimeException error) {
-            return "当前内存暂不可读；系统默认值：rainfallMm>0，returnPeriodYears默认20年，允许1-1000年。";
+            return "当前内存暂不可读；系统默认值：降雨量>0，重现期默认20年，允许1-1000年。";
         }
     }
 

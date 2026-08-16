@@ -87,12 +87,12 @@
           </div>
         </div>
         <div v-else-if="advancedData.analysisType === 'flood'" class="flood-grid">
-          <article class="flood-card danger"><span>High risk cells</span><strong>{{ advancedData.highRiskCellCount || 0 }}</strong></article>
-          <article class="flood-card"><span>Medium risk cells</span><strong>{{ advancedData.mediumRiskCellCount || 0 }}</strong></article>
-          <article class="flood-card"><span>Affected buildings</span><strong>{{ floodExposureStatus }}</strong></article>
-          <article class="flood-card"><span>Max relative depth</span><strong>{{ format(advancedData.maxEstimatedDepthM, 3, ' m') }}</strong></article>
-          <div class="advanced-summary full"><span>Rainfall {{ format(advancedData.rainfallMm, 0, ' mm') }}</span><span>{{ advancedData.returnPeriodYears || 20 }} year scenario</span></div>
-          <div v-if="advancedData.demQuality" class="dem-quality">DEM {{ advancedData.demQuality.sample_count }} samples · {{ format(advancedData.demQuality.minimum_elevation_m, 2, ' m') }}–{{ format(advancedData.demQuality.maximum_elevation_m, 2, ' m') }} · relief {{ format(advancedData.demQuality.elevation_span_m, 3, ' m') }}<span v-if="advancedData.demQuality.warning"> · {{ advancedData.demQuality.warning }}</span></div>
+          <article class="flood-card danger"><span>高风险格网</span><strong>{{ advancedData.highRiskCellCount || 0 }}</strong></article>
+          <article class="flood-card"><span>中风险格网</span><strong>{{ advancedData.mediumRiskCellCount || 0 }}</strong></article>
+          <article class="flood-card"><span>受影响建筑</span><strong>{{ floodExposureStatus }}</strong></article>
+          <article class="flood-card"><span>最大相对水深</span><strong>{{ format(advancedData.maxEstimatedDepthM, 3, ' m') }}</strong></article>
+          <div class="advanced-summary full"><span>降雨 {{ format(advancedData.rainfallMm, 0, ' mm') }}</span><span>{{ advancedData.returnPeriodYears || 20 }} 年重现期</span></div>
+          <div v-if="advancedData.demQuality" class="dem-quality">DEM 采样 {{ advancedData.demQuality.sample_count }} 个 · 高程 {{ format(advancedData.demQuality.minimum_elevation_m, 2, ' m') }}–{{ format(advancedData.demQuality.maximum_elevation_m, 2, ' m') }} · 高差 {{ format(advancedData.demQuality.elevation_span_m, 3, ' m') }}<span v-if="advancedData.demQuality.warning"> · {{ advancedData.demQuality.warning }}</span></div>
         </div>
         <div v-else class="sunlight-grid">
           <article v-for="sample in advancedData.samples || []" :key="sample.hour" class="sunlight-sample">
@@ -121,7 +121,6 @@
         <div class="quality-row">
           <span>楼层数据可信度：{{ confidenceText }}</span>
           <span>高度数据可信度：{{ heightConfidenceText }}</span>
-          <span>绿地率：普通建筑数据未包含绿地图层</span>
           <span v-if="standardData.gis_backend">GIS 后端：{{ gisBackendLabel(standardData.gis_backend) }}</span>
         </div>
       </template>

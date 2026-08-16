@@ -967,17 +967,17 @@ export function useCommandExecutor(viewRef) {
         type: "unique-value", field: "riskLevel", defaultSymbol: {
           type: "simple-fill", color: [34, 197, 94, 0.10], outline: { color: [22, 163, 74, 0.45], width: 0.5 }
         }, uniqueValueInfos: [
-          { value: "high", label: "High flood risk", symbol: { type: "simple-fill", color: [220, 38, 38, 0.65], outline: { color: [127, 29, 29, 0.95], width: 1.2 } } },
-          { value: "medium", label: "Medium flood risk", symbol: { type: "simple-fill", color: [245, 158, 11, 0.42], outline: { color: [180, 83, 9, 0.8], width: 0.8 } } },
-          { value: "low", label: "Low flood risk", symbol: { type: "simple-fill", color: [34, 197, 94, 0.12], outline: { color: [22, 163, 74, 0.5], width: 0.5 } } }
+          { value: "high", label: "高风险", symbol: { type: "simple-fill", color: [220, 38, 38, 0.65], outline: { color: [127, 29, 29, 0.95], width: 1.2 } } },
+          { value: "medium", label: "中风险", symbol: { type: "simple-fill", color: [245, 158, 11, 0.42], outline: { color: [180, 83, 9, 0.8], width: 0.8 } } },
+          { value: "low", label: "低风险", symbol: { type: "simple-fill", color: [34, 197, 94, 0.12], outline: { color: [22, 163, 74, 0.5], width: 0.5 } } }
         ]
       };
       const floodExposureRenderer = {
         type: "unique-value", field: "floodExposure", defaultSymbol: {
           type: "simple-fill", color: [251, 146, 60, 0.40], outline: { color: [194, 65, 12, 1], width: 2 }
         }, uniqueValueInfos: [
-          { value: "high", label: "High exposure", symbol: { type: "simple-fill", color: [185, 28, 28, 0.58], outline: { color: [127, 29, 29, 1], width: 2.5 } } },
-          { value: "medium", label: "Medium exposure", symbol: { type: "simple-fill", color: [251, 146, 60, 0.46], outline: { color: [194, 65, 12, 1], width: 2 } } }
+          { value: "high", label: "高暴露", symbol: { type: "simple-fill", color: [185, 28, 28, 0.58], outline: { color: [127, 29, 29, 1], width: 2.5 } } },
+          { value: "medium", label: "中暴露", symbol: { type: "simple-fill", color: [251, 146, 60, 0.46], outline: { color: [194, 65, 12, 1], width: 2 } } }
         ]
       };
       const siteSelectionUsesPointSymbols = (data.features || []).some(feature => feature?.geometry?.type === "Point");
@@ -988,18 +988,18 @@ export function useCommandExecutor(viewRef) {
         type: "class-breaks", field: "siteScore", defaultSymbol: {
           ...siteSelectionSymbol([148, 163, 184, 0.35], [71, 85, 105, 0.9])
         }, classBreakInfos: [
-          { minValue: 0, maxValue: 39.999, label: "Low suitability", symbol: siteSelectionSymbol([239, 68, 68, 0.45], [153, 27, 27, 0.9]) },
-          { minValue: 40, maxValue: 69.999, label: "Medium suitability", symbol: siteSelectionSymbol([245, 158, 11, 0.45], [180, 83, 9, 0.9]) },
-          { minValue: 70, maxValue: 100, label: "High suitability", symbol: siteSelectionSymbol([34, 197, 94, 0.5], [21, 128, 61, 0.95]) }
+          { minValue: 0, maxValue: 39.999, label: "适宜性低", symbol: siteSelectionSymbol([239, 68, 68, 0.45], [153, 27, 27, 0.9]) },
+          { minValue: 40, maxValue: 69.999, label: "适宜性中", symbol: siteSelectionSymbol([245, 158, 11, 0.45], [180, 83, 9, 0.9]) },
+          { minValue: 70, maxValue: 100, label: "适宜性高", symbol: siteSelectionSymbol([34, 197, 94, 0.5], [21, 128, 61, 0.95]) }
         ]
       };
       const nearestFacilityRenderer = {
         type: "class-breaks", field: "nearestFacilityDistanceM", defaultSymbol: {
           ...siteSelectionSymbol([148, 163, 184, 0.35], [71, 85, 105, 0.9])
         }, classBreakInfos: [
-          { minValue: 0, maxValue: 250, label: "Within 250 m", symbol: siteSelectionSymbol([34, 197, 94, 0.55], [21, 128, 61, 0.95]) },
-          { minValue: 250, maxValue: 1000, label: "250 m to 1 km", symbol: siteSelectionSymbol([245, 158, 11, 0.5], [180, 83, 9, 0.9]) },
-          { minValue: 1000, maxValue: 100000000, label: "Over 1 km", symbol: siteSelectionSymbol([239, 68, 68, 0.48], [153, 27, 27, 0.9]) }
+          { minValue: 0, maxValue: 250, label: "250 米以内", symbol: siteSelectionSymbol([34, 197, 94, 0.55], [21, 128, 61, 0.95]) },
+          { minValue: 250, maxValue: 1000, label: "250 米至 1 公里", symbol: siteSelectionSymbol([245, 158, 11, 0.5], [180, 83, 9, 0.9]) },
+          { minValue: 1000, maxValue: 100000000, label: "1 公里以上", symbol: siteSelectionSymbol([239, 68, 68, 0.48], [153, 27, 27, 0.9]) }
         ]
       };
       const blob = new Blob([JSON.stringify(data)], { type: "application/geo+json" });
