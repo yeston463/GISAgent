@@ -130,6 +130,13 @@ public class AgentLoopService {
         if (isParameterQuestion(userMessage)) {
             return answerParameterQuestion(userMessage, memoryId, trace, traceListener);
         }
+        // 明确的规划演示请求（比赛案例/规划评价/优化方案/方案对比）优先于
+        // 普通问答与空间问题判定：这些关键词是确定性规划任务，不应被
+        // isSpatialQuestion 拦截成普通问答。
+        if (isPlanningDemoRequest(userMessage)) {
+            return executePlanningDemo(userMessage, userId,
+                    new TaskPlan(Intent.MODEL, Subject.CURRENT_CONTEXT, null), trace, traceListener);
+        }
         if (!isSpatialQuestion(userMessage)) {
             return answerGeneralQuestion(userMessage, trace, traceListener);
         }
@@ -1266,16 +1273,34 @@ public class AgentLoopService {
         Map<String, Object> metrics = validationLayer.validateMetrics(
                 extractPlanningMetrics(result));
         appendPlanningComparisonCommand(planningCommands, metrics, result);
+        appendPlanningScenarioCommand(planningCommands, result);
         Map<String, Object> cityEngineJob = asMap(result.get("cityEngineJob"));
         String jobId = cityEngineJob == null ? "未知" : String.valueOf(cityEngineJob.getOrDefault("jobId", "未知"));
         String script = cityEngineJob == null ? "" : String.valueOf(cityEngineJob.getOrDefault("generatedScript", ""));
         String rule = cityEngineJob == null ? "" : String.valueOf(cityEngineJob.getOrDefault("generatedRule", ""));
         addTrace(trace, traceListener, 3, "action", "CityEngine 正在生成模型",
                 "作业编号 " + jobId + "，正在执行 CGA 规则并生成三维建筑", "running");
-        Map<String, Object> completed = waitForPlanningPipeline(jobId, trace, traceListener, 600);
+        // 三视图/对比命令在提交后即可展示，不应被 CityEngine 建模阻塞。
+        // 等待 30 秒：作业完成则返回完整结果；仍在运行则先返回“已提交”，
+        // 前端通过 cityengine/jobs 轮询获取最终 SLPK/发布状态。
+        Map<String, Object> completed = waitForPlanningPipeline(jobId, trace, traceListener, 30);
         String status = completed == null ? "queued" : String.valueOf(completed.getOrDefault("status", "queued"));
+        boolean stillRunning = !"completed".equalsIgnoreCase(status) && !"failed".equalsIgnoreCase(status)
+                && !"not_found".equalsIgnoreCase(status) && !"Error".equalsIgnoreCase(status);
         String reply;
         List<String> suggestions;
+        if (stillRunning) {
+            reply = "RAG 与 LLM 已生成规划参数，CityEngine 作业已提交（作业编号 " + jobId + "），"
+                    + "正在后台生成三维建筑并导出 SLPK。可在下方查看现状/问题诊断/优化方案三个视图，"
+                    + "稍后通过对话查询发布结果。";
+            suggestions = List.of("查看现状/问题诊断/优化方案三个视图", "稍后查询 CityEngine 作业状态", "完成后下载 SLPK 或 OBJ");
+            addTrace(trace, traceListener, 3, "queued", "CityEngine 作业已提交",
+                    "作业编号 " + jobId + "，后台建模中", "waiting");
+            boolean pipelineComplete = false;
+            boolean pipelineFailed = false;
+            saveAnalysis(userId, userMessage, metrics);
+            return new AgentResult(reply, suggestions, null, false, metrics, dedupeCommands(planningCommands), trace);
+        }
         if ("completed".equalsIgnoreCase(status)) {
             Map<String, Object> outputs = asMap(completed.get("outputs"));
             StringBuilder outputText = new StringBuilder();
@@ -1942,6 +1967,36 @@ public class AgentLoopService {
 
     private static double round1(double value) {
         return Math.round(value * 10.0) / 10.0;
+    }
+
+    /**
+     * 生成“规划三视图”命令：现状建筑 / 问题建筑 / 优化建筑 / 优化绿地，
+     * 供前端 AnalysisDashboard 三个视图按钮切换真实图层。
+     */
+    private void appendPlanningScenarioCommand(
+            List<Map<String, Object>> planningCommands,
+            Map<String, Object> planningResult) {
+        try {
+            Map<String, Object> params = new LinkedHashMap<>();
+            Object problems = planningResult.get("problemBuildings");
+            if (problems instanceof Map<?, ?> map && !map.isEmpty()) {
+                params.put("problemBuildings", problems);
+            }
+            Object optimized = planningResult.get("optimizedBuildings");
+            if (optimized instanceof Map<?, ?> map && !map.isEmpty()) {
+                params.put("optimizedBuildings", optimized);
+            }
+            Object green = planningResult.get("proposedGreenSpace");
+            if (green instanceof Map<?, ?> map && !map.isEmpty()) {
+                params.put("proposedGreenSpace", green);
+            }
+            if (params.isEmpty()) {
+                return;
+            }
+            planningCommands.add(Map.of("action", "showPlanningScenario", "params", params));
+        } catch (RuntimeException ignored) {
+            // 三视图是增强展示，生成失败不应阻断规划流程。
+        }
     }
 
     private boolean isFailed(Map<String, Object> result) {

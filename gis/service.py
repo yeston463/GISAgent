@@ -1992,6 +1992,8 @@ def evaluate_demo_case(requirements=None, rag_context="", user_request=""):
 
     current_evaluations, current_passed = _evaluate_demo_metrics(current_metrics, 0.0, rule_set)
     problems, _ = _problem_buildings(current_buildings, rule_set["rules"])
+    optimized, optimization_changes = _optimized_buildings(current_buildings, rule_set["rules"])
+    green_spaces = _proposed_green_space()
     cityengine_job = submit_planning_job(case_data, rule_set, current_metrics, problems, requirements, rag_context, user_request)
 
     return {
@@ -2002,6 +2004,9 @@ def evaluate_demo_case(requirements=None, rag_context="", user_request=""):
         "ruleSet": rule_set,
         "current": {"metrics": current_metrics, "evaluations": current_evaluations, "passed": current_passed},
         "problemBuildings": problems,
+        "optimizedBuildings": optimized,
+        "optimizationChanges": optimization_changes,
+        "proposedGreenSpace": green_spaces,
         "cityEngineJob": cityengine_job,
         "commands": [],
         "dataQuality": {

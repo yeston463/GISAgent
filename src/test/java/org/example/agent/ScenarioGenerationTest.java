@@ -202,6 +202,32 @@ class ScenarioGenerationTest {
         assertEquals(54.0, height.get("after"));
     }
 
+
+    @Test
+    void appendPlanningScenarioCommandBuildsThreeViewLayers() throws Exception {
+        AgentLoopService service = createServiceWithCatalog();
+        var method = AgentLoopService.class.getDeclaredMethod(
+                "appendPlanningScenarioCommand",
+                List.class, Map.class);
+        method.setAccessible(true);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("problemBuildings", Map.of("type", "FeatureCollection", "features", List.of()));
+        result.put("optimizedBuildings", Map.of("type", "FeatureCollection", "features", List.of()));
+        result.put("proposedGreenSpace", Map.of("type", "FeatureCollection", "features", List.of()));
+
+        List<Map<String, Object>> commands = new ArrayList<>();
+        method.invoke(service, commands, result);
+
+        assertEquals(1, commands.size());
+        assertEquals("showPlanningScenario", commands.get(0).get("action"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> params = (Map<String, Object>) commands.get(0).get("params");
+        assertTrue(params.containsKey("problemBuildings"));
+        assertTrue(params.containsKey("optimizedBuildings"));
+        assertTrue(params.containsKey("proposedGreenSpace"));
+    }
+
     @Test
     void appendPlanningComparisonCommandSkipsWhenNoPlannedMetrics() throws Exception {
         AgentLoopService service = createServiceWithCatalog();

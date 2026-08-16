@@ -491,27 +491,12 @@ def test_normalize_requirements_reads_green_space_params():
     assert defaulted["adjustGreenSpace"] is False
 
 
-def test_generate_cga_has_green_space_rule():
+def test_generate_cga_excludes_green_space_rule():
+    # 绿地/道路混入建模会破坏 SLPK 导出，CGA 只应包含建筑规则
     rule_set = {"ruleSetId": "t", "effective": True, "source": "t", "rules": {}}
     normalized = normalize_requirements({}, rule_set)
     cga = bridge._generate_cga(normalized)
-    assert 'ce_kind == "green"' in cga
-    assert "GreenSpace" in cga
-    assert "groundCover" in cga
+    assert 'ce_kind == "green"' not in cga
+    assert "GreenSpace" not in cga
+    assert "extrude(ce_height)" in cga
 
-
-def test_write_shapefile_includes_green_spaces(tmp_path):
-    geopandas = pytest.importorskip("geopandas")
-    prepared, _actions, _summary = _prepare([_feature("B-1")])
-    green = {"type": "FeatureCollection", "features": [
-        {"type": "Feature",
-         "geometry": {"type": "Polygon", "coordinates": [[[121.470, 31.231], [121.472, 31.231], [121.472, 31.233], [121.470, 31.233], [121.470, 31.231]]]},
-         "properties": {"id": "G01", "name": "现状保留绿地"}}
-    ]}
-    path = tmp_path / "footprints.shp"
-    bridge._write_shapefile(prepared, path, green_spaces=green)
-    written = geopandas.read_file(path)
-    kinds = set(written["ce_kind"])
-    assert kinds == {"building", "green"}
-    green_row = written[written["ce_kind"] == "green"].iloc[0]
-    assert green_row["ce_color"] == "#3f9d4f"

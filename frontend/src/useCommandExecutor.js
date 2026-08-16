@@ -1115,6 +1115,55 @@ export function useCommandExecutor(viewRef) {
         detail: params || {}
       }));
     },
+    // 展示规划三视图（现状/问题诊断/优化方案）：接收 demo 案例或规划任务的
+    // 现状建筑、问题建筑、优化建筑与优化绿地，创建独立图层供切换。
+    showPlanningScenario: async (params) => {
+      const view = await getReadyView();
+      const existing = params?.existingBuildings || params?.buildings;
+      const problems = params?.problemBuildings;
+      const optimized = params?.optimizedBuildings;
+      const green = params?.proposedGreenSpace;
+
+      const removeLayer = id => {
+        const layer = view.map.findLayerById(id);
+        if (layer) view.map.remove(layer);
+      };
+      const addLayer = (id, title, data, color, outlineColor) => {
+        if (!data?.features?.length) return;
+        removeLayer(id);
+        const blob = new Blob([JSON.stringify(data)], { type: "application/geo+json" });
+        const layer = new GeoJSONLayer({
+          id,
+          title,
+          url: URL.createObjectURL(blob),
+          outFields: ["*"],
+          elevationInfo: { mode: "on-the-ground" },
+          renderer: {
+            type: "simple",
+            symbol: {
+              type: "polygon-3d",
+              symbolLayers: [{
+                type: "fill",
+                material: { color },
+                outline: { color: outlineColor, size: 1.2 }
+              }]
+            }
+          }
+        });
+        layer.load().then(() => URL.revokeObjectURL(layer.url)).catch(() => {});
+        view.map.add(layer);
+      };
+
+      if (existing) addLayer("existing-scenario", "现状建筑", existing, [148, 163, 184, 0.55], [71, 85, 105, 0.9]);
+      if (problems) addLayer("problem-buildings", "问题建筑", problems, [220, 38, 38, 0.75], [127, 29, 29, 1]);
+      if (optimized) addLayer("optimized-scenario", "优化建筑", optimized, [37, 99, 235, 0.65], [30, 64, 175, 0.95]);
+      if (green) addLayer("optimized-green", "优化绿地", green, [34, 197, 94, 0.55], [21, 128, 61, 0.9]);
+
+      // 默认展示现状；若有优化数据则提示用户可切换
+      const scenario = params?.scenario || "existing";
+      await actions.switchPlanningScenario({ scenario });
+      return true;
+    },
     // 5. 清除红线
     clearAOI: async () => {
       const view = await getReadyView();

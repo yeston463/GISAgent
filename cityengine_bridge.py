@@ -581,15 +581,17 @@ def _prepare_buildings(buildings, rule_set, problem_buildings, requirements, ver
     return prepared, actions, summary
 
 
-def _write_shapefile(buildings, shp_path, green_spaces=None):
+def _write_shapefile(buildings, shp_path):
     import geopandas as gpd
     from shapely.geometry import shape
     # Shapefile field names are limited to ten characters. Detailed provenance
     # remains in the job manifest; only CGA/CityEngine attributes are exported.
+    # 注意：不要向建模 Shapefile 混入绿地/道路等非建筑面——实测混合要素会
+    # 导致 CityEngine 导出 SLPK 时模型破碎。绿地仅作为规划指标展示。
     allowed_fields = {
         "id", "name", "ce_height", "ce_floors", "vert_src", "vert_est",
         "ce_modify", "ce_setback", "ce_color", "geom_src", "geom_aprx",
-        "orig_vtx", "geom_note", "ce_kind",
+        "orig_vtx", "geom_note",
     }
     rows = []
     for feature in buildings.get("features", []):
@@ -601,29 +603,16 @@ def _write_shapefile(buildings, shp_path, green_spaces=None):
         if geometry.geom_type not in {"Polygon", "MultiPolygon"} or geometry.is_empty or not geometry.is_valid:
             building_id = props.get("id", "unknown")
             raise ValueError(f"建筑 {building_id} 的原始轮廓无法无损写入 Shapefile，已停止生成")
-        props["ce_kind"] = "building"
-        props["geometry"] = geometry
-        rows.append(props)
-    for feature in (green_spaces or {}).get("features", []):
-        props = {
-            key: value for key, value in dict(feature.get("properties") or {}).items()
-            if key in allowed_fields
-        }
-        geometry = shape(feature["geometry"])
-        if geometry.geom_type not in {"Polygon", "MultiPolygon"} or geometry.is_empty or not geometry.is_valid:
-            continue
-        props["ce_kind"] = "green"
-        props.setdefault("ce_color", "#3f9d4f")
         props["geometry"] = geometry
         rows.append(props)
     if not rows:
-        raise ValueError("没有可用于 CityEngine 的面要素（建筑或绿地）")
+        raise ValueError("没有可用于 CityEngine 的建筑面要素")
     gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
     gdf.to_file(shp_path, driver="ESRI Shapefile", encoding="UTF-8")
 
 
 def _generate_cga(requirements):
-    return f'''version "2025.0"\n\nattr ce_height = 12\nattr ce_modify = 0\nattr ce_setback = 0\nattr ce_color = "#b7c1c8"\nattr ce_kind = "building"\n\n@StartRule\nLot --> case ce_kind == "green": GreenSpace else: BuildingLot\nBuildingLot --> case ce_setback > 0: setback(ce_setback) {{ all: Buildable }} else: Buildable\nBuildable --> extrude(ce_height) Building\nBuilding --> comp(f) {{ side: Facade | top: Roof }}\nFacade --> color(ce_color) split(y) {{ ~{requirements["floorHeight"]}: Floor }}*\nFloor --> color(ce_color)\nRoof --> color("#d9e2e8")\nGreenSpace --> color("#3f9d4f") groundCover("Grass"){{ 0 }}\n'''
+    return f'''version "2025.0"\n\nattr ce_height = 12\nattr ce_modify = 0\nattr ce_setback = 0\nattr ce_color = "#b7c1c8"\n\n@StartRule\nLot --> case ce_setback > 0: setback(ce_setback) {{ all: Buildable }} else: Buildable\nBuildable --> extrude(ce_height) Building\nBuilding --> comp(f) {{ side: Facade | top: Roof }}\nFacade --> color(ce_color) split(y) {{ ~{requirements["floorHeight"]}: Floor }}*\nFloor --> color(ce_color)\nRoof --> color("#d9e2e8")\n'''
 
 
 def _generated_script(job_id, layer_name, shp_workspace_path, rule_workspace_path, result_path, started_path, requirements):
@@ -698,8 +687,8 @@ def submit_planning_job(case_data, rule_set, current_metrics, problem_buildings,
     config_path = runtime["config"] / f"{job_id}.cfg"
     startup_source_path = runtime["config"] / f"{job_id}-startup.py"
     shp_path = runtime["data"] / f"{job_id}.shp"
-    green_spaces = case_data.get("greenSpaces") if isinstance(case_data, dict) else None
-    _write_shapefile(prepared_buildings, shp_path, green_spaces=green_spaces)
+    # 只建模建筑：绿地/道路等非建筑面混入会破坏 SLPK 导出（见 _write_shapefile 注释）
+    _write_shapefile(prepared_buildings, shp_path)
     planned_metrics = _planned_metrics(prepared_buildings, current_metrics, normalized)
     cga_path.write_text(_generate_cga(normalized), encoding="utf-8")
     script_path.write_text(_generated_script(job_id, job_id, f"/automationProject/data/generated/{job_id}.shp", f"/automationProject/rules/generated/{job_id}.cga", runtime["result"], runtime["started"], normalized), encoding="utf-8")

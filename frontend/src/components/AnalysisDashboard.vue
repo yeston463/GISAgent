@@ -65,8 +65,6 @@
             <div class="delta">{{ item.delta }}</div>
           </article>
         </div>
-        <footer class="panel-footer"><span>红色：问题建筑</span><span>蓝色：优化建筑</span><span>绿色：优化绿地</span></footer>
-        <p class="disclaimer">本项目用于城市尺度快速筛查与辅助决策，非高精度日照模拟、非严格物理仿真、非法定规划审批依据。分析依赖数据精度与估算，结果标注来源、精度与适用边界。</p>
       </template>
 
       <template v-else-if="isAdvanced">
