@@ -112,17 +112,21 @@ async function showBuildingFootprints(featureCollection, city) {
   const layer = new GeoJSONLayerCtor({
     title: 'city-buildings',
     url,
-    // 3D 拉伸：高度来自 height 字段（米），缺失时默认 15m，建筑呈现立体体块
+    // 必须显式请求字段：Arcade 表达式引用 $feature.height 时，
+    // 缺少 outFields 会导致高度字段取不到值，3D 拉伸退化为平面/不可见。
+    outFields: ["*"],
+    // 3D 拉伸：高度来自 height 字段（米），缺失时默认 15m，建筑呈现立体体块。
+    // GeoScene 的 ExtrudeSymbol3DLayer.size 只接受数字；动态高度由
+    // renderer 级 valueExpression 返回（Arcade 表达式求值后驱动 size）。
     renderer: {
       type: 'simple',
+      valueExpression: "$feature.height ? $feature.height : 15",
+      valueExpressionTitle: '建筑高度（米）',
       symbol: {
         type: 'polygon-3d',
         symbolLayers: [{
           type: 'extrude',
-          size: {
-            type: 'valueExpression',
-            valueExpression: "$feature.height ? $feature.height : 15"
-          },
+          size: 15,
           material: { color: [255, 170, 0, 0.65] },
           edges: { type: 'solid', color: [200, 120, 0, 0.8] }
         }]
@@ -313,6 +317,8 @@ onMounted(async () => {
   sceneView.when(async () => {
     loading.value = false;
     emit('map-ready', sceneView);
+    // 暴露给外部调试/自动化（与 window.lastBufferGeometry 等既有模式一致）
+    window.__mapView = sceneView;
 
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(

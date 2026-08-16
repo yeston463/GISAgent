@@ -23,6 +23,9 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class GisContextService {
     private static final String DEFAULT_SESSION = "default";
+    /** 落盘单会话上限：超过此大小（约 1MB JSON）的上下文只驻留内存，不写磁盘，
+     *  避免多会话大上下文累积后 persist() 全量序列化触发堆 OutOfMemoryError。 */
+    private static final int MAX_PERSIST_BYTES = 1_000_000;
     private final Map<String, String> contexts = new ConcurrentHashMap<>();
     private final ThreadLocal<String> activeSession = ThreadLocal.withInitial(() -> DEFAULT_SESSION);
     private final Path contextFile;
@@ -206,7 +209,17 @@ public class GisContextService {
         try {
             Files.createDirectories(contextFile.getParent());
             Path temp = contextFile.resolveSibling(contextFile.getFileName() + ".tmp");
-            Files.writeString(temp, JSON.toJSONString(contexts), StandardCharsets.UTF_8);
+            // 只落盘小上下文：城市级建筑数据（单会话可达数 MB）若全量序列化，
+            // 在多会话累积后会让 persist() 的 JSON.toJSONString 触发堆 OOM。
+            // 内存中的 contexts 仍保留完整数据供分析使用；超大会话不落盘，
+            // 重启后该会话需重新上传数据（与 DataStore 缓存语义一致）。
+            Map<String, String> persistable = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : contexts.entrySet()) {
+                if (entry.getValue() != null && entry.getValue().length() <= MAX_PERSIST_BYTES) {
+                    persistable.put(entry.getKey(), entry.getValue());
+                }
+            }
+            Files.writeString(temp, JSON.toJSONString(persistable), StandardCharsets.UTF_8);
             Files.move(temp, contextFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException ignored) {
             // Context remains usable in memory if the optional local cache fails.
