@@ -58,13 +58,33 @@
           <button :class="{ active: activeScenario === 'existing' }" @click="switchScenario('existing')">查看现状</button>
           <button :class="{ active: activeScenario === 'diagnosis' }" @click="switchScenario('diagnosis')">问题诊断</button>
           <button :class="{ active: activeScenario === 'optimized' }" @click="switchScenario('optimized')">优化方案</button>
-        </nav>        <div class="comparison-grid">
-          <article v-for="item in comparisonRows" :key="item.key" class="metric-card">
-            <div class="metric-title"><span>{{ item.label }}</span><span :class="['trend', item.improved ? 'good' : 'neutral']">{{ item.improved ? '已改善' : '保持' }}</span></div>
-            <div class="values"><div><small>现状</small><strong>{{ item.before }}</strong></div><span class="arrow">→</span><div><small>优化后</small><strong class="after">{{ item.after }}</strong></div></div>
-            <div class="delta">{{ item.delta }}</div>
-          </article>
-        </div>
+        </nav>
+        <template v-if="activeScenario === 'existing'">
+          <div class="metrics-grid">
+            <article v-for="item in comparisonRows" :key="item.key" class="standard-card">
+              <span>{{ item.label }}</span><strong>{{ item.before }}</strong><small>现状值（尚未优化）</small>
+            </article>
+          </div>
+          <p class="disclaimer">当前建筑数据的实际指标。分析依赖数据精度与估算，结果标注来源、精度与适用边界。</p>
+        </template>
+        <template v-else-if="activeScenario === 'diagnosis'">
+          <div class="comparison-grid">
+            <article v-for="item in comparisonRows" :key="item.key" class="metric-card">
+              <div class="metric-title"><span>{{ item.label }}</span><span :class="['trend', item.improved ? 'good' : 'neutral']">{{ item.improved ? '符合目标' : '待优化' }}</span></div>
+              <div class="values"><div><small>现状</small><strong>{{ item.before }}</strong></div><span class="arrow">→</span><div><small>优化目标</small><strong class="after">{{ item.after }}</strong></div></div>
+              <div class="delta">{{ item.delta }}</div>
+            </article>
+          </div>
+          <p class="disclaimer">按规划控制指标对比现状与目标：标注"待优化"的指标尚未达到规划约束，需通过优化方案调整。</p>
+        </template>
+        <template v-else>
+          <div class="metrics-grid">
+            <article v-for="item in comparisonRows" :key="item.key" class="standard-card">
+              <span>{{ item.label }}（优化后）</span><strong>{{ item.after }}</strong><small>较现状{{ item.delta }}</small>
+            </article>
+          </div>
+          <p class="disclaimer">优化方案按规划参数调整后的指标。分析依赖数据精度与估算，结果标注来源、精度与适用边界。</p>
+        </template>
       </template>
 
       <template v-else-if="isAdvanced">
