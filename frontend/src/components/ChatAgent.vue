@@ -544,7 +544,9 @@ const processAiChat = async (userInput, isHidden = false) => {
       // 动态能力（如 avg_height_analysis 的 buildingCount 等）均可展示。
       window.dispatchEvent(new CustomEvent('show-gis-charts', { detail: data.metrics }));
     }
-    const cityEngineJobId = data.reply?.match(/CityEngine 作业[：:]\s*([\w-]+)/)?.[1];
+    // 回复文案为“CityEngine 作业已提交（作业编号 ce-…）”，兼容两种写法提取作业号。
+    const cityEngineJobId = data.reply?.match(/作业编号[\s:：（(]*([\w-]+)/)?.[1]
+      || data.reply?.match(/CityEngine 作业[：:]\s*([\w-]+)/)?.[1];
     if (cityEngineJobId) {
       // 作业已提交即打开展示窗口：由查看器轮询建模/发布进度，
       // SceneServer 可用后自动加载三维成果，无需等待回复中出现下载字样。

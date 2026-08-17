@@ -271,6 +271,7 @@ const openResult = async (event) => {
   errorMessage.value = '';
   geometrySummary.value = detail.geometrySummary || {};
   optimizationActions.value = Array.isArray(detail.optimizationActions) ? detail.optimizationActions : [];
+  autoPublishTriggered.value = false;
   visible.value = true;
   if (jobId.value) {
     try {
@@ -287,6 +288,40 @@ const openResult = async (event) => {
 };
 
 let pollTimer = null;
+const autoPublishTriggered = ref(false);
+const autoPublishIfNeeded = async () => {
+  if (autoPublishTriggered.value || !jobId.value) return;
+  let job;
+  try {
+    job = await readJob();
+  } catch {
+    return;
+  }
+  const publication = job?.publication || {};
+  const progress = job?.publicationProgress || {};
+  const activeStages = ['object_store_checking', 'object_store_stabilizing', 'portal_uploading',
+    'portal_uploaded', 'scene_publishing', 'geoscene_hosting', 'publication_retrying'];
+  const publishing = progress.status === 'running' || activeStages.includes(progress.stage);
+  // 建模完成但从未发布：窗口自动触发发布，无需用户手动操作。
+  if (job?.status === 'completed' && !publication.status && !job?.sceneServiceUrl && !publishing) {
+    autoPublishTriggered.value = true;
+    publicationMessage.value = '建模完成，正在自动发布到 GeoScene…';
+    reportLoadStatus('running', publicationMessage.value);
+    try {
+      const response = await fetch(`/analysis/cityengine/jobs/${encodeURIComponent(jobId.value)}/publish`, {
+        method: 'POST'
+      });
+      if (!response.ok) {
+        autoPublishTriggered.value = false; // 允许后续重试
+        publicationMessage.value = '自动发布触发失败，稍后重试…';
+      }
+    } catch (error) {
+      autoPublishTriggered.value = false;
+      publicationMessage.value = `自动发布触发失败：${error?.message || '未知错误'}`;
+    }
+  }
+};
+
 const startPolling = () => {
   stopPolling();
   pollTimer = window.setInterval(async () => {
@@ -295,7 +330,11 @@ const startPolling = () => {
       return;
     }
     try {
-      if (await refreshPublicationStatus()) stopPolling();
+      if (await refreshPublicationStatus()) {
+        stopPolling();
+        return;
+      }
+      await autoPublishIfNeeded();
     } catch (error) {
       errorMessage.value = error?.message || '无法读取 GeoScene 发布状态';
     }
