@@ -239,18 +239,43 @@ public class UploadSecurityService {
 
     private void requireText(byte[] header) throws UploadRejectedException {
         byte[] probe = stripBom(header);
-        for (byte value : probe) {
-            int b = value & 0xFF;
-            // 文本文件允许：可打印 ASCII、换行、Tab；UTF-16 BOM 已在 stripBom 处理
-            if (b != 0 && b != '\n' && b != '\r' && b != '\t' && (b < 0x09 || b > 0x7E)) {
+        for (int i = 0; i < probe.length; ) {
+            int b = probe[i] & 0xFF;
+            // 文本允许：可打印 ASCII、换行、Tab；BOM 已在 stripBom 处理
+            if (b == '\n' || b == '\r' || b == '\t' || (b >= 0x20 && b <= 0x7E)) {
+                i++;
+                continue;
+            }
+            // 合法 UTF-8 多字节序列（中文等非 ASCII 文本）按长度继续校验续字节
+            int continuation;
+            if (b >= 0xC2 && b <= 0xDF) {
+                continuation = 1;
+            } else if (b >= 0xE0 && b <= 0xEF) {
+                continuation = 2;
+            } else if (b >= 0xF0 && b <= 0xF4) {
+                continuation = 3;
+            } else {
                 throw new UploadRejectedException("text_magic_mismatch", "文件内容不是文本/JSON 格式。");
             }
+            if (i + continuation >= probe.length) {
+                break; // 头部探测截断了多字节序列，截断点之外交由后续流程处理
+            }
+            for (int k = 1; k <= continuation; k++) {
+                int c = probe[i + k] & 0xFF;
+                if (c < 0x80 || c > 0xBF) {
+                    throw new UploadRejectedException("text_magic_mismatch", "文件内容不是文本/JSON 格式。");
+                }
+            }
+            i += continuation + 1;
         }
     }
 
     private byte[] stripBom(byte[] data) {
-        if (startsWith(data, UTF8_BOM) || startsWith(data, UTF16_LE) || startsWith(data, UTF16_BE)) {
+        if (startsWith(data, UTF8_BOM)) {
             return java.util.Arrays.copyOfRange(data, 3, data.length);
+        }
+        if (startsWith(data, UTF16_LE) || startsWith(data, UTF16_BE)) {
+            return java.util.Arrays.copyOfRange(data, 2, data.length);
         }
         return data;
     }

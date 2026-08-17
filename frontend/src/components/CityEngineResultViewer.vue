@@ -278,18 +278,46 @@ const openResult = async (event) => {
     } catch (error) {
       errorMessage.value = error?.message || '无法读取 GeoScene 发布状态';
     }
+    // 作业已提交但 SceneServer 尚未就绪：轮询建模/发布进度，
+    // 完成后自动加载三维成果，避免成果只在后台生成而界面无窗口。
+    publicationMessage.value = '作业已提交，正在等待建模与发布完成…';
+    startPolling();
   }
   if (sceneServiceUrl.value) await loadSceneService();
 };
 
+let pollTimer = null;
+const startPolling = () => {
+  stopPolling();
+  pollTimer = window.setInterval(async () => {
+    if (!visible.value || !jobId.value) {
+      stopPolling();
+      return;
+    }
+    try {
+      if (await refreshPublicationStatus()) stopPolling();
+    } catch (error) {
+      errorMessage.value = error?.message || '无法读取 GeoScene 发布状态';
+    }
+  }, 5000);
+};
+const stopPolling = () => {
+  if (pollTimer) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+};
+
 const close = () => {
   visible.value = false;
+  stopPolling();
   destroyView();
 };
 
 onMounted(() => window.addEventListener('show-cityengine-result', openResult));
 onUnmounted(() => {
   window.removeEventListener('show-cityengine-result', openResult);
+  stopPolling();
   destroyView();
 });
 </script>

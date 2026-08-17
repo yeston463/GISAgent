@@ -249,3 +249,50 @@ def test_urban_metrics_returns_effective_height_and_source(client):
     assert body["height_stats"]["confidence"] == "low"
     assert body["vertical_profile"][0]["building_id"] == "heightless-1"
     assert body["vertical_profile"][0]["height_source"] == "building_type_estimated"
+
+
+def test_analyze_area_prefers_context_buildings(client, monkeypatch):
+    """加载数据包（上下文建筑）后，analyze_area 应优先用上下文数据，不请求 OSM。"""
+    calls = {"fetch": 0}
+
+    def spy_fetch(aoi):
+        calls["fetch"] += 1
+        raise AssertionError("context buildings 覆盖范围时不应回退 OSM")
+
+    def fake_metrics(payload):
+        assert payload.get("buildings") is not None
+        return {"status": "Success", "building_count": 3, "far": 1.5}
+
+    monkeypatch.setattr("gis.router.service.fetch_buildings_for_aoi", spy_fetch)
+    monkeypatch.setattr("gis.router.service.calculate_metrics", fake_metrics)
+
+    context_buildings = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": None}]}
+    resp = client.post("/analysis/analyze_area", json={
+        "lon": 116.39, "lat": 39.9, "radius": 500, "buildings": context_buildings})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("status") == "Success"
+    assert body.get("building_source") == "context_data_pack"
+    assert body.get("building_count") == 3
+    assert calls["fetch"] == 0
+
+
+def test_analyze_area_falls_back_to_osm_when_context_misses(client, monkeypatch):
+    """上下文建筑未覆盖请求范围（裁剪为空）时，应回退 OSM 在线数据。"""
+    fake_fetch = {"status": "Success", "source": "overpass", "building_count": 2,
+                  "buildings": [{"id": 1}, {"id": 2}]}
+    metrics_results = iter([
+        {"status": "Success", "building_count": 0},   # 上下文裁剪为空
+        {"status": "Success", "building_count": 2, "far": 1.2},  # OSM 拉取后
+    ])
+
+    monkeypatch.setattr("gis.router.service.fetch_buildings_for_aoi", lambda aoi: fake_fetch)
+    monkeypatch.setattr("gis.router.service.calculate_metrics", lambda payload: next(metrics_results))
+
+    resp = client.post("/analysis/analyze_area", json={
+        "lon": 116.39, "lat": 39.9, "radius": 500, "buildings": {"type": "FeatureCollection", "features": []}})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("status") == "Success"
+    assert body.get("building_source") == "overpass"
+    assert body.get("building_count") == 2

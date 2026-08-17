@@ -54,6 +54,31 @@ class UploadSecurityServiceTest {
     }
 
     @Test
+    void chineseUtf8TextPassesTextChecks() throws Exception {
+        UploadSecurityService service = new UploadSecurityService(propertiesFor(false, -1, -1));
+        MockMultipartFile md = new MockMultipartFile("file", "知识库.md", "text/markdown",
+                "洪水分析需要 DEM 与降雨情景数据。\n重现期默认 20 年。".getBytes(StandardCharsets.UTF_8));
+        assertDoesNotThrow(() -> service.deepFormatCheck(md, "md"));
+        MockMultipartFile txt = new MockMultipartFile("file", "知识库.txt", "text/plain",
+                "城市更新规则：容积率不超过 3.0。".getBytes(StandardCharsets.UTF_8));
+        assertDoesNotThrow(() -> service.deepFormatCheck(txt, "txt"));
+        MockMultipartFile json = new MockMultipartFile("file", "规则.json", "application/json",
+                "{\"说明\":\"容积率上限\",\"值\":3.0}".getBytes(StandardCharsets.UTF_8));
+        assertDoesNotThrow(() -> service.deepFormatCheck(json, "json"));
+    }
+
+    @Test
+    void chineseTextMixedWithNulBytesStillFails() {
+        UploadSecurityService service = new UploadSecurityService(propertiesFor(false, -1, -1));
+        byte[] payload = new byte[]{0x00, (byte) 0xE4, (byte) 0xBD, (byte) 0xA0, 0x00};
+        MockMultipartFile fake = new MockMultipartFile("file", "a.txt", "text/plain", payload);
+        UploadSecurityService.UploadRejectedException error =
+                assertThrows(UploadSecurityService.UploadRejectedException.class,
+                        () -> service.deepFormatCheck(fake, "txt"));
+        assertEquals("text_magic_mismatch", error.getCode());
+    }
+
+    @Test
     void perUserQuotaIsEnforced() throws Exception {
         UploadSecurityService service = new UploadSecurityService(propertiesFor(false, 100, -1));
         // 累积 60 字节通过

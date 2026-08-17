@@ -545,7 +545,9 @@ const processAiChat = async (userInput, isHidden = false) => {
       window.dispatchEvent(new CustomEvent('show-gis-charts', { detail: data.metrics }));
     }
     const cityEngineJobId = data.reply?.match(/CityEngine 作业[：:]\s*([\w-]+)/)?.[1];
-    if (cityEngineJobId && data.reply?.includes('SLPK 下载')) {
+    if (cityEngineJobId) {
+      // 作业已提交即打开展示窗口：由查看器轮询建模/发布进度，
+      // SceneServer 可用后自动加载三维成果，无需等待回复中出现下载字样。
       let sceneServiceUrl = data.reply?.match(/Scene Service[：:]\s*(https?:\/\/\S+)/)?.[1] || '';
       let cityEngineJob = {};
       try {

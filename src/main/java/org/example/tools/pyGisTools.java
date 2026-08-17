@@ -77,6 +77,18 @@ public class pyGisTools {
         payload.put("lat", lat);
         payload.put("radius", radius > 0 ? radius : 500);
 
+        // 会话上下文已有建筑（数据包/上传数据）时随请求携带：GIS 按 AOI 裁剪
+        // 优先使用上下文数据，未覆盖该范围才回退 OSM Overpass 在线拉取。
+        try {
+            JSONObject context = JSON.parseObject(contextService.getGeoJson());
+            Object buildings = context == null ? null : context.get("buildings");
+            if (buildings != null) {
+                payload.put("buildings", buildings);
+            }
+        } catch (Exception ignored) {
+            // 无上下文建筑时按原逻辑走 OSM Overpass。
+        }
+
         Map<String, Object> result = postForMap("/analyze_area", payload);
         saveContextFromResult(result);
         return result;

@@ -109,7 +109,9 @@ class FetchBuildingsRequest(_AoiOrCoordsRequest):
 
 
 class AnalyzeAreaRequest(_AoiOrCoordsRequest):
-    pass
+    # 会话上下文建筑（数据包加载后由 Agent 携带）：非空时优先按 AOI 裁剪，
+    # 覆盖不到该范围再回退 OSM Overpass，避免数据包已加载仍拉取在线数据。
+    buildings: Optional[dict] = None
 
 
 class SpatialExecuteRequest(_BaseRequest):
@@ -209,6 +211,8 @@ async def retry_cityengine_publication(job_id: str):
         raise HTTPException(status_code=404, detail="CityEngine job has no SLPK output")
     result.pop("publication", None)
     result.pop("publicationShareError", None)
+    # 重发布需清掉旧发布地址，否则发布线程会视为"已发布"直接返回。
+    result.pop("sceneServiceUrl", None)
     result["publicationProgress"] = {
         "stage": "publication_retrying",
         "status": "running",
@@ -390,6 +394,7 @@ async def analyze_area(payload: AnalyzeAreaRequest):
         data = payload.model_dump()
         explicit_aoi = data.get("aoi")
         radius = float(data.get("radius", 500) or 500)
+        context_buildings = data.get("buildings")
         # The requested radius is a user constraint. Do not silently enlarge
         # the AOI when a footprint provider is unavailable.
         radii = [radius]
@@ -406,6 +411,34 @@ async def analyze_area(payload: AnalyzeAreaRequest):
                     "properties": feature["properties"],
                 }
 
+            # 会话上下文已有建筑（数据包/上传数据）时优先使用：按 AOI 裁剪计算，
+            # 不请求 OSM；数据包覆盖不到该范围（裁剪结果为空）再回退在线拉取。
+            if context_buildings:
+                metrics = service.calculate_metrics({
+                    "buildings": context_buildings,
+                    "aoi": aoi,
+                })
+                if (metrics.get("building_count") or 0) > 0:
+                    metrics["building_source"] = "context_data_pack"
+                    metrics.update({
+                        "aoi": aoi,
+                        "buildings": context_buildings,
+                        "data_source": "context_data_pack",
+                        "radius": current_radius,
+                        "attempt": attempt,
+                        "action": "addBuffer",
+                        "params": {
+                            "longitude": payload.lon,
+                            "latitude": payload.lat,
+                            "radius": current_radius,
+                        },
+                    })
+                    return metrics
+                last_fetch = {
+                    "status": "NoData",
+                    "message": "上下文建筑未覆盖该范围，回退 OSM 在线数据。",
+                }
+
             fetch_result = service.fetch_buildings_for_aoi(aoi)
             last_fetch = fetch_result
             if fetch_result.get("status") != "Success":
@@ -415,6 +448,7 @@ async def analyze_area(payload: AnalyzeAreaRequest):
                 "buildings": fetch_result.get("buildings"),
                 "aoi": aoi,
             })
+            metrics["building_source"] = fetch_result.get("source", "osm_overpass")
             if metrics.get("status") == "Success" and int(metrics.get("building_count", 0)) > 0:
                 metrics.update({
                     "aoi": aoi,
