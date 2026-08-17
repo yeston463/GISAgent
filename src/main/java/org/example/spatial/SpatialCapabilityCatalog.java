@@ -25,7 +25,7 @@ import java.util.Set;
 public class SpatialCapabilityCatalog {
     private static final Set<String> APPROVED_TOOLS = Set.of(
             "analyzeCurrentView", "skylineAnalysis", "sunlightAnalysis", "floodAnalysis", "siteSelection",
-            "nearestFacilityDistance");
+            "nearestFacilityDistance", "searchNearbyPoi");
     private final RestTemplate http = new RestTemplate();
     private final DynamicToolStore dynamicToolStore;
     private volatile Snapshot snapshot;

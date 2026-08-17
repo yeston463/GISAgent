@@ -102,6 +102,8 @@ public class AgentLoopService {
     private LlmSpatialRouter llmSpatialRouter;
     @Autowired
     private IntentClassifier intentClassifier;
+    @Autowired
+    private dev.langchain4j.store.memory.chat.ChatMemoryStore chatMemoryStore;
     @Value("${agent.llm-routing.enabled:true}") private boolean llmRoutingEnabled;
 
     private final AgentDecisionParser decisionParser = new AgentDecisionParser();
@@ -138,6 +140,13 @@ public class AgentLoopService {
                     new TaskPlan(Intent.MODEL, Subject.CURRENT_CONTEXT, null), trace, traceListener);
         }
         if (!isSpatialQuestion(userMessage)) {
+            // 多轮延续：上一轮是设施/空间意图（如“寻找最近的商场”），
+            // 本轮是校区/地名补充（如“中国地质大学（北京）”）→ 恢复设施查询，
+            // 避免被当作普通问答（如学校介绍）处理。
+            AgentResult resumed = tryResumeSpatialContinuation(userMessage, userId, memoryId, trace, traceListener);
+            if (resumed != null) {
+                return resumed;
+            }
             return answerGeneralQuestion(userMessage, trace, traceListener);
         }
         if (isCurrentContextPlanningRequest(userMessage)) {
@@ -371,6 +380,59 @@ public class AgentLoopService {
 
     private boolean isSpatialQuestion(String message) {
         return intentClassifier.classify(message) == IntentClassifier.Intent.SPATIAL_ANALYSIS;
+    }
+
+    /**
+     * 多轮延续：上一轮是设施/空间意图且本轮是地名补充时，合并为设施查询执行。
+     * 例：“以中国地质大学为中心寻找最近的商场”（上轮）→“中国地质大学（北京）”（本轮）
+     * 合并为“以中国地质大学（北京）为中心寻找最近的商场”继续 nearby_poi_search。
+     */
+    private AgentResult tryResumeSpatialContinuation(
+            String userMessage, String userId, String memoryId,
+            List<ExecutionTrace> trace, Consumer<ExecutionTrace> listener) {
+        try {
+            List<dev.langchain4j.data.message.ChatMessage> history =
+                    chatMemoryStore == null ? List.of() : chatMemoryStore.getMessages(memoryId);
+            if (history == null || history.isEmpty()) return null;
+            String previous = null;
+            for (int i = history.size() - 1; i >= 0; i--) {
+                if (history.get(i) instanceof dev.langchain4j.data.message.UserMessage u) {
+                    previous = u.singleText();
+                    break;
+                }
+            }
+            if (previous == null || previous.isBlank()) return null;
+            String facility = detectFacilityKeyword(previous);
+            boolean previousSpatial = facility != null
+                    || previous.contains("寻找") || previous.contains("找最近的")
+                    || previous.contains("附近") || previous.contains("周边")
+                    || previous.contains("最近的");
+            if (!previousSpatial) return null;
+            // 本轮必须是地名补充（含地点特征词），排除“好的”“谢谢”等闲聊
+            String location = extractContinuationLocation(userMessage);
+            if (location == null) return null;
+            String combined = "以" + location + "为中心寻找最近的" + (facility == null ? "设施" : facility);
+            addTrace(trace, listener, 1, "resume", "接续上一轮设施查询",
+                    "合并请求：" + combined, "running");
+            return executeGraphPlan("nearby_poi_search", combined, userId, memoryId, trace, listener);
+        } catch (Exception error) {
+            System.out.println("⚠️ 空间意图延续恢复失败: " + error.getMessage());
+            return null;
+        }
+    }
+
+    /** 从澄清回答中提取地名（“中国地质大学（北京）”→“中国地质大学（北京）”）。 */
+    private String extractContinuationLocation(String userMessage) {
+        if (userMessage == null) return null;
+        String text = userMessage.trim()
+                .replaceFirst("^(好的|好的呢|是的|嗯|嗯嗯|对|对的对的|是|就|那|那就|行|可以|好)\\s*[,，。!！?？\\s]*", "")
+                .replaceAll("[。！!?？\\s]+$", "")
+                .trim();
+        if (text.isBlank() || text.length() > 24) return null;
+        if (!text.matches(".*(大学|学院|校区|医院|公园|学校|商场|广场|中心|路|街|区|站|镇|县|市|大厦|小区).*")) {
+            return null;
+        }
+        return text;
     }
 
     private static final List<String> RAINFALL_INTENT_WORDS = List.of(
@@ -874,6 +936,26 @@ public class AgentLoopService {
                 "capability=" + capabilityId + ", tool=" + prepared.plan().tool(), "running");
         JSONObject params = new JSONObject();
         params.putAll(prepared.plan().params());
+        if ("nearby_poi_search".equals(capabilityId)) {
+            // 周边设施查询：位置与关键词由用户消息驱动（工具参数不来自能力图谱数据）
+            String facility = detectFacilityKeyword(userMessage);
+            if (facility != null) params.put("keyword", facility);
+            // 显式提供 city（空串），避免工具参数提取的索引兜底把 keyword 错位到 city
+            params.put("city", "");
+            NearbyPoiPlace place = extractNearbyPoiPlace(userMessage);
+            if (place != null) {
+                params.put("locationName", place.locationName());
+                if (place.radiusMeters() > 0) params.put("radius", (double) place.radiusMeters());
+            } else {
+                addTrace(trace, traceListener, 1, "clarification", "周边设施查询需要位置",
+                        "请指定位置，例如「以清华大学为中心寻找最近的商场」", "waiting");
+                return new AgentResult(null, List.of("指定位置和设施类型"),
+                        "请问在哪个位置附近查找" + (facility == null ? "设施" : facility) + "？\n"
+                                + "例如：「以清华大学为中心寻找最近的" + (facility == null ? "商场" : facility) + "」",
+                        true, null, List.of(), trace,
+                        Map.of("status", "NeedsClarification", "analysisType", "nearby_poi_search"));
+            }
+        }
         if (toolRegistry.isDynamicTool(prepared.plan().tool())) {
             // 动态工具（知识图谱注入的 JS 能力）需要访问当前会话上下文
             // （AOI/建筑/DEM 等），否则其代码只能看到注册时的空快照。
@@ -914,6 +996,9 @@ public class AgentLoopService {
             // 知识图谱注入的动态能力：结果直接作为指标呈现（不套标准指标结构）。
             metrics = result;
             reply = buildDynamicReply(result, displayName);
+        } else if ("nearby_poi_search".equals(capabilityId)) {
+            metrics = result;
+            reply = buildNearbyPoiReply(result, facilityKeyword(params));
         } else {
             reply = "“" + displayName + "”已执行，但未返回标准指标。";
         }
@@ -926,8 +1011,62 @@ public class AgentLoopService {
                 planOutcome("Success", "", capabilityId, List.of(), provenance, compilation));
     }
 
-    private Map<String, Object> planOutcome(
-            String status,
+    private String facilityKeyword(JSONObject params) {
+        Object value = params == null ? null : params.get("keyword");
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private String buildNearbyPoiReply(Map<String, Object> result, String keyword) {
+        if ("nodata".equals(String.valueOf(result.get("status")))) {
+            return String.valueOf(result.getOrDefault("message", "未找到相关设施"));
+        }
+        String query = String.valueOf(result.getOrDefault("query", keyword.isBlank() ? "设施" : keyword));
+        int count = getInt(result, "count", 0);
+        StringBuilder sb = new StringBuilder();
+        Object nearestObj = result.get("nearest");
+        if (nearestObj instanceof Map<?, ?> nearest) {
+            sb.append("以指定位置为中心、半径 ").append(result.getOrDefault("radiusMeters", "3000"))
+              .append(" 米范围内共返回 ").append(count).append(" 个“").append(query).append("”类 POI。\n");
+            sb.append("最近的").append(query).append("：").append(String.valueOf(nearest.get("name")));
+            Object distance = nearest.get("distanceMeters");
+            if (distance != null && !"-1".equals(String.valueOf(distance))) {
+                sb.append("，直线距离约 ").append(distance).append(" 米");
+            }
+            String address = nearest.get("address") == null ? "" : String.valueOf(nearest.get("address"));
+            if (!address.isBlank() && !"null".equals(address)) {
+                sb.append("，位于 ").append(address);
+            }
+            String location = nearest.get("location") == null ? "" : String.valueOf(nearest.get("location"));
+            if (!location.isBlank() && !"null".equals(location)) {
+                sb.append("（坐标约 ").append(location).append("）");
+            }
+            sb.append("。");
+        } else {
+            sb.append("在指定位置周边未定位到“").append(query).append("”结果。");
+            return sb.toString();
+        }
+        Object poisObj = result.get("pois");
+        if (poisObj instanceof List<?> pois && pois.size() > 1) {
+            sb.append("\n其他较近的").append(query).append("：");
+            int show = Math.min(pois.size(), 5);
+            for (int i = 1; i < show; i++) {
+                if (pois.get(i) instanceof Map<?, ?> poi) {
+                    sb.append(String.valueOf(poi.get("name")));
+                    Object distance = poi.get("distanceMeters");
+                    if (distance != null && !"-1".equals(String.valueOf(distance))) {
+                        sb.append("（约 ").append(distance).append(" 米）");
+                    }
+                    sb.append("、");
+                }
+            }
+            if (sb.charAt(sb.length() - 1) == '、') sb.setLength(sb.length() - 1);
+            sb.append("。");
+        }
+        sb.append("\n以上距离为 POI 接口直线距离，未做路网修正；如需驾车/步行可达性可继续分析。");
+        return sb.toString();
+    }
+
+    private Map<String, Object> planOutcome(            String status,
             String code,
             String capabilityId,
             List<String> missingData,
@@ -2450,6 +2589,47 @@ public class AgentLoopService {
     ) {}
 
     private record PlaceAnalysisRequest(String locationName, int radiusMeters) {}
+
+    private record NearbyPoiPlace(String locationName, int radiusMeters) {}
+
+    /** 从“以X为中心找最近的商场”等请求中提取设施关键词。 */
+    private String detectFacilityKeyword(String message) {
+        if (message == null) return null;
+        String[] facilities = {"商场", "超市", "便利店", "医院", "药店", "学校",
+                "银行", "加油站", "菜市场", "公园", "地铁站", "公交站", "餐馆", "饭店"};
+        for (String facility : facilities) {
+            if (message.contains(facility)) return facility;
+        }
+        return null;
+    }
+
+    /** 从“以X为中心”/“X附近/周边”请求中提取位置（半径默认 3000 米）。 */
+    private NearbyPoiPlace extractNearbyPoiPlace(String message) {
+        if (message == null || message.isBlank()) return null;
+        String text = message.trim();
+        String name = null;
+        Matcher center = Pattern.compile("以(.+?)(?:为|作为)?中心").matcher(text);
+        if (center.find()) {
+            name = center.group(1).trim();
+        } else {
+            Matcher near = Pattern.compile("(.+?)(?:附近|周边|周围)").matcher(text);
+            if (near.find()) name = near.group(1).trim();
+        }
+        if (name == null || name.isBlank() || name.contains("当前") || name.contains("这里")) return null;
+        name = name.replaceAll("^[：:，,。.!！?？\\s]+|[：:，,。.!！?？\\s]+$", "");
+        if (name.isBlank()) return null;
+        Matcher radiusMatcher = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(公里|千米|km|米|m)").matcher(text);
+        int radiusMeters = 3000;
+        if (radiusMatcher.find()) {
+            double radius = Double.parseDouble(radiusMatcher.group(1));
+            String unit = radiusMatcher.group(2).toLowerCase();
+            if (unit.contains("公里") || unit.contains("千米") || "km".equals(unit)) {
+                radius *= 1000;
+            }
+            radiusMeters = Math.max(200, Math.min((int) Math.round(radius), 50000));
+        }
+        return new NearbyPoiPlace(name, radiusMeters);
+    }
     private record NavigationRequest(String locationName) {}
 
     private final List<ScenarioStrategy> scenarioStrategies = List.of(

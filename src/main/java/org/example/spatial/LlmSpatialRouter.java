@@ -97,6 +97,7 @@ public class LlmSpatialRouter {
                 Route the requested analysis even when its input data is missing. Do not ask for rainfall, DEM, radius, or other data here; the data validator runs after routing.
                 Select ground_dem when the user asks to obtain, sample, load, or query DEM/elevation from the current map or current AOI. This action needs no analysis radius or metric selection.
                 A request for flood analysis, 洪水分析, 进行洪水分析, 内涝分析, or 淹没分析 must select the catalog ID flood_analysis. A request for skyline or sunlight analysis must select its matching catalog ID.
+                A request to find the nearest or nearby facility (寻找最近的商场/超市/医院/学校/银行/加油站/便利店/药店/餐馆, 附近的设施) must select the catalog ID nearby_poi_search.
                 Requests to generate, publish, download, or view a CityEngine, GeoScene, or SLPK 3D deliverable are not spatial analysis routes. Select none so the dedicated 3D pipeline can handle them.
                 Select discovery only to search external data candidates. Select import_osm only when the user explicitly confirms importing an OSM dataset. Select none for requests unrelated to GIS routing.
                 Catalog capability IDs: %s
@@ -186,7 +187,7 @@ public class LlmSpatialRouter {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("model", deepSeekModel);
             body.put("messages", List.of(
-                    Map.of("role", "system", "content", "Select exactly one GIS route. 洪水分析、进行洪水分析、内涝分析必须选择 kind=analysis and catalog_id=flood_analysis. 获取DEM必须选择 kind=ground_dem and catalog_id=ground_dem. Missing data never changes the selected route."),
+                    Map.of("role", "system", "content", "Select exactly one GIS route. 洪水分析、进行洪水分析、内涝分析必须选择 kind=analysis and catalog_id=flood_analysis. 获取DEM必须选择 kind=ground_dem and catalog_id=ground_dem. 寻找最近的商场/超市/医院/学校/银行/加油站/便利店/药店/餐馆或附近的设施，必须选择 kind=analysis and catalog_id=nearby_poi_search. Missing data never changes the selected route."),
                     Map.of("role", "user", "content", request == null ? "" : request)));
             body.put("thinking", Map.of("type", "disabled"));
             body.put("tools", List.of(tool));

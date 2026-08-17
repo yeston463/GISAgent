@@ -52,6 +52,9 @@ public class IntentClassifier {
             spatial("分析这栋楼冬天挡不挡光"), spatial("大寒日的日照时长够不够"),
             spatial("生成沿街建筑高度轮廓"), spatial("在三个候选点里挑一个建养老院"),
             spatial("哪个地块离学校最近"), spatial("统计候选点到消防站的直线距离"),
+            spatial("寻找最近的商场"), spatial("附近哪里有超市"),
+            spatial("最近的医院在哪里"), spatial("找一下周边的加油站"),
+            spatial("以清华大学为中心寻找最近的便利店"),
             spatial("提取当前范围的地形坡度"), spatial("下载这片区域的建筑物轮廓"),
             spatial("把当前 AOI 发布成三维场景"), spatial("圈一块地做用地适宜性评价"),
             spatial("对清华大学周边1公里做建筑分析"), spatial("分析天安门附近500米的建筑指标"),
@@ -121,9 +124,25 @@ public class IntentClassifier {
         if (hasStrongSpatialKeyword(text) && !hasChatQuestionMarker(text)) {
             return Intent.SPATIAL_ANALYSIS;
         }
+        // 纯未见词（如 hello、乱码、生僻短句）：在语义模型不可用时，
+        // NB 的先验/平滑会让这类短消息漂移到空间类（进而被澄清拦截）。
+        // 没有任何已知证据词的消息按闲聊处理更稳妥。
+        if (!hasAnyKnownToken(tokens)) {
+            return Intent.GENERAL_CHAT;
+        }
         // Default to ordinary chat on ties or weak evidence. GIS actions should
         // need positive classifier evidence before they can reach the planner.
         return spatial > chat + 0.35 ? Intent.SPATIAL_ANALYSIS : Intent.GENERAL_CHAT;
+    }
+
+    private boolean hasAnyKnownToken(List<String> tokens) {
+        for (String token : tokens) {
+            if (tokenCounts.get(Intent.SPATIAL_ANALYSIS).containsKey(token)
+                    || tokenCounts.get(Intent.GENERAL_CHAT).containsKey(token)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static final List<String> STRONG_SPATIAL_KEYWORDS = List.of(

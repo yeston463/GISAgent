@@ -3,16 +3,39 @@
   "capabilities": [
     {
       "id": "urban_metrics",
-      "aliases": ["建筑指标", "容积率", "far", "urban metrics"],
+      "aliases": [
+        "建筑指标",
+        "容积率",
+        "far",
+        "urban metrics"
+      ],
       "enabled": true,
-      "requires": ["aoi", "buildings"],
-      "optional": ["parcel_area", "zoning_rules"],
+      "requires": [
+        "aoi",
+        "buildings"
+      ],
+      "optional": [
+        "parcel_area",
+        "zoning_rules"
+      ],
       "knowledge": {
         "purpose": "在 AOI 范围内计算容积率、建筑密度、建筑覆盖率和高度/层数统计，用于方案比选和现状诊断。",
         "formulas": [
-          {"metric": "FAR", "formula": "建筑总建筑面积 / 用地面积", "unit": "无量纲"},
-          {"metric": "建筑密度", "formula": "建筑基底面积 / 用地面积 × 100%", "unit": "%"},
-          {"metric": "建筑覆盖率", "formula": "建筑基底面积 / 用地面积 × 100%", "unit": "%"}
+          {
+            "metric": "FAR",
+            "formula": "建筑总建筑面积 / 用地面积",
+            "unit": "无量纲"
+          },
+          {
+            "metric": "建筑密度",
+            "formula": "建筑基底面积 / 用地面积 × 100%",
+            "unit": "%"
+          },
+          {
+            "metric": "建筑覆盖率",
+            "formula": "建筑基底面积 / 用地面积 × 100%",
+            "unit": "%"
+          }
         ],
         "qualityGates": [
           "AOI 必须为有效面，建议采用投影坐标系或局部米制面积计算。",
@@ -26,119 +49,368 @@
         ],
         "limitations": "该能力不替代法定测绘、规划条件核验或竣工面积核算；地下建筑面积、架空层、计容规则、分期边界和复杂混合用途需依据当地规范另行校核。"
       },
-      "operations": ["urban_metrics"],
+      "operations": [
+        "urban_metrics"
+      ],
       "tool": "analyzeCurrentView",
-      "outputs": ["metric", "chart"],
-      "rendererKinds": ["metric", "chart"],
+      "outputs": [
+        "metric",
+        "chart"
+      ],
+      "rendererKinds": [
+        "metric",
+        "chart"
+      ],
       "constraints": [
-        {"metric": "FAR", "max": 2.0, "unit": "", "source": "R2用地规范 GB50137"},
-        {"metric": "buildingDensity", "max": 30.0, "unit": "%", "source": "R2用地规范 GB50137"},
-        {"metric": "buildingHeight", "max": 54.0, "unit": "m", "source": "R2用地规范 GB50137"}
+        {
+          "metric": "FAR",
+          "max": 2.0,
+          "unit": "",
+          "source": "R2用地规范 GB50137"
+        },
+        {
+          "metric": "buildingDensity",
+          "max": 30.0,
+          "unit": "%",
+          "source": "R2用地规范 GB50137"
+        },
+        {
+          "metric": "buildingHeight",
+          "max": 54.0,
+          "unit": "m",
+          "source": "R2用地规范 GB50137"
+        }
       ],
       "relations": [
-        {"trigger": "height > 24m", "action": "require", "target": "sunlight_analysis"},
-        {"trigger": "FAR > max", "action": "flag", "target": "violation_over_limit"},
-        {"trigger": "density > max", "action": "flag", "target": "violation_over_density"}
+        {
+          "trigger": "height > 24m",
+          "action": "require",
+          "target": "sunlight_analysis"
+        },
+        {
+          "trigger": "FAR > max",
+          "action": "flag",
+          "target": "violation_over_limit"
+        },
+        {
+          "trigger": "density > max",
+          "action": "flag",
+          "target": "violation_over_density"
+        }
       ]
     },
     {
       "id": "skyline_analysis",
-      "aliases": ["天际线", "skyline"],
+      "aliases": [
+        "天际线",
+        "skyline"
+      ],
       "enabled": true,
-      "requires": ["aoi", "buildings"],
-      "operations": ["directional_height_profile"],
+      "requires": [
+        "aoi",
+        "buildings"
+      ],
+      "operations": [
+        "directional_height_profile"
+      ],
       "tool": "skylineAnalysis",
-      "outputs": ["chart", "metric"],
-      "rendererKinds": ["chart", "metric"],
+      "outputs": [
+        "chart",
+        "metric"
+      ],
+      "rendererKinds": [
+        "chart",
+        "metric"
+      ],
       "constraints": [
-        {"metric": "maxBuildingHeight", "max": 200.0, "unit": "m", "source": "通用天际线分析上限"}
+        {
+          "metric": "maxBuildingHeight",
+          "max": 200.0,
+          "unit": "m",
+          "source": "通用天际线分析上限"
+        }
       ],
       "relations": [
-        {"trigger": "maxHeight > 100m", "action": "require", "target": "sunlight_analysis"}
+        {
+          "trigger": "maxHeight > 100m",
+          "action": "require",
+          "target": "sunlight_analysis"
+        }
       ]
     },
     {
       "id": "sunlight_analysis",
-      "aliases": ["日照", "阴影", "sunlight", "shadow"],
+      "aliases": [
+        "日照",
+        "阴影",
+        "sunlight",
+        "shadow"
+      ],
       "enabled": true,
-      "requires": ["aoi", "buildings"],
-      "operations": ["solar_position", "shadow_screening"],
+      "requires": [
+        "aoi",
+        "buildings"
+      ],
+      "operations": [
+        "solar_position",
+        "shadow_screening"
+      ],
       "tool": "sunlightAnalysis",
-      "outputs": ["vector", "chart", "metric"],
-      "rendererKinds": ["vector", "chart", "metric"],
+      "outputs": [
+        "vector",
+        "chart",
+        "metric"
+      ],
+      "rendererKinds": [
+        "vector",
+        "chart",
+        "metric"
+      ],
       "constraints": [
-        {"metric": "minSunlightHours", "max": 2.0, "unit": "h", "source": "城市居住区规划设计标准 GB50180"}
+        {
+          "metric": "minSunlightHours",
+          "max": 2.0,
+          "unit": "h",
+          "source": "城市居住区规划设计标准 GB50180"
+        }
       ],
       "relations": [
-        {"trigger": "sunlightHours < min", "action": "flag", "target": "violation_insufficient_sunlight"}
+        {
+          "trigger": "sunlightHours < min",
+          "action": "flag",
+          "target": "violation_insufficient_sunlight"
+        }
       ]
     },
     {
       "id": "site_selection",
-      "aliases": ["选址", "站点选址", "设施选址", "适宜性评价", "site selection", "suitability"],
+      "aliases": [
+        "选址",
+        "站点选址",
+        "设施选址",
+        "适宜性评价",
+        "site selection",
+        "suitability"
+      ],
       "enabled": true,
-      "requires": ["candidates"],
-      "optional": ["facilities", "constraints", "weights"],
-      "operations": ["candidate_ranking", "facility_proximity", "constraint_avoidance", "weighted_overlay"],
+      "requires": [
+        "candidates"
+      ],
+      "optional": [
+        "facilities",
+        "constraints",
+        "weights"
+      ],
+      "operations": [
+        "candidate_ranking",
+        "facility_proximity",
+        "constraint_avoidance",
+        "weighted_overlay"
+      ],
       "tool": "siteSelection",
-      "outputs": ["vector", "metric", "table"],
-      "rendererKinds": ["vector", "metric", "table"],
+      "outputs": [
+        "vector",
+        "metric",
+        "table"
+      ],
+      "rendererKinds": [
+        "vector",
+        "metric",
+        "table"
+      ],
       "knowledge": {
         "purpose": "按候选地块与设施、约束要素的直线距离进行透明的多准则选址筛查和排序。",
-        "qualityGates": ["候选地块必须为点或面 GeoJSON。", "设施与约束应来自可追溯的权威数据源。", "权重必须由业务目标明确给定或确认。"],
+        "qualityGates": [
+          "候选地块必须为点或面 GeoJSON。",
+          "设施与约束应来自可追溯的权威数据源。",
+          "权重必须由业务目标明确给定或确认。"
+        ],
         "limitations": "结果仅为直线距离筛查，不包含路网时间、产权、法定用地条件、地形、容量或审批约束；不得作为最终选址结论。"
       },
       "constraints": [],
       "relations": [
-        {"trigger": "candidateCount > 50", "action": "flag", "target": "warning_large_candidate_set"}
+        {
+          "trigger": "candidateCount > 50",
+          "action": "flag",
+          "target": "warning_large_candidate_set"
+        }
       ]
     },
     {
       "id": "flood_analysis",
-      "aliases": ["洪水", "内涝", "淹没", "flood", "inundation"],
+      "aliases": [
+        "洪水",
+        "内涝",
+        "淹没",
+        "flood",
+        "inundation"
+      ],
       "enabled": true,
-      "requires": ["aoi", "dem", "rainfall_scenario"],
-      "optional": ["buildings", "drainage_network", "river_network"],
+      "requires": [
+        "aoi",
+        "dem",
+        "rainfall_scenario"
+      ],
+      "optional": [
+        "buildings",
+        "drainage_network",
+        "river_network"
+      ],
       "dataRequirements": [
         {
           "contextKey": "rainfall_scenario",
           "label": "降雨情景数据",
           "source": "conversation_user_provided",
           "nameTemplate": "{returnPeriodYears}yr-{durationHours}h-{rainfallMm}mm",
-          "revisionTriggers": ["降雨", "降水", "雨量", "rainfall", "precipitation", "改成", "修改", "调整", "变为"],
+          "revisionTriggers": [
+            "降雨",
+            "降水",
+            "雨量",
+            "rainfall",
+            "precipitation",
+            "改成",
+            "修改",
+            "调整",
+            "变为"
+          ],
           "fields": [
-            {"key": "rainfallMm", "label": "雨量", "pattern": "(?i)(\\d+(?:\\.\\d+)?)\\s*(?:mm|毫米)", "type": "number", "example": "30 mm"},
-            {"key": "durationHours", "label": "历时", "pattern": "(?i)(\\d+(?:\\.\\d+)?)\\s*(?:h|hr|hrs|小时)", "type": "number", "example": "24 小时"},
-            {"key": "returnPeriodYears", "label": "重现期", "pattern": "(?i)(\\d+)\\s*(?:年一遇|年重现期|年|year)", "type": "integer", "example": "20 年一遇"}
+            {
+              "key": "rainfallMm",
+              "label": "雨量",
+              "pattern": "(?i)(\\d+(?:\\.\\d+)?)\\s*(?:mm|毫米)",
+              "type": "number",
+              "example": "30 mm"
+            },
+            {
+              "key": "durationHours",
+              "label": "历时",
+              "pattern": "(?i)(\\d+(?:\\.\\d+)?)\\s*(?:h|hr|hrs|小时)",
+              "type": "number",
+              "example": "24 小时"
+            },
+            {
+              "key": "returnPeriodYears",
+              "label": "重现期",
+              "pattern": "(?i)(\\d+)\\s*(?:年一遇|年重现期|年|year)",
+              "type": "integer",
+              "example": "20 年一遇"
+            }
           ]
         }
       ],
-      "operations": ["depression_fill", "d8_flow_direction", "flow_accumulation", "rainfall_runoff_screening", "drainage_proximity_reduction"],
+      "operations": [
+        "depression_fill",
+        "d8_flow_direction",
+        "flow_accumulation",
+        "rainfall_runoff_screening",
+        "drainage_proximity_reduction"
+      ],
       "tool": "floodAnalysis",
-      "outputs": ["vector", "raster", "metric"],
-      "rendererKinds": ["vector", "raster", "metric"],
+      "outputs": [
+        "vector",
+        "raster",
+        "metric"
+      ],
+      "rendererKinds": [
+        "vector",
+        "raster",
+        "metric"
+      ],
       "constraints": [
-        {"max": 500.0, "metric": "rainfallMm", "unit": "mm", "source": "极端降雨情景上限"}
+        {
+          "max": 500.0,
+          "metric": "rainfallMm",
+          "unit": "mm",
+          "source": "极端降雨情景上限"
+        }
       ],
       "relations": [
-        {"trigger": "rainfallMm > 200", "action": "require", "target": "dem_resolution_check"},
-        {"trigger": "rainfallMm > 300", "action": "flag", "target": "warning_extreme_rainfall"}
+        {
+          "trigger": "rainfallMm > 200",
+          "action": "require",
+          "target": "dem_resolution_check"
+        },
+        {
+          "trigger": "rainfallMm > 300",
+          "action": "flag",
+          "target": "warning_extreme_rainfall"
+        }
       ]
     },
     {
       "id": "nearest_facility_distance",
-      "aliases": ["最近设施距离", "设施最近距离", "离哪个设施最近", "nearest facility", "facility distance"],
+      "aliases": [
+        "最近设施距离",
+        "设施最近距离",
+        "离哪个设施最近",
+        "nearest facility",
+        "facility distance"
+      ],
       "enabled": true,
-      "requires": ["candidates", "facilities"],
+      "requires": [
+        "candidates",
+        "facilities"
+      ],
       "optional": [],
       "knowledge": {
-        "purpose": "计算每个候选点或候选面的质心到最近设施点或设施面的直线距离和方位。",
+        "purpose": "当请求已提供多个候选点（如地块、选址点）和设施点图层时，计算每个候选点质心到最近设施点的直线距离和方位。本能力不负责搜索设施，设施点必须由用户提供或由 nearby_poi_search 能力先行获取。",
         "limitations": "仅为质心直线距离筛查，不代表道路网络行驶距离、通行时间、设施容量或服务范围。"
       },
-      "operations": ["nearest_facility_distance"],
+      "operations": [
+        "nearest_facility_distance"
+      ],
       "tool": "nearestFacilityDistance",
-      "outputs": ["vector", "metric", "table"],
-      "rendererKinds": ["vector", "metric", "table"],
+      "outputs": [
+        "vector",
+        "metric",
+        "table"
+      ],
+      "rendererKinds": [
+        "vector",
+        "metric",
+        "table"
+      ],
+      "constraints": [],
+      "relations": []
+    },
+    {
+      "id": "nearby_poi_search",
+      "aliases": [
+        "寻找最近的商场",
+        "最近的商场",
+        "附近哪里有超市",
+        "找最近的医院",
+        "周边的便利店",
+        "附近的餐馆",
+        "POI 查询",
+        "周边设施搜索",
+        "最近的银行在哪里",
+        "附近加油站"
+      ],
+      "enabled": true,
+      "requires": [],
+      "optional": [
+        "locationName",
+        "city",
+        "radius",
+        "keyword"
+      ],
+      "knowledge": {
+        "purpose": "用户询问某个位置附近的设施或最近的 XX（商场、超市、医院、学校、银行、加油站、便利店、餐馆等）时使用本能力：定位该位置后按关键词搜索周边 POI，返回按距离排序的设施列表与最近设施。",
+        "limitations": "POI 来自高德周边搜索（GCJ02 坐标系），距离为直线距离；POI 完整性与商圈数据以高德为准。"
+      },
+      "operations": [
+        "nearby_poi_search"
+      ],
+      "tool": "searchNearbyPoi",
+      "outputs": [
+        "table",
+        "metric"
+      ],
+      "rendererKinds": [
+        "table",
+        "metric"
+      ],
       "constraints": [],
       "relations": []
     }

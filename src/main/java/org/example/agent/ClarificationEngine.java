@@ -13,6 +13,15 @@ public class ClarificationEngine {
         boolean hasLocation = detectLocation(message);
         boolean hasRadius = detectRadius(message);
         boolean hasAnalysisType = detectAnalysisType(message);
+        String facilityType = detectFacility(message);
+
+        // 最近设施类请求（找最近的商场/医院/学校等）：
+        // 有位置即可直接执行（半径有默认值），无位置则针对性追问，
+        // 而不是套用建筑指标的通用澄清文案。
+        if (facilityType != null) {
+            return hasLocation ? null : "请问在哪个位置附近寻找" + facilityType + "？\n" +
+                   "例如：「以清华大学为中心寻找最近的" + facilityType + "」";
+        }
 
         if (!hasLocation && !hasRadius && !hasAnalysisType) {
             return "请问您想分析哪个位置的建筑指标？可以指定位置和分析半径。\n" +
@@ -41,6 +50,17 @@ public class ClarificationEngine {
             if (text.contains(ind)) return true;
         }
         return false;
+    }
+
+    /** 最近设施请求的设施类型（无则返回 null）。 */
+    private String detectFacility(String msg) {
+        if (msg == null) return null;
+        String[] facilities = {"商场", "超市", "便利店", "医院", "药店", "学校",
+            "银行", "加油站", "菜市场", "公园", "地铁站", "公交站", "餐馆", "饭店"};
+        for (String facility : facilities) {
+            if (msg.contains(facility)) return facility;
+        }
+        return null;
     }
 
     private boolean detectRadius(String msg) {

@@ -23,6 +23,21 @@ public class CoordinateTransform {
 		return new double[]{lng * 2 - mglng, lat * 2 - mglat};
 	}
 
+	/**
+	 * WGS84 转换为 GCJ02（高德周边搜索等接口需要 GCJ02 坐标）
+	 */
+	public static double[] wgs84ToGcj02(double lng, double lat) {
+		double dlat = transformLat(lng - 105.0, lat - 35.0);
+		double dlng = transformLng(lng - 105.0, lat - 35.0);
+		double radlat = lat / 180.0 * pi;
+		double magic = Math.sin(radlat);
+		magic = 1 - ee * magic * magic;
+		double sqrtmagic = Math.sqrt(magic);
+		dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi);
+		dlng = (dlng * 180.0) / (a / sqrtmagic * Math.cos(radlat) * pi);
+		return new double[]{lng + dlng, lat + dlat};
+	}
+
 	private static double transformLat(double x, double y) {
 		double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
 		ret += (20.0 * Math.sin(6.0 * x * pi) + 20.0 * Math.sin(2.0 * x * pi)) * 2.0 / 3.0;

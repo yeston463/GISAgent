@@ -91,12 +91,39 @@ public class AgentController {
     @Autowired
     private SpatialRoutingTelemetry spatialRoutingTelemetry;
 
+    @Autowired
+    private dev.langchain4j.store.memory.chat.ChatMemoryStore chatMemoryStore;
+
     @PostMapping("/chat/agentic")
     public ResponseEntity<Map<String, Object>> agenticChat(@RequestBody ChatRequest request) {
         String memoryId = resolveMemoryId(request.memoryId());
         AgentLoopService.AgentResult result = agentLoopService.execute(
                 request.message(), userId(memoryId), memoryId);
+        rememberConversation(memoryId, request.message(), result);
         return ResponseEntity.ok(buildResponse(result, memoryId));
+    }
+
+    /** 记录用户消息与回复到会话记忆（供多轮意图延续与上下文理解）。 */
+    private void rememberConversation(String memoryId, String userMessage, AgentLoopService.AgentResult result) {
+        try {
+            List<dev.langchain4j.data.message.ChatMessage> messages =
+                    new ArrayList<>(chatMemoryStore.getMessages(memoryId));
+            messages.add(dev.langchain4j.data.message.UserMessage.from(
+                    userMessage == null ? "" : userMessage));
+            if (result != null) {
+                String reply = result.reply();
+                if (reply == null || reply.isBlank()) reply = result.clarification();
+                if (reply != null && !reply.isBlank()) {
+                    messages.add(dev.langchain4j.data.message.AiMessage.from(reply));
+                }
+            }
+            if (messages.size() > 20) {
+                messages = new ArrayList<>(messages.subList(messages.size() - 20, messages.size()));
+            }
+            chatMemoryStore.updateMessages(memoryId, messages);
+        } catch (Exception ignored) {
+            // 记忆失败不影响主流程
+        }
     }
 
     @PostMapping("/chat/jobs")

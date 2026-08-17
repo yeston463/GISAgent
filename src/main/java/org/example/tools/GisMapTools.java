@@ -51,6 +51,94 @@ public class GisMapTools {
         return geocodeInternal(locationName, city != null ? city : "");
     }
 
+    @Tool("searchNearbyPoi")
+    public String searchNearbyPoi(
+            @P("locationName") String locationName,
+            @P("city") String city,
+            @P("keyword") String keyword,
+            @P("radius") Double radius) {
+        if (locationName == null || locationName.isBlank()) {
+            return "{\"status\": \"error\", \"message\": \"位置为空\"}";
+        }
+        if (keyword == null || keyword.isBlank()) {
+            return "{\"status\": \"error\", \"message\": \"POI 关键词为空，例如：商场、超市、医院、学校\"}";
+        }
+        if (amapKey == null || amapKey.isBlank()) {
+            return "{\"status\": \"error\", \"message\": \"AMAP_KEY environment variable is not configured\"}";
+        }
+        try {
+            int searchRadius = radius == null || radius <= 0 ? 3000 : Math.min((int) Math.round(radius), 50000);
+            // 1) 定位中心点（复用高德 geocode；结果为 WGS84）
+            String geocodeJson = geocodeInternal(locationName, city);
+            JsonNode geoRoot = objectMapper.readTree(geocodeJson);
+            if (!"success".equalsIgnoreCase(geoRoot.path("status").asText())) {
+                System.out.println("❌ [POI搜索] geocode 失败 locationName=" + locationName
+                        + " city=" + city + " -> " + geocodeJson.substring(0, Math.min(200, geocodeJson.length())));
+                System.out.flush();
+                return geocodeJson;
+            }
+            double wgsLon = geoRoot.path("lon").asDouble(0);
+            double wgsLat = geoRoot.path("lat").asDouble(0);
+            if (wgsLon == 0 && wgsLat == 0) {
+                return "{\"status\": \"error\", \"message\": \"无法解析位置坐标: " + locationName + "\"}";
+            }
+            // 高德周边搜索需要 GCJ02 坐标
+            double[] gcj = CoordinateTransform.wgs84ToGcj02(wgsLon, wgsLat);
+            String center = String.format(Locale.ROOT, "%.6f,%.6f", gcj[0], gcj[1]);
+            System.out.println("📍 [高德周边POI] 中心: " + center + " 关键词: " + keyword + " 半径: " + searchRadius + "m"
+                    + " | geocode: " + geocodeJson.substring(0, Math.min(180, geocodeJson.length())));
+            System.out.flush();
+            // 2) 周边搜索，按距离升序
+            String uri = UriComponentsBuilder.fromHttpUrl("https://restapi.amap.com/v3/place/around")
+                    .queryParam("key", amapKey)
+                    .queryParam("location", center)
+                    .queryParam("radius", searchRadius)
+                    .queryParam("keywords", keyword)
+                    .queryParam("offset", 10)
+                    .queryParam("page", 1)
+                    .queryParam("sortrule", "distance")
+                    .queryParam("extensions", "base")
+                    .build().toUriString();
+            String response = new RestTemplate().getForObject(uri, String.class);
+            JsonNode root = objectMapper.readTree(response);
+            if (!"1".equals(root.path("status").asText())) {
+                return "{\"status\": \"error\", \"message\": \"POI 周边搜索失败: "
+                        + root.path("info").asText("unknown") + "\"}";
+            }
+            JsonNode pois = root.path("pois");
+            if (!pois.isArray() || pois.isEmpty()) {
+                return "{\"status\": \"nodata\", \"message\": \"半径 " + searchRadius
+                        + " 米内未找到“" + keyword + "”相关 POI\"}";
+            }
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("status", "success");
+            result.put("query", keyword);
+            result.put("center", center);
+            result.put("radiusMeters", searchRadius);
+            result.put("count", pois.size());
+            ArrayNode list = result.putArray("pois");
+            JsonNode nearest = null;
+            for (JsonNode poi : pois) {
+                ObjectNode item = list.addObject();
+                String name = poi.path("name").asText("");
+                String location = poi.path("location").asText("");
+                int distance = poi.path("distance").asInt(-1);
+                item.put("name", name);
+                item.put("type", poi.path("type").asText(""));
+                item.put("address", poi.path("address").asText(""));
+                item.put("location", location);
+                item.put("distanceMeters", distance);
+                if (nearest == null) {
+                    nearest = item;
+                }
+            }
+            result.set("nearest", nearest);
+            return result.toString();
+        } catch (Exception error) {
+            return "{\"status\": \"error\", \"message\": \"POI 搜索失败: " + error.getMessage() + "\"}";
+        }
+    }
+
     @Tool("resolveAdministrativeBoundary")
     public String resolveAdministrativeBoundary(@P("locationName") String locationName) {
         if (locationName == null || locationName.isBlank()) {
